@@ -1,8 +1,31 @@
 // PDF multipágina B2B — capa, cabeçalho, passos + identidade Alares
 
-import { BRAND, TOTAL_PDF_PAGES, defaultFormData } from './formularioPdfBranding.js';
+import { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
 
-export { BRAND, TOTAL_PDF_PAGES, defaultFormData } from './formularioPdfBranding.js';
+export { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
+
+/** Estado inicial do formulário (Capa, Cabeçalho, Passo 1) */
+export function defaultFormData() {
+  return {
+    capa: {
+      titulo: '',
+      clienteProjeto: '',
+      data: '',
+      cidade: ''
+    },
+    cabecalho: {
+      numeroReferencia: '',
+      cliente: '',
+      local: ''
+    },
+    passo1: {
+      tituloPasso: 'XXXXX',
+      descricao: '',
+      responsavel: '',
+      data: ''
+    }
+  };
+}
 
 export const PDF_PAGES = [
   { id: 'capa', number: 1, title: 'Capa', formKey: 'capa' },
