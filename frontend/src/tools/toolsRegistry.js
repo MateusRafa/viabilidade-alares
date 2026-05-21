@@ -12,6 +12,7 @@ import AnaliseCobertura from './AnaliseCobertura.svelte';
 import CalculadoraOrcamento from './CalculadoraOrcamento.svelte';
 import MapaConsulta from './MapaConsulta.svelte';
 import DashboardCensup from './DashboardCensup.svelte';
+import FormularioEngenharia from './FormularioEngenharia.svelte';
 
 /**
  * Registry de todas as ferramentas disponíveis no portal
@@ -70,6 +71,15 @@ export const toolsRegistry = [
     icon: '📊',
     color: '#6366F1',
     component: DashboardCensup,
+    available: true
+  },
+  {
+    id: 'formulario-engenharia',
+    title: 'Formulário de Engenharia',
+    description: 'Formulário com prévia em tempo real e geração de PDF no padrão Alares',
+    icon: '📋',
+    color: '#7B68EE',
+    component: FormularioEngenharia,
     available: true
   }
 ];
