@@ -3,7 +3,8 @@
   import {
     defaultFormData,
     buildFullPdfHtml,
-    openPdfPrintWindow
+    openPdfPrintWindow,
+    loadLogoDataUrl
   } from './formularioPdfShared.js';
 
   export let currentUser = '';
@@ -20,9 +21,13 @@
     cabecalho: true,
     passo1: true
   };
+  let logoDataUrl = '';
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-  $: previewHtml = buildFullPdfHtml(formData, {}, { baseUrl: previewBaseUrl });
+  $: previewHtml = buildFullPdfHtml(formData, {}, {
+    baseUrl: previewBaseUrl,
+    logoDataUrl
+  });
 
   function toggleSection(sectionId) {
     expandedSections = {
@@ -35,7 +40,8 @@
     generatingPDF = true;
     pdfError = '';
     const result = openPdfPrintWindow(formData, {
-      baseUrl: typeof window !== 'undefined' ? window.location.origin : ''
+      baseUrl: typeof window !== 'undefined' ? window.location.origin : '',
+      logoDataUrl
     });
     generatingPDF = false;
     if (!result.success) {
@@ -43,12 +49,15 @@
     }
   }
 
-  onMount(() => {
+  onMount(async () => {
     if (onSettingsRequest && typeof onSettingsRequest === 'function') {
       onSettingsRequest(() => {});
     }
     if (onSettingsHover && typeof onSettingsHover === 'function') {
       onSettingsHover(() => {});
+    }
+    if (typeof window !== 'undefined') {
+      logoDataUrl = await loadLogoDataUrl(window.location.origin);
     }
   });
 
