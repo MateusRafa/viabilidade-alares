@@ -94,6 +94,13 @@ function displayValue(value) {
   return text ? escapeHtml(text) : '<span class="empty-value">—</span>';
 }
 
+/** Preserva quebras de linha e parágrafos (espaços em branco do textarea) */
+function displayMultilineValue(value) {
+  const text = (value ?? '').toString();
+  if (!text.trim()) return '<span class="empty-value">—</span>';
+  return escapeHtml(text);
+}
+
 export function getFormattedDateTime() {
   const now = new Date();
   return {
@@ -508,6 +515,11 @@ export const FORMULARIO_PDF_STYLES = `
     font-weight: 500;
     word-break: break-word;
   }
+  .report-info-value-multiline {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.45;
+  }
   .empty-value { color: #aaa; font-style: italic; }
 
   .passo1-imagem-wrap {
@@ -628,13 +640,17 @@ export const FORMULARIO_PDF_STYLES = `
 
 function buildSectionFields(items) {
   return items
-    .map(
-      ({ label, value }) => `
+    .map(({ label, value, multiline }) => {
+      const valueClass = multiline
+        ? 'report-info-value report-info-value-multiline'
+        : 'report-info-value';
+      const valueHtml = multiline ? displayMultilineValue(value) : displayValue(value);
+      return `
       <div class="report-info-item">
         <span class="report-info-label">${escapeHtml(label)}</span>
-        <span class="report-info-value">${displayValue(value)}</span>
-      </div>`
-    )
+        <span class="${valueClass}">${valueHtml}</span>
+      </div>`;
+    })
     .join('');
 }
 
@@ -750,7 +766,9 @@ function buildPagePasso1(formData, options = {}) {
           <h2 class="page-title">Passo 1° — ${escapeHtml(tituloPasso)}</h2>
           <div class="page-content">
             <div class="report-info">
-              ${buildSectionFields([{ label: 'Descrição', value: formData.passo1.descricao }])}
+              ${buildSectionFields([
+                { label: 'Descrição', value: formData.passo1.descricao, multiline: true }
+              ])}
               ${buildPasso1ImageBlock(formData.passo1)}
             </div>
           </div>
