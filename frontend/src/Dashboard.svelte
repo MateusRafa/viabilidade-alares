@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { getAvailableTools } from './tools/toolsRegistry.js';
+  import { getAvailableTools, mergePermissionsWithRegistry } from './tools/toolsRegistry.js';
   import { getApiUrl } from './config.js';
   import Config from './Config.svelte';
   
@@ -19,28 +19,13 @@
   let permissionsLoaded = false; // Flag para indicar se permissões foram carregadas
   let loadingPermissions = true; // Flag para indicar que está carregando permissões
   
-  // Lista de ferramentas disponíveis (vem do registry)
-  // IMPORTANTE: Só mostrar ferramentas se tiver permissão EXPLICITAMENTE habilitada (true)
-  // Se não há permissões carregadas ainda, não mostrar nada (aguardar carregamento)
-  $: tools = permissionsLoaded 
-    ? getAvailableTools().filter(tool => {
-        // Admin vê todas as ferramentas do registry
-        if (userTipo === 'admin') {
-          return true;
-        }
-        const hasSavedPermissions = Object.keys(userToolPermissions).length > 0;
-        // Sem permissões salvas: não exibir (aguarda configuração pelo admin)
-        if (!hasSavedPermissions) {
-          return false;
-        }
-        // Ferramenta desabilitada explicitamente
-        if (userToolPermissions[tool.id] === false) {
-          return false;
-        }
-        // Habilitada explicitamente ou nova no registry (ainda sem chave salva)
-        return userToolPermissions[tool.id] === true || userToolPermissions[tool.id] === undefined;
+  // Lista de ferramentas do registry filtrada por permissão (false = oculta)
+  $: tools = permissionsLoaded
+    ? getAvailableTools().filter((tool) => {
+        if (userTipo === 'admin') return true;
+        return userToolPermissions[tool.id] !== false;
       })
-    : []; // Enquanto não carregar permissões, não mostrar ferramentas
+    : [];
   
   // Função para carregar permissões de ferramentas do usuário atual
   async function loadUserToolPermissions() {
@@ -63,22 +48,20 @@
       
       if (response.ok) {
         const data = await response.json();
-        if (data.success && data.permissions) {
-          userToolPermissions = data.permissions;
+        if (data.success) {
+          userToolPermissions = mergePermissionsWithRegistry(data.permissions || {});
           console.log('✅ [Dashboard] Permissões carregadas:', userToolPermissions);
         } else {
-          // Se não há permissões salvas, inicializar como objeto vazio
-          userToolPermissions = {};
-          console.log('ℹ️ [Dashboard] Nenhuma permissão específica encontrada, usando padrão');
+          userToolPermissions = mergePermissionsWithRegistry({});
+          console.log('ℹ️ [Dashboard] Nenhuma permissão específica encontrada, usando padrão do registry');
         }
       } else {
         console.warn('⚠️ [Dashboard] Erro ao carregar permissões (status:', response.status, ')');
-        userToolPermissions = {};
+        userToolPermissions = mergePermissionsWithRegistry({});
       }
     } catch (err) {
       console.error('❌ [Dashboard] Erro ao carregar permissões de ferramentas:', err);
-      // Em caso de erro, não permitir acesso a nenhuma ferramenta (segurança)
-      userToolPermissions = {};
+      userToolPermissions = mergePermissionsWithRegistry({});
     } finally {
       loadingPermissions = false;
       permissionsLoaded = true;
