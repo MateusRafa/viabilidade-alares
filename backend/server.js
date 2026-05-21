@@ -5411,8 +5411,8 @@ app.put('/api/projetistas/:nome/role', requireAdmin, async (req, res) => {
   }
 });
 
-// IDs de todas as ferramentas do portal (manter sincronizado com toolsRegistry.js)
-const PORTAL_TOOL_IDS = [
+// IDs das ferramentas — fonte: /shared/portal-tools.json
+let PORTAL_TOOL_IDS = [
   'viabilidade-alares',
   'analise-cobertura',
   'calculadora-orcamento',
@@ -5420,6 +5420,18 @@ const PORTAL_TOOL_IDS = [
   'dashboard-censup',
   'formulario-engenharia'
 ];
+
+try {
+  const portalToolsPath = path.join(__dirname, 'portal-tools.json');
+  const portalToolsRaw = fs.readFileSync(portalToolsPath, 'utf8');
+  const portalToolsList = JSON.parse(portalToolsRaw);
+  if (Array.isArray(portalToolsList) && portalToolsList.length > 0) {
+    PORTAL_TOOL_IDS = portalToolsList.map((t) => t.id).filter(Boolean);
+    console.log(`✅ [Portal] ${PORTAL_TOOL_IDS.length} ferramentas carregadas de portal-tools.json`);
+  }
+} catch (portalToolsErr) {
+  console.warn('⚠️ [Portal] Usando lista padrão de ferramentas:', portalToolsErr.message);
+}
 
 function mergePortalToolPermissions(permissions = {}) {
   const merged = { ...(permissions || {}) };
@@ -5429,6 +5441,15 @@ function mergePortalToolPermissions(permissions = {}) {
     }
   });
   return merged;
+}
+
+function buildPortalPermissionsPayload(permissions = {}) {
+  const merged = mergePortalToolPermissions(permissions);
+  const payload = {};
+  PORTAL_TOOL_IDS.forEach((toolId) => {
+    payload[toolId] = merged[toolId] === true;
+  });
+  return payload;
 }
 
 // Endpoint para obter permissões de ferramentas de um projetista
@@ -5534,6 +5555,8 @@ app.put('/api/projetistas/:nome/permissions', requireAdmin, async (req, res) => 
     if (!permissions || typeof permissions !== 'object') {
       return res.status(400).json({ success: false, error: 'Permissões inválidas' });
     }
+
+    const permissionsToSave = buildPortalPermissionsPayload(permissions);
     
     // Garantir headers CORS
     const origin = req.headers.origin;
@@ -5561,7 +5584,7 @@ app.put('/api/projetistas/:nome/permissions', requireAdmin, async (req, res) => 
         // Atualizar permissões (salvar como JSON string)
         const { error } = await supabase
           .from('projetistas')
-          .update({ permissoes_ferramentas: JSON.stringify(permissions) })
+          .update({ permissoes_ferramentas: JSON.stringify(permissionsToSave) })
           .ilike('nome', nomeDecoded);
         
         if (error) {
@@ -5573,7 +5596,7 @@ app.put('/api/projetistas/:nome/permissions', requireAdmin, async (req, res) => 
         return res.json({ 
           success: true, 
           message: 'Permissões de ferramentas atualizadas com sucesso',
-          permissions: permissions
+          permissions: permissionsToSave
         });
       } catch (supabaseErr) {
         console.error('❌ [Supabase] Erro ao salvar permissões, usando fallback:', supabaseErr);
@@ -5587,7 +5610,7 @@ app.put('/api/projetistas/:nome/permissions', requireAdmin, async (req, res) => 
     res.json({ 
       success: true, 
       message: 'Permissões de ferramentas atualizadas com sucesso',
-      permissions: permissions
+      permissions: permissionsToSave
     });
   } catch (err) {
     console.error('❌ Erro ao salvar permissões:', err);
