@@ -173,6 +173,16 @@ function buildInnerPageFooter(pageNum) {
   `;
 }
 
+/** Rodapé da página 2 — texto como na capa + só "Página 2" */
+function buildCabecalhoPageFooter() {
+  return `
+    <footer class="cabecalho-page-footer">
+      <p class="capa-rodape">${escapeHtml(BRAND.rodape)}</p>
+      <span class="cabecalho-page-num">Página 2</span>
+    </footer>
+  `;
+}
+
 /** CSS — documento B2B */
 export const FORMULARIO_PDF_STYLES = `
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -314,6 +324,25 @@ export const FORMULARIO_PDF_STYLES = `
   .page-body-cabecalho {
     flex: 1;
     padding: 0;
+  }
+  .cabecalho-page-footer {
+    position: relative;
+    z-index: 2;
+    margin-top: auto;
+    padding-top: 6mm;
+  }
+  .cabecalho-page-footer .capa-rodape {
+    margin-top: 0;
+    padding-top: 0;
+  }
+  .cabecalho-page-num {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    font-size: 9.5pt;
+    font-weight: 600;
+    color: ${BRAND.cores.secundaria};
+    letter-spacing: 0.02em;
   }
 
   /* —— Cabeçalho / rodapé páginas internas —— */
@@ -610,7 +639,7 @@ function buildPageCabecalho(formData, options = {}) {
             </div>
           </div>
         </div>
-        ${buildInnerPageFooter(2)}
+        ${buildCabecalhoPageFooter()}
       </div>
     </div>
   `;
