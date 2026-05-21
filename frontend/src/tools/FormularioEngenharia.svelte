@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import {
     defaultFormData,
+    CABECALHO_FIELDS,
     buildFullPdfHtml,
     openPdfPrintWindow,
     loadLogoDataUrl,
@@ -142,19 +143,25 @@
             <span class="chevron" class:open={expandedSections.cabecalho}>▼</span>
           </button>
           {#if expandedSections.cabecalho}
-            <div class="form-box-body">
-              <label class="field">
-                <span>Número de referência</span>
-                <input type="text" bind:value={formData.cabecalho.numeroReferencia} placeholder="Nº de referência" />
-              </label>
-              <label class="field">
-                <span>Cliente</span>
-                <input type="text" bind:value={formData.cabecalho.cliente} placeholder="Nome do cliente" />
-              </label>
-              <label class="field">
-                <span>Local</span>
-                <input type="text" bind:value={formData.cabecalho.local} placeholder="Cidade / endereço" />
-              </label>
+            <div class="form-box-body form-box-body-cabecalho">
+              {#each CABECALHO_FIELDS as field (field.key)}
+                <label class="field">
+                  <span>{field.label}</span>
+                  {#if field.multiline}
+                    <textarea
+                      rows="3"
+                      bind:value={formData.cabecalho[field.key]}
+                      placeholder={field.placeholder}
+                    ></textarea>
+                  {:else}
+                    <input
+                      type="text"
+                      bind:value={formData.cabecalho[field.key]}
+                      placeholder={field.placeholder}
+                    />
+                  {/if}
+                </label>
+              {/each}
             </div>
           {/if}
         </section>
