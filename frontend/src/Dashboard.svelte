@@ -24,13 +24,21 @@
   // Se não há permissões carregadas ainda, não mostrar nada (aguardar carregamento)
   $: tools = permissionsLoaded 
     ? getAvailableTools().filter(tool => {
-        // Se é admin, mostrar todas as ferramentas
+        // Admin vê todas as ferramentas do registry
         if (userTipo === 'admin') {
           return true;
         }
-        // Se não há permissões definidas para esta ferramenta, considerar como não permitida
-        // Só mostrar se estiver EXPLICITAMENTE habilitada (true)
-        return userToolPermissions[tool.id] === true;
+        const hasSavedPermissions = Object.keys(userToolPermissions).length > 0;
+        // Sem permissões salvas: não exibir (aguarda configuração pelo admin)
+        if (!hasSavedPermissions) {
+          return false;
+        }
+        // Ferramenta desabilitada explicitamente
+        if (userToolPermissions[tool.id] === false) {
+          return false;
+        }
+        // Habilitada explicitamente ou nova no registry (ainda sem chave salva)
+        return userToolPermissions[tool.id] === true || userToolPermissions[tool.id] === undefined;
       })
     : []; // Enquanto não carregar permissões, não mostrar ferramentas
   
