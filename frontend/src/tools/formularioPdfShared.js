@@ -1028,22 +1028,20 @@ export function openPdfPrintWindow(formData, options = {}) {
     options.fileName ||
     `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
 
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const blobUrl = URL.createObjectURL(blob);
-  const printWindow = window.open(blobUrl, '_blank', 'noopener,noreferrer');
+  // Abre janela vazia no clique (menos bloqueio que blob: em pop-up) e injeta o HTML em seguida
+  const printWindow = window.open('', '_blank');
 
-  if (!printWindow) {
-    URL.revokeObjectURL(blobUrl);
+  if (!printWindow || !printWindow.document) {
     return { success: false, error: 'popup_blocked' };
   }
 
+  printWindow.document.open();
+  printWindow.document.write(html);
+  printWindow.document.close();
   printWindow.document.title = fileName.replace('.pdf', '');
 
   const runPrint = async () => {
-    if (printWindow.closed) {
-      URL.revokeObjectURL(blobUrl);
-      return;
-    }
+    if (printWindow.closed) return;
     try {
       if (printWindow.document?.body) {
         await waitForPrintImages(printWindow.document);
@@ -1052,15 +1050,13 @@ export function openPdfPrintWindow(formData, options = {}) {
       printWindow.print();
     } catch (err) {
       console.error('Erro ao imprimir PDF:', err);
-    } finally {
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
     }
   };
 
-  if (printWindow.document?.readyState === 'complete') {
+  if (printWindow.document.readyState === 'complete') {
     setTimeout(runPrint, 500);
   } else {
-    printWindow.addEventListener('load', () => setTimeout(runPrint, 500), { once: true });
+    printWindow.onload = () => setTimeout(runPrint, 500);
   }
 
   return {
