@@ -4,7 +4,7 @@
     defaultFormData,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
-    openPdfPrintWindow,
+    printEngineeringPdf,
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
     sanitizeRichHtml
@@ -28,6 +28,7 @@
   let capaOndasDataUrl = '';
   let assetsReady = false;
   let passo1ImageInput;
+  let previewIframeEl;
   /** Box de imagem selecionado (1 clique) — Ctrl+V é capturado na janela */
   let passo1ImagePasteArmed = false;
   let descricaoEditorEl;
@@ -234,19 +235,26 @@
   }
 
   const PDF_PRINT_HINT =
-    'Na impressão: destino "Salvar como PDF", margens "Nenhuma" e desmarque "Cabeçalhos e rodapés" do navegador.';
+    'Na impressão: destino "Salvar como PDF", margens "Padrão" (ou "Nenhuma") e desmarque "Cabeçalhos e rodapés" do navegador.';
 
-  function handleGeneratePdf() {
+  async function handleGeneratePdf() {
+    if (!assetsReady) {
+      pdfError = 'Aguarde o carregamento das imagens da capa antes de gerar o PDF.';
+      return;
+    }
     generatingPDF = true;
     pdfError = '';
-    const result = openPdfPrintWindow(formData, {
-      baseUrl: typeof window !== 'undefined' ? window.location.origin : '',
-      logoDataUrl,
-      capaOndasDataUrl
+    await tick();
+    const fileName = `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
+    const result = await printEngineeringPdf(previewIframeEl, previewHtml, {
+      title: fileName.replace('.pdf', '')
     });
     generatingPDF = false;
     if (!result.success) {
-      pdfError = 'Não foi possível abrir a janela de impressão. Verifique se o bloqueador de pop-ups está desativado.';
+      pdfError =
+        result.error === 'popup_blocked'
+          ? 'Não foi possível abrir a impressão. Verifique se o bloqueador de pop-ups está desativado.'
+          : 'Não foi possível abrir a impressão. Tente novamente.';
     }
   }
 
@@ -469,7 +477,7 @@
           type="button"
           class="btn-generate-pdf"
           on:click={handleGeneratePdf}
-          disabled={generatingPDF}
+          disabled={generatingPDF || !assetsReady}
         >
           {generatingPDF ? 'Abrindo impressão...' : 'Gerar PDF'}
         </button>
@@ -487,11 +495,12 @@
           <p class="preview-loading">Carregando imagens da capa…</p>
         {/if}
         <iframe
+          bind:this={previewIframeEl}
           title="Prévia do PDF"
           class="pdf-preview-iframe"
           class:hidden-until-ready={!assetsReady}
           srcdoc={previewHtml}
-          sandbox="allow-same-origin"
+          sandbox="allow-same-origin allow-modals"
           tabindex="-1"
         ></iframe>
       </div>
