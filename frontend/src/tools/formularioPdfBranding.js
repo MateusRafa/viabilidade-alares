@@ -6,7 +6,9 @@ export const BRAND = {
   marcaAgua: 'ALARES',
   subtituloMarca: 'Engenharia de Redes',
   avisoConfidencial: 'Documento técnico • Uso restrito ao cliente',
-  logoPath: '/images/alares-logo.png',
+  logoPath: '/images/Imagem1.svg',
+  logoPathPngFallback: '/images/alares-logo.png',
+  capaOndasPath: '/images/Imagem2.svg',
   cores: {
     primaria: '#1a4a7a',
     secundaria: '#8a9bb5',
