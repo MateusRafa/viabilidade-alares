@@ -1,12 +1,13 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import {
     defaultFormData,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
     openPdfPrintWindow,
     loadLogoDataUrl,
-    loadCapaOndasDataUrl
+    loadCapaOndasDataUrl,
+    sanitizeRichHtml
   } from './formularioPdfShared.js';
 
   export let currentUser = '';
@@ -29,6 +30,8 @@
   let passo1ImageInput;
   /** Box de imagem selecionado (1 clique) — Ctrl+V é capturado na janela */
   let passo1ImagePasteArmed = false;
+  let descricaoEditorEl;
+  let descricaoEditorReady = false;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: previewHtml = buildFullPdfHtml(formData, {}, {
@@ -177,6 +180,46 @@
 
   function disarmPasso1ImagePaste() {
     passo1ImagePasteArmed = false;
+  }
+
+  function syncDescricaoEditor() {
+    if (!descricaoEditorEl) return;
+    const html = sanitizeRichHtml(descricaoEditorEl.innerHTML);
+    if (html !== formData.passo1.descricao) {
+      formData = {
+        ...formData,
+        passo1: { ...formData.passo1, descricao: html }
+      };
+    }
+  }
+
+  function handleDescricaoPaste(event) {
+    event.preventDefault();
+    const dt = event.clipboardData;
+    if (!dt) return;
+
+    const html = dt.getData('text/html');
+    const plain = dt.getData('text/plain');
+
+    if (html?.trim()) {
+      document.execCommand('insertHTML', false, sanitizeRichHtml(html));
+    } else if (plain != null) {
+      document.execCommand('insertText', false, plain);
+    }
+    syncDescricaoEditor();
+  }
+
+  async function initDescricaoEditor() {
+    if (!descricaoEditorEl) return;
+    const html = formData.passo1.descricao || '';
+    if (!descricaoEditorReady || descricaoEditorEl.innerHTML !== html) {
+      descricaoEditorEl.innerHTML = html;
+      descricaoEditorReady = true;
+    }
+  }
+
+  $: if (expandedSections.passo1) {
+    tick().then(initDescricaoEditor);
   }
 
   function clearPasso1Image() {
@@ -349,11 +392,17 @@
               </label>
               <label class="field">
                 <span>Descrição</span>
-                <textarea
-                  rows="4"
-                  bind:value={formData.passo1.descricao}
-                  placeholder="Descrição do passo"
-                ></textarea>
+                <div
+                  bind:this={descricaoEditorEl}
+                  class="rich-editor"
+                  contenteditable="true"
+                  role="textbox"
+                  aria-multiline="true"
+                  data-placeholder="Descrição do passo (suporta negrito e formatação ao colar)"
+                  on:input={syncDescricaoEditor}
+                  on:paste={handleDescricaoPaste}
+                  on:blur={syncDescricaoEditor}
+                ></div>
               </label>
               <div class="field field-upload">
                 <span>Imagem</span>
@@ -602,10 +651,37 @@
   }
 
   .field input:focus,
-  .field textarea:focus {
+  .field textarea:focus,
+  .rich-editor:focus {
     outline: none;
     border-color: #7b68ee;
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
+  }
+
+  .rich-editor {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    min-height: 100px;
+    max-height: 220px;
+    overflow-y: auto;
+    box-sizing: border-box;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    color: #1f2937;
+    background: white;
+    line-height: 1.45;
+    word-break: break-word;
+  }
+
+  .rich-editor:empty::before {
+    content: attr(data-placeholder);
+    color: #9ca3af;
+    pointer-events: none;
   }
 
   .field-upload   .upload-box {
