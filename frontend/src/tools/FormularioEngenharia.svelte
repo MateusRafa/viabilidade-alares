@@ -233,6 +233,9 @@
     };
   }
 
+  const PDF_PRINT_HINT =
+    'Na impressão: destino "Salvar como PDF", margens "Nenhuma" e desmarque "Cabeçalhos e rodapés" do navegador.';
+
   function handleGeneratePdf() {
     generatingPDF = true;
     pdfError = '';
@@ -461,6 +464,7 @@
         {#if pdfError}
           <p class="pdf-error" role="alert">{pdfError}</p>
         {/if}
+        <p class="pdf-print-hint">{PDF_PRINT_HINT}</p>
         <button
           type="button"
           class="btn-generate-pdf"
@@ -832,6 +836,13 @@
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
     color: #b91c1c;
+  }
+
+  .pdf-print-hint {
+    margin: 0 0 0.65rem;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: #64748b;
   }
 
   .preview-column {
