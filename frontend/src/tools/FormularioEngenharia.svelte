@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { defaultFormData } from './formularioPdfBranding.js';
   import {
+    defaultFormData,
     buildFullPdfHtml,
     openPdfPrintWindow,
     loadLogoDataUrl,
