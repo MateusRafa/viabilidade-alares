@@ -21,7 +21,8 @@
     passo1: true
   };
 
-  $: previewHtml = buildFullPdfHtml(formData);
+  $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
+  $: previewHtml = buildFullPdfHtml(formData, {}, { baseUrl: previewBaseUrl });
 
   function toggleSection(sectionId) {
     expandedSections = {
@@ -33,7 +34,9 @@
   function handleGeneratePdf() {
     generatingPDF = true;
     pdfError = '';
-    const result = openPdfPrintWindow(formData);
+    const result = openPdfPrintWindow(formData, {
+      baseUrl: typeof window !== 'undefined' ? window.location.origin : ''
+    });
     generatingPDF = false;
     if (!result.success) {
       pdfError = 'Não foi possível abrir a janela de impressão. Verifique se o bloqueador de pop-ups está desativado.';
@@ -72,15 +75,35 @@
             <div class="form-box-body">
               <label class="field">
                 <span>Título</span>
-                <input type="text" bind:value={formData.capa.titulo} placeholder="Título do documento" />
+                <input
+                  type="text"
+                  bind:value={formData.capa.titulo}
+                  placeholder="Ex: Planejamento e Engenharia de Redes FTTx"
+                />
               </label>
               <label class="field">
-                <span>Subtítulo</span>
-                <input type="text" bind:value={formData.capa.subtitulo} placeholder="Subtítulo" />
+                <span>Cliente / Projeto</span>
+                <input
+                  type="text"
+                  bind:value={formData.capa.clienteProjeto}
+                  placeholder="Ex: SICRED CAMBARÁ (ENGT-46557)"
+                />
               </label>
               <label class="field">
-                <span>Versão</span>
-                <input type="text" bind:value={formData.capa.versao} placeholder="Ex: 1.0" />
+                <span>Data</span>
+                <input
+                  type="text"
+                  bind:value={formData.capa.data}
+                  placeholder="Ex: 04 de Fevereiro - 2026"
+                />
+              </label>
+              <label class="field">
+                <span>Cidade</span>
+                <input
+                  type="text"
+                  bind:value={formData.capa.cidade}
+                  placeholder="Ex: Cambará – PR"
+                />
               </label>
             </div>
           {/if}
