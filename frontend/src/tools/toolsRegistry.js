@@ -85,6 +85,20 @@ export const toolsRegistry = [
 ];
 
 /**
+ * Mescla permissões salvas com todas as ferramentas do registry.
+ * Ferramentas novas (sem chave salva) ficam habilitadas por padrão.
+ */
+export function mergePermissionsWithRegistry(permissions = {}) {
+  const merged = { ...(permissions || {}) };
+  toolsRegistry.forEach((tool) => {
+    if (merged[tool.id] === undefined) {
+      merged[tool.id] = true;
+    }
+  });
+  return merged;
+}
+
+/**
  * Busca uma ferramenta pelo ID
  * @param {string} toolId - ID da ferramenta
  * @returns {object|null} - Objeto da ferramenta ou null se não encontrada
