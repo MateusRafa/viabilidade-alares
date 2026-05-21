@@ -26,6 +26,7 @@
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
   let assetsReady = false;
+  let passo1ImageInput;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: previewHtml = buildFullPdfHtml(formData, {}, {
@@ -84,6 +85,13 @@
     if (!file) return;
     applyPasso1ImageFile(file);
     event.currentTarget.value = '';
+  }
+
+  function handleUploadBoxDblClick(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    pdfError = '';
+    passo1ImageInput?.click();
   }
 
   function handlePasso1ImagePaste(event) {
@@ -268,22 +276,27 @@
               </label>
               <div class="field field-upload">
                 <span>Imagem</span>
+                <input
+                  bind:this={passo1ImageInput}
+                  type="file"
+                  class="file-input-hidden"
+                  accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
+                  on:change={handlePasso1ImageChange}
+                  tabindex="-1"
+                  aria-hidden="true"
+                />
                 <div
                   class="upload-box"
                   tabindex="0"
                   role="group"
-                  aria-label="Imagem do passo 1. Clique para enviar ou cole com Ctrl+V."
+                  aria-label="Imagem do passo 1. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
                   on:paste={handlePasso1ImagePaste}
+                  on:dblclick={handleUploadBoxDblClick}
                 >
-                  <label class="upload-trigger">
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
-                      on:change={handlePasso1ImageChange}
-                    />
-                    <span class="upload-trigger-text">Clique para enviar ou cole a imagem (Ctrl+V)</span>
-                    <span class="upload-trigger-hint">PNG, JPG, WEBP ou SVG — até {MAX_PASSO1_IMAGE_MB} MB</span>
-                  </label>
+                  <div class="upload-trigger">
+                    <span class="upload-trigger-text">1 clique: selecionar o box e colar (Ctrl+V)</span>
+                    <span class="upload-trigger-hint">2 cliques seguidos: escolher imagem no computador — até {MAX_PASSO1_IMAGE_MB} MB</span>
+                  </div>
                   {#if formData.passo1.imagemDataUrl}
                     <div class="upload-preview-wrap">
                       <img
@@ -294,7 +307,11 @@
                       {#if formData.passo1.imagemNome}
                         <p class="upload-filename">{formData.passo1.imagemNome}</p>
                       {/if}
-                      <button type="button" class="btn-remove-image" on:click={clearPasso1Image}>
+                      <button
+                        type="button"
+                        class="btn-remove-image"
+                        on:click|stopPropagation={clearPasso1Image}
+                      >
                         Remover imagem
                       </button>
                     </div>
@@ -521,6 +538,24 @@
     border-radius: 8px;
   }
 
+  .upload-box:focus-visible .upload-trigger,
+  .upload-box:focus .upload-trigger {
+    border-color: #7b68ee;
+    background: #f5f3ff;
+  }
+
+  .file-input-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   .upload-trigger {
     display: flex;
     flex-direction: column;
@@ -543,15 +578,6 @@
   .upload-trigger:hover {
     border-color: #7b68ee;
     background: #f5f3ff;
-  }
-
-  .upload-trigger input[type='file'] {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    opacity: 0;
-    cursor: pointer;
   }
 
   .upload-trigger-text {
