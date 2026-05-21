@@ -4,7 +4,8 @@
   import {
     buildFullPdfHtml,
     openPdfPrintWindow,
-    loadLogoDataUrl
+    loadLogoDataUrl,
+    loadCapaOndasDataUrl
   } from './formularioPdfShared.js';
 
   export let currentUser = '';
@@ -22,11 +23,14 @@
     passo1: true
   };
   let logoDataUrl = '';
+  let capaOndasDataUrl = '';
+  let assetsReady = false;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: previewHtml = buildFullPdfHtml(formData, {}, {
     baseUrl: previewBaseUrl,
-    logoDataUrl
+    logoDataUrl,
+    capaOndasDataUrl
   });
 
   function toggleSection(sectionId) {
@@ -41,7 +45,8 @@
     pdfError = '';
     const result = openPdfPrintWindow(formData, {
       baseUrl: typeof window !== 'undefined' ? window.location.origin : '',
-      logoDataUrl
+      logoDataUrl,
+      capaOndasDataUrl
     });
     generatingPDF = false;
     if (!result.success) {
@@ -57,7 +62,14 @@
       onSettingsHover(() => {});
     }
     if (typeof window !== 'undefined') {
-      logoDataUrl = await loadLogoDataUrl(window.location.origin);
+      const origin = window.location.origin;
+      const [logo, ondas] = await Promise.all([
+        loadLogoDataUrl(origin),
+        loadCapaOndasDataUrl(origin)
+      ]);
+      logoDataUrl = logo;
+      capaOndasDataUrl = ondas;
+      assetsReady = true;
     }
   });
 
@@ -207,9 +219,13 @@
         <span class="preview-hint">3 páginas (Capa · Cabeçalho · Passo 1) — atualiza em tempo real</span>
       </div>
       <div class="preview-frame-wrapper">
+        {#if !assetsReady}
+          <p class="preview-loading">Carregando imagens da capa…</p>
+        {/if}
         <iframe
           title="Prévia do PDF"
           class="pdf-preview-iframe"
+          class:hidden-until-ready={!assetsReady}
           srcdoc={previewHtml}
           sandbox="allow-same-origin"
         ></iframe>
@@ -401,8 +417,25 @@
     padding: 1rem;
     overflow: auto;
     display: flex;
+    flex-direction: column;
     justify-content: center;
-    align-items: flex-start;
+    align-items: center;
+    position: relative;
+  }
+
+  .preview-loading {
+    margin: 0 0 0.75rem;
+    font-size: 0.875rem;
+    color: #6b7280;
+  }
+
+  .pdf-preview-iframe.hidden-until-ready {
+    visibility: hidden;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
   }
 
   .pdf-preview-iframe {
