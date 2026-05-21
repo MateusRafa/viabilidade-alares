@@ -4,6 +4,48 @@ import { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
 
 export { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
 
+/** Campos da página 2 — ordem fixa do documento */
+export const CABECALHO_FIELDS = [
+  { key: 'operacao', label: 'Operação', placeholder: 'Ex: Alares' },
+  { key: 'objetivo', label: 'Objetivo', placeholder: 'Ex: 200MBS PTP' },
+  { key: 'cliente', label: 'Cliente', placeholder: 'Ex: Sicred Cambará' },
+  { key: 'endereco', label: 'Endereço', placeholder: 'Rua, número, bairro, cidade - UF, CEP' },
+  {
+    key: 'coordenadaAbordagem',
+    label: 'Coordenada do ponto de abordagem (cliente)',
+    placeholder: 'Ex: -23.041665, -50.073588'
+  },
+  { key: 'projetista', label: 'Projetista', placeholder: 'Nome do projetista' },
+  {
+    key: 'supervisorPlanejamento',
+    label: 'Supervisor Planejamento e Engenharia de Redes FTTx',
+    placeholder: 'Nome do supervisor'
+  },
+  { key: 'contatoConsultor', label: 'Nome e Contato do consultor', placeholder: 'Nome e telefone/e-mail' },
+  { key: 'contatoCliente', label: 'Nome e Contato do cliente', placeholder: 'Nome e telefone/e-mail' },
+  { key: 'contrato', label: 'Contrato', placeholder: 'Ex: 3933511' },
+  { key: 'ordemJira', label: 'Ordem Jira', placeholder: 'Ex: ENGT-46557' },
+  { key: 'ativacaoPortaSw', label: 'Ativação de porta SW', placeholder: 'Ex: ENGT-47714' },
+  { key: 'osProjetoTecB2b', label: 'O.S de Projeto tec. B2B', placeholder: 'Ex: 39048036' },
+  { key: 'supervisorRedeExterna', label: 'Supervisor de Rede Externa', placeholder: 'Nome do supervisor' },
+  { key: 'projetoOzmap', label: 'Projeto ozmap', placeholder: 'Ex: PR - Cambará - Webby' },
+  {
+    key: 'metragemFibra',
+    label: 'Metragem total percorrida pela fibra',
+    placeholder: 'Ex: 650m'
+  },
+  {
+    key: 'observacoesAdicionais',
+    label: 'Observações adicionais',
+    placeholder: 'Texto livre',
+    multiline: true
+  }
+];
+
+function emptyCabecalho() {
+  return Object.fromEntries(CABECALHO_FIELDS.map(({ key }) => [key, '']));
+}
+
 /** Estado inicial do formulário (Capa, Cabeçalho, Passo 1) */
 export function defaultFormData() {
   return {
@@ -13,11 +55,7 @@ export function defaultFormData() {
       data: '',
       cidade: ''
     },
-    cabecalho: {
-      numeroReferencia: '',
-      cliente: '',
-      local: ''
-    },
+    cabecalho: emptyCabecalho(),
     passo1: {
       tituloPasso: 'XXXXX',
       descricao: '',
@@ -631,11 +669,12 @@ function buildPageCabecalho(formData, options = {}) {
           <h2 class="page-title">Informações do projeto</h2>
           <div class="page-content">
             <div class="report-info">
-              ${buildSectionFields([
-                { label: 'Número de referência', value: formData.cabecalho.numeroReferencia },
-                { label: 'Cliente', value: formData.cabecalho.cliente },
-                { label: 'Local', value: formData.cabecalho.local }
-              ])}
+              ${buildSectionFields(
+                CABECALHO_FIELDS.map(({ key, label }) => ({
+                  label,
+                  value: formData.cabecalho[key]
+                }))
+              )}
             </div>
           </div>
         </div>
@@ -682,7 +721,11 @@ export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
 }
 
 export function buildFullPdfHtml(formData, meta = {}, options = {}) {
-  const fileBase = formData.cabecalho.numeroReferencia?.trim() || 'Formulario-Engenharia';
+  const fileBase =
+    formData.cabecalho.ordemJira?.trim() ||
+    formData.cabecalho.contrato?.trim() ||
+    formData.cabecalho.cliente?.trim() ||
+    'Formulario-Engenharia';
   const title = `${fileBase} - Engenharia`;
   const baseUrl = options.baseUrl || '';
   const baseTag = baseUrl
@@ -714,7 +757,7 @@ export function openPdfPrintWindow(formData, options = {}) {
   });
   const fileName =
     options.fileName ||
-    `${formData.cabecalho.numeroReferencia?.trim() || 'Formulario'} - Engenharia.pdf`;
+    `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
 
   const printWindow = window.open('', '_blank');
   if (!printWindow || !printWindow.document) {
