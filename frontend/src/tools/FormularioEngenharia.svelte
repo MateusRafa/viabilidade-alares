@@ -27,6 +27,8 @@
   let capaOndasDataUrl = '';
   let assetsReady = false;
   let passo1ImageInput;
+  /** Box de imagem selecionado (1 clique) — Ctrl+V é capturado na janela */
+  let passo1ImagePasteArmed = false;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: previewHtml = buildFullPdfHtml(formData, {}, {
@@ -94,23 +96,87 @@
     passo1ImageInput?.click();
   }
 
-  function handlePasso1ImagePaste(event) {
-    const items = event.clipboardData?.items;
-    if (!items?.length) return;
+  function fileFromClipboardItem(item) {
+    if (!item?.type?.startsWith('image/')) return null;
 
-    for (const item of items) {
-      if (!item.type.startsWith('image/')) continue;
+    const direct = item.getAsFile?.();
+    if (direct) return direct;
 
-      event.preventDefault();
-      pdfError = '';
-      const blob = item.getAsFile();
-      if (!blob) {
-        pdfError = 'Não foi possível colar esta imagem.';
-        return;
+    if (typeof item.getAsFile === 'function') {
+      try {
+        return item.getAsFile();
+      } catch {
+        /* fallback abaixo */
       }
-      applyPasso1ImageFile(blob);
-      return;
     }
+    return null;
+  }
+
+  async function readImageFromClipboardApi() {
+    if (!navigator.clipboard?.read) return null;
+
+    const items = await navigator.clipboard.read();
+    for (const clipItem of items) {
+      const imageType = clipItem.types?.find((t) => t.startsWith('image/'));
+      if (!imageType) continue;
+
+      const blob = await clipItem.getType(imageType);
+      const ext = imageType.split('/')[1]?.replace('svg+xml', 'svg') || 'png';
+      return new File([blob], `imagem-colada.${ext}`, { type: imageType });
+    }
+    return null;
+  }
+
+  async function processPasso1Paste(event) {
+    pdfError = '';
+    const dt = event?.clipboardData;
+
+    if (dt?.files?.length) {
+      for (let i = 0; i < dt.files.length; i++) {
+        const file = dt.files[i];
+        if (file?.type?.startsWith('image/') && applyPasso1ImageFile(file)) {
+          return true;
+        }
+      }
+    }
+
+    if (dt?.items?.length) {
+      for (const item of dt.items) {
+        const file = fileFromClipboardItem(item);
+        if (file && applyPasso1ImageFile(file)) {
+          return true;
+        }
+      }
+    }
+
+    try {
+      const file = await readImageFromClipboardApi();
+      if (file && applyPasso1ImageFile(file)) {
+        return true;
+      }
+    } catch (err) {
+      console.warn('Leitura da área de transferência:', err);
+    }
+
+    pdfError =
+      'Não foi possível colar esta imagem. Clique uma vez no box roxo, depois Ctrl+V — ou use duplo clique para escolher arquivo.';
+    return false;
+  }
+
+  async function handlePasso1ImagePaste(event) {
+    if (!passo1ImagePasteArmed) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    await processPasso1Paste(event);
+  }
+
+  function armPasso1ImagePaste() {
+    passo1ImagePasteArmed = true;
+  }
+
+  function disarmPasso1ImagePaste() {
+    passo1ImagePasteArmed = false;
   }
 
   function clearPasso1Image() {
@@ -145,6 +211,9 @@
     if (onSettingsHover && typeof onSettingsHover === 'function') {
       onSettingsHover(() => {});
     }
+
+    let removeWindowPaste = null;
+
     if (typeof window !== 'undefined') {
       const origin = window.location.origin;
       const [logo, ondas] = await Promise.all([
@@ -154,10 +223,22 @@
       logoDataUrl = logo;
       capaOndasDataUrl = ondas;
       assetsReady = true;
-    }
-  });
 
-  onDestroy(() => {});
+      const onWindowPaste = (e) => {
+        if (!passo1ImagePasteArmed) return;
+        e.preventDefault();
+        e.stopPropagation();
+        processPasso1Paste(e);
+      };
+      window.addEventListener('paste', onWindowPaste, true);
+      removeWindowPaste = () => window.removeEventListener('paste', onWindowPaste, true);
+    }
+
+    return () => {
+      removeWindowPaste?.();
+      disarmPasso1ImagePaste();
+    };
+  });
 </script>
 
 <div class="formulario-engenharia">
@@ -287,9 +368,13 @@
                 />
                 <div
                   class="upload-box"
+                  class:armed={passo1ImagePasteArmed}
                   tabindex="0"
                   role="group"
                   aria-label="Imagem do passo 1. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
+                  on:click={armPasso1ImagePaste}
+                  on:focus={armPasso1ImagePaste}
+                  on:blur={disarmPasso1ImagePaste}
                   on:paste={handlePasso1ImagePaste}
                   on:dblclick={handleUploadBoxDblClick}
                 >
@@ -354,6 +439,7 @@
           class:hidden-until-ready={!assetsReady}
           srcdoc={previewHtml}
           sandbox="allow-same-origin"
+          tabindex="-1"
         ></iframe>
       </div>
     </main>
@@ -539,9 +625,11 @@
   }
 
   .upload-box:focus-visible .upload-trigger,
-  .upload-box:focus .upload-trigger {
+  .upload-box:focus .upload-trigger,
+  .upload-box.armed .upload-trigger {
     border-color: #7b68ee;
     background: #f5f3ff;
+    box-shadow: inset 0 0 0 1px rgba(123, 104, 238, 0.35);
   }
 
   .file-input-hidden {
