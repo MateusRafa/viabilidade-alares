@@ -83,7 +83,7 @@
     <aside class="form-column">
       <div class="form-scroll">
         <!-- Box: Capa -->
-        <section class="form-box">
+        <section class="form-box" class:expanded={expandedSections.capa}>
           <button
             type="button"
             class="form-box-header"
@@ -131,15 +131,15 @@
           {/if}
         </section>
 
-        <!-- Box: Cabeçalho -->
-        <section class="form-box">
+        <!-- Box: Informações do projeto -->
+        <section class="form-box" class:expanded={expandedSections.cabecalho}>
           <button
             type="button"
             class="form-box-header"
             on:click={() => toggleSection('cabecalho')}
             aria-expanded={expandedSections.cabecalho}
           >
-            <span class="form-box-title">Cabeçalho</span>
+            <span class="form-box-title">Informações do projeto</span>
             <span class="chevron" class:open={expandedSections.cabecalho}>▼</span>
           </button>
           {#if expandedSections.cabecalho}
@@ -167,7 +167,7 @@
         </section>
 
         <!-- Box: Passo 1 -->
-        <section class="form-box">
+        <section class="form-box" class:expanded={expandedSections.passo1}>
           <button
             type="button"
             class="form-box-header"
@@ -223,7 +223,7 @@
     <main class="preview-column">
       <div class="preview-header">
         <h2>Prévia do PDF</h2>
-        <span class="preview-hint">3 páginas (Capa · Cabeçalho · Passo 1) — atualiza em tempo real</span>
+        <span class="preview-hint">3 páginas (Capa · Informações do projeto · Passo 1) — atualiza em tempo real</span>
       </div>
       <div class="preview-frame-wrapper">
         {#if !assetsReady}
@@ -269,23 +269,36 @@
     box-shadow: 2px 0 12px rgba(0, 0, 0, 0.04);
   }
 
+  /* Rolagem entre os boxes (Capa, Informações, Passo 1) */
   .form-scroll {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
+    overscroll-behavior: contain;
   }
 
   .form-box {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
     border: 1px solid rgba(123, 104, 238, 0.25);
     border-radius: 10px;
     overflow: hidden;
     background: #fafbff;
+    min-height: 0;
+  }
+
+  .form-box.expanded {
+    max-height: min(58vh, 540px);
   }
 
   .form-box-header {
+    flex-shrink: 0;
     width: 100%;
     display: flex;
     align-items: center;
@@ -315,11 +328,23 @@
     transform: rotate(0deg);
   }
 
+  /* Rolagem interna dentro do box (campos) */
   .form-box-body {
+    flex: 1;
+    min-height: 0;
+    max-height: min(48vh, 460px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .form-box-body-cabecalho {
+    max-height: min(50vh, 480px);
   }
 
   .field {
