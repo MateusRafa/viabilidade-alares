@@ -5411,6 +5411,26 @@ app.put('/api/projetistas/:nome/role', requireAdmin, async (req, res) => {
   }
 });
 
+// IDs de todas as ferramentas do portal (manter sincronizado com toolsRegistry.js)
+const PORTAL_TOOL_IDS = [
+  'viabilidade-alares',
+  'analise-cobertura',
+  'calculadora-orcamento',
+  'mapa-consulta',
+  'dashboard-censup',
+  'formulario-engenharia'
+];
+
+function mergePortalToolPermissions(permissions = {}) {
+  const merged = { ...(permissions || {}) };
+  PORTAL_TOOL_IDS.forEach((toolId) => {
+    if (merged[toolId] === undefined) {
+      merged[toolId] = true;
+    }
+  });
+  return merged;
+}
+
 // Endpoint para obter permissões de ferramentas de um projetista
 // Permite que o usuário veja suas próprias permissões ou admin veja qualquer usuário
 app.get('/api/projetistas/:nome/permissions', async (req, res) => {
@@ -5487,11 +5507,12 @@ app.get('/api/projetistas/:nome/permissions', async (req, res) => {
     }
     
     // Fallback: buscar do Excel (se houver campo de permissões)
-    // Por enquanto, retornar permissões padrão (todas habilitadas)
-    
-    res.json({ 
-      success: true, 
-      permissions: permissions
+    // Mesclar com registry: ferramentas novas habilitadas por padrão
+    permissions = mergePortalToolPermissions(permissions);
+
+    res.json({
+      success: true,
+      permissions
     });
   } catch (err) {
     console.error('❌ Erro ao buscar permissões:', err);
