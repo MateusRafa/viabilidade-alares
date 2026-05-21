@@ -287,6 +287,35 @@ export const FORMULARIO_PDF_STYLES = `
     display: none;
   }
 
+  /* —— Página 2 (Cabeçalho) — visual alinhado à capa —— */
+  .pdf-page-cabecalho {
+    padding: 18mm 16mm 14mm;
+  }
+  .page-shell-cabecalho {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+    flex: 1;
+  }
+  .page-shell-cabecalho .capa-logo-wrap {
+    margin-bottom: 6mm;
+  }
+  .page-top-client {
+    margin: 0 0 8mm;
+    font-size: 10pt;
+    font-weight: 700;
+    color: ${BRAND.cores.primaria};
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    line-height: 1.35;
+  }
+  .page-body-cabecalho {
+    flex: 1;
+    padding: 0;
+  }
+
   /* —— Cabeçalho / rodapé páginas internas —— */
   .page-header-bar {
     position: relative;
@@ -552,25 +581,37 @@ function buildPageCapa(formData, options = {}) {
 
 function buildPageCabecalho(formData, options = {}) {
   const logoUrl = getLogoUrl(options);
+  const ondasUrl = getCapaOndasUrl(options);
   const clientLabel = getClientLabel(formData);
+  const ondasImg = ondasUrl
+    ? `<img class="capa-ondas-svg" src="${attrUrl(ondasUrl)}" alt="" aria-hidden="true" />`
+    : '';
+  const clientBlock = clientLabel
+    ? `<p class="page-top-client">${escapeHtml(clientLabel)}</p>`
+    : '';
 
   return `
-    <div class="pdf-page pdf-page-cabecalho pdf-page-inner" data-pdf-page="2">
-      ${buildBrandLayers(logoUrl, 'inner')}
-      ${buildInnerPageHeader(logoUrl, clientLabel, 'Cabeçalho')}
-      <div class="page-body-inner">
-        <h2 class="page-title">Informações do projeto</h2>
-        <div class="page-content">
-          <div class="report-info">
-            ${buildSectionFields([
-              { label: 'Número de referência', value: formData.cabecalho.numeroReferencia },
-              { label: 'Cliente', value: formData.cabecalho.cliente },
-              { label: 'Local', value: formData.cabecalho.local }
-            ])}
+    <div class="pdf-page pdf-page-cabecalho" data-pdf-page="2">
+      ${ondasImg}
+      <div class="page-shell-cabecalho">
+        <div class="capa-logo-wrap">
+          ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
+        </div>
+        ${clientBlock}
+        <div class="page-body-inner page-body-cabecalho">
+          <h2 class="page-title">Informações do projeto</h2>
+          <div class="page-content">
+            <div class="report-info">
+              ${buildSectionFields([
+                { label: 'Número de referência', value: formData.cabecalho.numeroReferencia },
+                { label: 'Cliente', value: formData.cabecalho.cliente },
+                { label: 'Local', value: formData.cabecalho.local }
+              ])}
+            </div>
           </div>
         </div>
+        ${buildInnerPageFooter(2)}
       </div>
-      ${buildInnerPageFooter(2)}
     </div>
   `;
 }
