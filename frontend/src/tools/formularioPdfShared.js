@@ -101,6 +101,69 @@ function displayMultilineValue(value) {
   return escapeHtml(text);
 }
 
+const RICH_HTML_ALLOWED = new Set([
+  'B',
+  'STRONG',
+  'I',
+  'EM',
+  'U',
+  'BR',
+  'P',
+  'DIV',
+  'UL',
+  'OL',
+  'LI',
+  'SPAN'
+]);
+
+/** Remove tags/atributos perigosos; mantém negrito, itálico, listas e quebras */
+export function sanitizeRichHtml(html) {
+  const raw = (html ?? '').toString();
+  if (!raw.trim()) return '';
+
+  if (typeof DOMParser === 'undefined') {
+    return escapeHtml(raw).replace(/\n/g, '<br>');
+  }
+
+  const doc = new DOMParser().parseFromString(raw, 'text/html');
+
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return escapeHtml(node.textContent || '');
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const tag = node.tagName;
+    if (!RICH_HTML_ALLOWED.has(tag)) {
+      return Array.from(node.childNodes).map(walk).join('');
+    }
+
+    const inner = Array.from(node.childNodes).map(walk).join('');
+    if (tag === 'BR') return '<br>';
+    return `<${tag.toLowerCase()}>${inner}</${tag.toLowerCase()}>`;
+  }
+
+  return Array.from(doc.body.childNodes)
+    .map(walk)
+    .join('')
+    .trim();
+}
+
+function hasRichMarkup(value) {
+  return /<[a-z][\s\S]*>/i.test(String(value || ''));
+}
+
+/** Descrição: HTML sanitizado (negrito etc.) ou texto simples com quebras */
+function displayDescricaoValue(value) {
+  const raw = (value ?? '').toString();
+  if (!raw.trim()) return '<span class="empty-value">—</span>';
+  if (!hasRichMarkup(raw)) {
+    return displayMultilineValue(raw);
+  }
+  const safe = sanitizeRichHtml(raw);
+  return safe || '<span class="empty-value">—</span>';
+}
+
 export function getFormattedDateTime() {
   const now = new Date();
   return {
@@ -520,6 +583,33 @@ export const FORMULARIO_PDF_STYLES = `
     word-break: break-word;
     line-height: 1.45;
   }
+  .report-info-rich {
+    white-space: normal;
+  }
+  .report-info-rich strong,
+  .report-info-rich b {
+    font-weight: 700;
+  }
+  .report-info-rich em,
+  .report-info-rich i {
+    font-style: italic;
+  }
+  .report-info-rich u {
+    text-decoration: underline;
+  }
+  .report-info-rich ul,
+  .report-info-rich ol {
+    margin: 0.35em 0 0.35em 1.2em;
+    padding: 0;
+  }
+  .report-info-rich p,
+  .report-info-rich div {
+    margin: 0 0 0.5em;
+  }
+  .report-info-rich p:last-child,
+  .report-info-rich div:last-child {
+    margin-bottom: 0;
+  }
   .empty-value { color: #aaa; font-style: italic; }
 
   .passo1-imagem-wrap {
@@ -640,7 +730,21 @@ export const FORMULARIO_PDF_STYLES = `
 
 function buildSectionFields(items) {
   return items
-    .map(({ label, value, multiline }) => {
+    .map(({ label, value, multiline, rich }) => {
+      if (rich) {
+        const valueHtml = displayDescricaoValue(value);
+        const isEmpty = valueHtml.includes('empty-value');
+        const valueClass = isEmpty
+          ? 'report-info-value report-info-value-multiline'
+          : 'report-info-value report-info-value-multiline report-info-rich';
+        const tag = isEmpty ? 'span' : 'div';
+        return `
+      <div class="report-info-item">
+        <span class="report-info-label">${escapeHtml(label)}</span>
+        <${tag} class="${valueClass}">${valueHtml}</${tag}>
+      </div>`;
+      }
+
       const valueClass = multiline
         ? 'report-info-value report-info-value-multiline'
         : 'report-info-value';
@@ -767,7 +871,7 @@ function buildPagePasso1(formData, options = {}) {
           <div class="page-content">
             <div class="report-info">
               ${buildSectionFields([
-                { label: 'Descrição', value: formData.passo1.descricao, multiline: true }
+                { label: 'Descrição', value: formData.passo1.descricao, rich: true }
               ])}
               ${buildPasso1ImageBlock(formData.passo1)}
             </div>
