@@ -18,3 +18,24 @@ export const BRAND = {
 };
 
 export const TOTAL_PDF_PAGES = 3;
+
+/** Estado inicial do formulário (Capa, Cabeçalho, Passo 1) */
+export const defaultFormData = () => ({
+  capa: {
+    titulo: '',
+    clienteProjeto: '',
+    data: '',
+    cidade: ''
+  },
+  cabecalho: {
+    numeroReferencia: '',
+    cliente: '',
+    local: ''
+  },
+  passo1: {
+    tituloPasso: 'XXXXX',
+    descricao: '',
+    responsavel: '',
+    data: ''
+  }
+});
