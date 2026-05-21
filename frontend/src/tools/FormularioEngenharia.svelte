@@ -41,6 +41,55 @@
     };
   }
 
+  const MAX_PASSO1_IMAGE_MB = 8;
+
+  function handlePasso1ImageChange(event) {
+    pdfError = '';
+    const file = event.currentTarget?.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      pdfError = 'Selecione um arquivo de imagem (PNG, JPG, WEBP ou SVG).';
+      event.currentTarget.value = '';
+      return;
+    }
+
+    if (file.size > MAX_PASSO1_IMAGE_MB * 1024 * 1024) {
+      pdfError = `A imagem deve ter no máximo ${MAX_PASSO1_IMAGE_MB} MB.`;
+      event.currentTarget.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      formData = {
+        ...formData,
+        passo1: {
+          ...formData.passo1,
+          imagemDataUrl: dataUrl,
+          imagemNome: file.name
+        }
+      };
+    };
+    reader.onerror = () => {
+      pdfError = 'Não foi possível ler a imagem. Tente outro arquivo.';
+    };
+    reader.readAsDataURL(file);
+    event.currentTarget.value = '';
+  }
+
+  function clearPasso1Image() {
+    formData = {
+      ...formData,
+      passo1: {
+        ...formData.passo1,
+        imagemDataUrl: '',
+        imagemNome: ''
+      }
+    };
+  }
+
   function handleGeneratePdf() {
     generatingPDF = true;
     pdfError = '';
@@ -191,14 +240,35 @@
                   placeholder="Descrição do passo"
                 ></textarea>
               </label>
-              <label class="field">
-                <span>Responsável técnico</span>
-                <input type="text" bind:value={formData.passo1.responsavel} placeholder="Nome do responsável" />
-              </label>
-              <label class="field">
-                <span>Data</span>
-                <input type="date" bind:value={formData.passo1.data} />
-              </label>
+              <div class="field field-upload">
+                <span>Imagem</span>
+                <div class="upload-box">
+                  <label class="upload-trigger">
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
+                      on:change={handlePasso1ImageChange}
+                    />
+                    <span class="upload-trigger-text">Clique para enviar imagem</span>
+                    <span class="upload-trigger-hint">PNG, JPG, WEBP ou SVG — até {MAX_PASSO1_IMAGE_MB} MB</span>
+                  </label>
+                  {#if formData.passo1.imagemDataUrl}
+                    <div class="upload-preview-wrap">
+                      <img
+                        class="upload-preview"
+                        src={formData.passo1.imagemDataUrl}
+                        alt="Prévia da imagem do passo 1"
+                      />
+                      {#if formData.passo1.imagemNome}
+                        <p class="upload-filename">{formData.passo1.imagemNome}</p>
+                      {/if}
+                      <button type="button" class="btn-remove-image" on:click={clearPasso1Image}>
+                        Remover imagem
+                      </button>
+                    </div>
+                  {/if}
+                </div>
+              </div>
             </div>
           {/if}
         </section>
@@ -401,6 +471,105 @@
     outline: none;
     border-color: #7b68ee;
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
+  }
+
+  .field-upload .upload-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .upload-trigger {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    width: 100%;
+    max-width: 100%;
+    min-height: 88px;
+    padding: 0.85rem;
+    border: 2px dashed rgba(123, 104, 238, 0.45);
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+    text-align: center;
+    box-sizing: border-box;
+    position: relative;
+  }
+
+  .upload-trigger:hover {
+    border-color: #7b68ee;
+    background: #f5f3ff;
+  }
+
+  .upload-trigger input[type='file'] {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .upload-trigger-text {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #5b21b6;
+    pointer-events: none;
+  }
+
+  .upload-trigger-hint {
+    font-size: 0.75rem;
+    color: #6b7280;
+    pointer-events: none;
+  }
+
+  .upload-preview-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .upload-preview {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    max-height: 200px;
+    object-fit: contain;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #f9fafb;
+  }
+
+  .upload-filename {
+    margin: 0;
+    font-size: 0.75rem;
+    color: #6b7280;
+    word-break: break-all;
+  }
+
+  .btn-remove-image {
+    align-self: flex-start;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+    font-family: inherit;
+    color: #b91c1c;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .btn-remove-image:hover {
+    background: #fee2e2;
   }
 
   .form-actions {
