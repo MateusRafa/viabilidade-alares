@@ -636,6 +636,8 @@ export const FORMULARIO_PDF_STYLES = `
   /* —— Capa —— */
   .pdf-page-capa {
     padding: 18mm 16mm 14mm;
+    display: flex;
+    flex-direction: column;
   }
   .capa-inner {
     position: relative;
@@ -704,24 +706,89 @@ export const FORMULARIO_PDF_STYLES = `
     letter-spacing: 0.02em;
   }
 
-  @page { size: A4 portrait; margin: 10mm; }
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
   @media print {
     * {
       print-color-adjust: exact !important;
       -webkit-print-color-adjust: exact !important;
       color-adjust: exact !important;
     }
-    body { background: white !important; padding: 0 !important; }
-    .pdf-document { max-width: none; }
-    .pdf-page {
-      min-height: 0;
+    html,
+    body {
+      width: 210mm !important;
       margin: 0 !important;
-      page-break-after: always;
-      break-after: page;
+      padding: 0 !important;
+      background: white !important;
+    }
+    .pdf-document {
+      width: 210mm !important;
+      max-width: none !important;
+      margin: 0 !important;
+    }
+    .pdf-page {
+      width: 210mm !important;
+      height: 297mm !important;
+      min-height: 297mm !important;
+      max-height: 297mm !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      page-break-after: always !important;
+      break-after: page !important;
+      page-break-inside: avoid !important;
+      break-inside: avoid-page !important;
+      box-sizing: border-box !important;
     }
     .pdf-page:last-child {
-      page-break-after: auto;
-      break-after: auto;
+      page-break-after: auto !important;
+      break-after: auto !important;
+    }
+    .pdf-page + .pdf-page {
+      margin-top: 0 !important;
+    }
+    .page-shell-artwork,
+    .capa-inner {
+      min-height: 100% !important;
+      height: 100% !important;
+      flex: 1 1 auto !important;
+    }
+    .pdf-page-capa {
+      display: flex !important;
+      flex-direction: column !important;
+    }
+    .pdf-page-cabecalho {
+      height: auto !important;
+      min-height: 297mm !important;
+      max-height: none !important;
+      page-break-inside: auto !important;
+      break-inside: auto !important;
+    }
+    .pdf-page-cabecalho .page-body-artwork {
+      flex: 1 !important;
+    }
+    .pdf-page-cabecalho .report-info-item {
+      padding: 4px 0 !important;
+    }
+    .pdf-page-cabecalho .report-info-label {
+      font-size: 9px !important;
+    }
+    .pdf-page-cabecalho .report-info-value,
+    .pdf-page-cabecalho .report-info-value-multiline {
+      font-size: 10px !important;
+      line-height: 1.35 !important;
+    }
+    .pdf-page-passo1 {
+      height: auto !important;
+      min-height: 297mm !important;
+      max-height: none !important;
+      page-break-inside: auto !important;
+      break-inside: auto !important;
+    }
+    .passo1-imagem {
+      max-height: 155mm !important;
     }
     .pdf-watermark-text span { opacity: 0.04; }
     .pdf-watermark-logo { opacity: 0.05; }
@@ -919,6 +986,35 @@ export function buildFullPdfHtml(formData, meta = {}, options = {}) {
 </html>`;
 }
 
+function waitForPrintImages(doc, timeoutMs = 12000) {
+  const pending = Array.from(doc.querySelectorAll('img')).filter((img) => !img.complete);
+
+  if (!pending.length) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    let done = 0;
+    let settled = false;
+    const finishAll = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const finishOne = () => {
+      done += 1;
+      if (done >= pending.length) finishAll();
+    };
+    const timer = setTimeout(finishAll, timeoutMs);
+
+    pending.forEach((img) => {
+      img.onload = finishOne;
+      img.onerror = finishOne;
+    });
+  });
+}
+
 export function openPdfPrintWindow(formData, options = {}) {
   const baseUrl =
     options.baseUrl ||
@@ -932,30 +1028,44 @@ export function openPdfPrintWindow(formData, options = {}) {
     options.fileName ||
     `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
 
-  const printWindow = window.open('', '_blank');
-  if (!printWindow || !printWindow.document) {
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const blobUrl = URL.createObjectURL(blob);
+  const printWindow = window.open(blobUrl, '_blank', 'noopener,noreferrer');
+
+  if (!printWindow) {
+    URL.revokeObjectURL(blobUrl);
     return { success: false, error: 'popup_blocked' };
   }
 
-  printWindow.document.open();
-  printWindow.document.write(html);
-  printWindow.document.close();
   printWindow.document.title = fileName.replace('.pdf', '');
 
-  const tryPrint = () => {
-    if (printWindow.closed) return;
+  const runPrint = async () => {
+    if (printWindow.closed) {
+      URL.revokeObjectURL(blobUrl);
+      return;
+    }
     try {
+      if (printWindow.document?.body) {
+        await waitForPrintImages(printWindow.document);
+      }
+      printWindow.focus();
       printWindow.print();
     } catch (err) {
       console.error('Erro ao imprimir PDF:', err);
+    } finally {
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
     }
   };
 
-  if (printWindow.document.readyState === 'complete') {
-    setTimeout(tryPrint, 400);
+  if (printWindow.document?.readyState === 'complete') {
+    setTimeout(runPrint, 500);
   } else {
-    printWindow.onload = () => setTimeout(tryPrint, 400);
+    printWindow.addEventListener('load', () => setTimeout(runPrint, 500), { once: true });
   }
 
-  return { success: true };
+  return {
+    success: true,
+    printHint:
+      'Na janela de impressão: destino "Salvar como PDF", margens "Nenhuma" e desmarque "Cabeçalhos e rodapés" do navegador.'
+  };
 }
