@@ -708,7 +708,7 @@ export const FORMULARIO_PDF_STYLES = `
 
   @page {
     size: A4 portrait;
-    margin: 0;
+    margin: 10mm;
   }
   @media print {
     * {
@@ -718,29 +718,24 @@ export const FORMULARIO_PDF_STYLES = `
     }
     html,
     body {
-      width: 210mm !important;
       margin: 0 !important;
       padding: 0 !important;
       background: white !important;
     }
     .pdf-document {
-      width: 210mm !important;
+      width: 100% !important;
       max-width: none !important;
       margin: 0 !important;
     }
     .pdf-page {
-      width: 210mm !important;
-      height: 297mm !important;
-      min-height: 297mm !important;
-      max-height: 297mm !important;
+      width: 100% !important;
+      min-height: 277mm !important;
       margin: 0 !important;
-      padding: 0 !important;
-      overflow: hidden !important;
       page-break-after: always !important;
       break-after: page !important;
       page-break-inside: avoid !important;
       break-inside: avoid-page !important;
-      box-sizing: border-box !important;
+      box-shadow: none !important;
     }
     .pdf-page:last-child {
       page-break-after: auto !important;
@@ -748,47 +743,6 @@ export const FORMULARIO_PDF_STYLES = `
     }
     .pdf-page + .pdf-page {
       margin-top: 0 !important;
-    }
-    .page-shell-artwork,
-    .capa-inner {
-      min-height: 100% !important;
-      height: 100% !important;
-      flex: 1 1 auto !important;
-    }
-    .pdf-page-capa {
-      display: flex !important;
-      flex-direction: column !important;
-    }
-    .pdf-page-cabecalho {
-      height: auto !important;
-      min-height: 297mm !important;
-      max-height: none !important;
-      page-break-inside: auto !important;
-      break-inside: auto !important;
-    }
-    .pdf-page-cabecalho .page-body-artwork {
-      flex: 1 !important;
-    }
-    .pdf-page-cabecalho .report-info-item {
-      padding: 4px 0 !important;
-    }
-    .pdf-page-cabecalho .report-info-label {
-      font-size: 9px !important;
-    }
-    .pdf-page-cabecalho .report-info-value,
-    .pdf-page-cabecalho .report-info-value-multiline {
-      font-size: 10px !important;
-      line-height: 1.35 !important;
-    }
-    .pdf-page-passo1 {
-      height: auto !important;
-      min-height: 297mm !important;
-      max-height: none !important;
-      page-break-inside: auto !important;
-      break-inside: auto !important;
-    }
-    .passo1-imagem {
-      max-height: 155mm !important;
     }
     .pdf-watermark-text span { opacity: 0.04; }
     .pdf-watermark-logo { opacity: 0.05; }
@@ -1015,22 +969,102 @@ function waitForPrintImages(doc, timeoutMs = 12000) {
   });
 }
 
-export function openPdfPrintWindow(formData, options = {}) {
+const PDF_PRINT_HINT =
+  'Na impressão: destino "Salvar como PDF", margens "Padrão" (ou "Nenhuma") e desmarque "Cabeçalhos e rodapés" do navegador.';
+
+/** Imprime o mesmo HTML da prévia (iframe oculto, sem pop-up). */
+export function printPdfHtml(html, options = {}) {
+  if (typeof document === 'undefined') {
+    return Promise.resolve({ success: false, error: 'no_document' });
+  }
+
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.setAttribute('title', 'Impressão do formulário');
+  iframe.style.cssText =
+    'position:fixed;left:-9999px;top:0;width:210mm;height:297mm;border:0;opacity:0;pointer-events:none';
+  document.body.appendChild(iframe);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      setTimeout(() => iframe.remove(), 8000);
+      resolve(result);
+    };
+
+    const runPrint = async () => {
+      try {
+        const doc = iframe.contentDocument;
+        const win = iframe.contentWindow;
+        if (!doc?.body || !win) {
+          finish({ success: false, error: 'iframe_failed' });
+          return;
+        }
+        if (options.title) doc.title = options.title;
+        await waitForPrintImages(doc);
+        win.focus();
+        win.print();
+        finish({ success: true, printHint: PDF_PRINT_HINT });
+      } catch (err) {
+        console.error('Erro ao imprimir PDF:', err);
+        finish({ success: false, error: 'print_failed' });
+      }
+    };
+
+    iframe.onload = () => setTimeout(runPrint, 200);
+    iframe.onerror = () => finish({ success: false, error: 'iframe_failed' });
+    iframe.srcdoc = html;
+  });
+}
+
+/** Imprime a partir do iframe de prévia (WYSIWYG) ou replica o HTML em iframe oculto. */
+export async function printEngineeringPdf(previewIframe, html, options = {}) {
+  if (previewIframe?.contentWindow?.document?.body) {
+    try {
+      await waitForPrintImages(previewIframe.contentDocument);
+      previewIframe.contentWindow.focus();
+      previewIframe.contentWindow.print();
+      return { success: true, printHint: PDF_PRINT_HINT };
+    } catch (err) {
+      console.warn('Impressão pela prévia falhou, usando cópia do HTML:', err);
+    }
+  }
+
+  if (html) {
+    return printPdfHtml(html, options);
+  }
+
+  return { success: false, error: 'no_html' };
+}
+
+export async function openPdfPrintWindow(formData, options = {}) {
   const baseUrl =
     options.baseUrl ||
     (typeof window !== 'undefined' ? window.location.origin : '');
-  const html = buildFullPdfHtml(formData, {}, {
-    baseUrl,
-    logoDataUrl: options.logoDataUrl,
-    capaOndasDataUrl: options.capaOndasDataUrl
-  });
+  const html =
+    options.html ||
+    buildFullPdfHtml(formData, {}, {
+      baseUrl,
+      logoDataUrl: options.logoDataUrl,
+      capaOndasDataUrl: options.capaOndasDataUrl
+    });
   const fileName =
     options.fileName ||
     `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
 
-  // Abre janela vazia no clique (menos bloqueio que blob: em pop-up) e injeta o HTML em seguida
-  const printWindow = window.open('', '_blank');
+  const previewResult = await printEngineeringPdf(options.previewIframe, html, {
+    title: fileName.replace('.pdf', '')
+  });
+  if (previewResult.success) return previewResult;
 
+  const iframeResult = await printPdfHtml(html, {
+    title: fileName.replace('.pdf', '')
+  });
+  if (iframeResult.success) return iframeResult;
+
+  const printWindow = window.open('', '_blank');
   if (!printWindow || !printWindow.document) {
     return { success: false, error: 'popup_blocked' };
   }
@@ -1059,9 +1093,5 @@ export function openPdfPrintWindow(formData, options = {}) {
     printWindow.onload = () => setTimeout(runPrint, 500);
   }
 
-  return {
-    success: true,
-    printHint:
-      'Na janela de impressão: destino "Salvar como PDF", margens "Nenhuma" e desmarque "Cabeçalhos e rodapés" do navegador.'
-  };
+  return { success: true, printHint: PDF_PRINT_HINT };
 }
