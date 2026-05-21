@@ -67,7 +67,7 @@ export function defaultFormData() {
 
 export const PDF_PAGES = [
   { id: 'capa', number: 1, title: 'Capa', formKey: 'capa' },
-  { id: 'cabecalho', number: 2, title: 'Cabeçalho', formKey: 'cabecalho' },
+  { id: 'cabecalho', number: 2, title: 'Informações do projeto', formKey: 'cabecalho' },
   { id: 'passo1', number: 3, title: 'Passo 1°', formKey: 'passo1' }
 ];
 
