@@ -59,8 +59,8 @@ export function defaultFormData() {
     passo1: {
       tituloPasso: 'XXXXX',
       descricao: '',
-      responsavel: '',
-      data: ''
+      imagemDataUrl: '',
+      imagemNome: ''
     }
   };
 }
@@ -510,6 +510,27 @@ export const FORMULARIO_PDF_STYLES = `
   }
   .empty-value { color: #aaa; font-style: italic; }
 
+  .passo1-imagem-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #f0f0f0;
+  }
+  .passo1-imagem {
+    display: block;
+    max-width: 100%;
+    max-height: 140mm;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    object-position: left top;
+    border: 1px solid #e5e7eb;
+    border-radius: 4px;
+    background: #fff;
+  }
+
   /* —— Capa —— */
   .pdf-page-capa {
     padding: 18mm 16mm 14mm;
@@ -685,6 +706,26 @@ function buildPageCabecalho(formData, options = {}) {
   `;
 }
 
+function buildPasso1ImageBlock(passo1 = {}) {
+  const src = passo1.imagemDataUrl?.trim();
+  if (!src) {
+    return `
+      <div class="passo1-imagem-wrap">
+        <span class="report-info-label">Imagem</span>
+        <span class="report-info-value">${displayValue('')}</span>
+      </div>`;
+  }
+  return `
+    <div class="passo1-imagem-wrap">
+      <span class="report-info-label">Imagem</span>
+      <img
+        class="passo1-imagem"
+        src="${attrUrl(src)}"
+        alt="${escapeHtml(passo1.imagemNome || 'Imagem do passo 1')}"
+      />
+    </div>`;
+}
+
 function buildPagePasso1(formData, options = {}) {
   const logoUrl = getLogoUrl(options);
   const ondasUrl = getCapaOndasUrl(options);
@@ -709,11 +750,8 @@ function buildPagePasso1(formData, options = {}) {
           <h2 class="page-title">Passo 1° — ${escapeHtml(tituloPasso)}</h2>
           <div class="page-content">
             <div class="report-info">
-              ${buildSectionFields([
-                { label: 'Descrição', value: formData.passo1.descricao },
-                { label: 'Responsável técnico', value: formData.passo1.responsavel },
-                { label: 'Data', value: formData.passo1.data }
-              ])}
+              ${buildSectionFields([{ label: 'Descrição', value: formData.passo1.descricao }])}
+              ${buildPasso1ImageBlock(formData.passo1)}
             </div>
           </div>
         </div>
