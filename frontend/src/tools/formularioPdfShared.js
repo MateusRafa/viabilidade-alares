@@ -268,8 +268,7 @@ export const FORMULARIO_PDF_STYLES = `
     pointer-events: none;
   }
   .pdf-page-capa .pdf-watermark-confidential {
-    bottom: 28mm;
-    right: 16mm;
+    display: none;
   }
   .capa-ondas-svg {
     position: absolute;
