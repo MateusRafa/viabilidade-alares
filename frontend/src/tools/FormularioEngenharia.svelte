@@ -172,7 +172,7 @@
     <main class="preview-column">
       <div class="preview-header">
         <h2>Prévia do PDF</h2>
-        <span class="preview-hint">Atualiza automaticamente conforme você preenche</span>
+        <span class="preview-hint">3 páginas (Capa · Cabeçalho · Passo 1) — atualiza em tempo real</span>
       </div>
       <div class="preview-frame-wrapper">
         <iframe
@@ -367,7 +367,7 @@
   .preview-frame-wrapper {
     flex: 1;
     padding: 1rem;
-    overflow: hidden;
+    overflow: auto;
     display: flex;
     justify-content: center;
     align-items: flex-start;
@@ -375,12 +375,12 @@
 
   .pdf-preview-iframe {
     width: 100%;
-    max-width: 1100px;
+    max-width: 240mm;
     height: 100%;
-    min-height: 480px;
+    min-height: 520px;
     border: 2px solid #7b68ee;
     border-radius: 6px;
-    background: white;
+    background: #e8ecf4;
     box-shadow: 0 4px 20px rgba(123, 104, 238, 0.15);
   }
 
