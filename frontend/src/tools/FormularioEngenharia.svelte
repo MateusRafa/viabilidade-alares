@@ -261,9 +261,11 @@
   .form-column {
     flex: 0 0 42%;
     max-width: 520px;
-    min-width: 300px;
+    min-width: 0;
+    width: 100%;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
     background: #fff;
     border-right: 1px solid #e2e8f0;
     box-shadow: 2px 0 12px rgba(0, 0, 0, 0.04);
@@ -273,6 +275,8 @@
   .form-scroll {
     flex: 1;
     min-height: 0;
+    min-width: 0;
+    width: 100%;
     overflow-y: auto;
     overflow-x: hidden;
     padding: 1rem;
@@ -280,17 +284,21 @@
     flex-direction: column;
     gap: 0.75rem;
     overscroll-behavior: contain;
+    box-sizing: border-box;
   }
 
   .form-box {
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
+    width: 100%;
+    max-width: 100%;
     border: 1px solid rgba(123, 104, 238, 0.25);
     border-radius: 10px;
     overflow: hidden;
     background: #fafbff;
     min-height: 0;
+    box-sizing: border-box;
   }
 
   .form-box.expanded {
@@ -332,11 +340,16 @@
   .form-box-body {
     flex: 1;
     min-height: 0;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
     max-height: min(48vh, 460px);
     overflow-y: auto;
     overflow-x: hidden;
     overscroll-behavior: contain;
-    padding: 1rem;
+    scrollbar-gutter: stable;
+    box-sizing: border-box;
+    padding: 1rem 0.85rem 1rem 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
@@ -351,6 +364,9 @@
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
   }
 
   .field span {
@@ -359,11 +375,18 @@
     color: #5b21b6;
     text-transform: uppercase;
     letter-spacing: 0.03em;
+    line-height: 1.35;
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
 
   .field input,
   .field textarea {
+    display: block;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     padding: 0.55rem 0.75rem;
     border: 1px solid #d1d5db;
     border-radius: 6px;
