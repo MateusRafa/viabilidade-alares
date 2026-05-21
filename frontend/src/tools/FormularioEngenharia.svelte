@@ -43,32 +43,31 @@
 
   const MAX_PASSO1_IMAGE_MB = 8;
 
-  function handlePasso1ImageChange(event) {
-    pdfError = '';
-    const file = event.currentTarget?.files?.[0];
-    if (!file) return;
+  function applyPasso1ImageFile(file) {
+    if (!file) return false;
 
     if (!file.type.startsWith('image/')) {
-      pdfError = 'Selecione um arquivo de imagem (PNG, JPG, WEBP ou SVG).';
-      event.currentTarget.value = '';
-      return;
+      pdfError = 'Use um arquivo de imagem (PNG, JPG, WEBP ou SVG).';
+      return false;
     }
 
     if (file.size > MAX_PASSO1_IMAGE_MB * 1024 * 1024) {
       pdfError = `A imagem deve ter no máximo ${MAX_PASSO1_IMAGE_MB} MB.`;
-      event.currentTarget.value = '';
-      return;
+      return false;
     }
 
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+      const nome =
+        file.name?.trim() ||
+        `imagem-colada.${(file.type.split('/')[1] || 'png').replace('svg+xml', 'svg')}`;
       formData = {
         ...formData,
         passo1: {
           ...formData.passo1,
           imagemDataUrl: dataUrl,
-          imagemNome: file.name
+          imagemNome: nome
         }
       };
     };
@@ -76,7 +75,34 @@
       pdfError = 'Não foi possível ler a imagem. Tente outro arquivo.';
     };
     reader.readAsDataURL(file);
+    return true;
+  }
+
+  function handlePasso1ImageChange(event) {
+    pdfError = '';
+    const file = event.currentTarget?.files?.[0];
+    if (!file) return;
+    applyPasso1ImageFile(file);
     event.currentTarget.value = '';
+  }
+
+  function handlePasso1ImagePaste(event) {
+    const items = event.clipboardData?.items;
+    if (!items?.length) return;
+
+    for (const item of items) {
+      if (!item.type.startsWith('image/')) continue;
+
+      event.preventDefault();
+      pdfError = '';
+      const blob = item.getAsFile();
+      if (!blob) {
+        pdfError = 'Não foi possível colar esta imagem.';
+        return;
+      }
+      applyPasso1ImageFile(blob);
+      return;
+    }
   }
 
   function clearPasso1Image() {
@@ -242,14 +268,20 @@
               </label>
               <div class="field field-upload">
                 <span>Imagem</span>
-                <div class="upload-box">
+                <div
+                  class="upload-box"
+                  tabindex="0"
+                  role="group"
+                  aria-label="Imagem do passo 1. Clique para enviar ou cole com Ctrl+V."
+                  on:paste={handlePasso1ImagePaste}
+                >
                   <label class="upload-trigger">
                     <input
                       type="file"
                       accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
                       on:change={handlePasso1ImageChange}
                     />
-                    <span class="upload-trigger-text">Clique para enviar imagem</span>
+                    <span class="upload-trigger-text">Clique para enviar ou cole a imagem (Ctrl+V)</span>
                     <span class="upload-trigger-hint">PNG, JPG, WEBP ou SVG — até {MAX_PASSO1_IMAGE_MB} MB</span>
                   </label>
                   {#if formData.passo1.imagemDataUrl}
@@ -473,7 +505,7 @@
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
   }
 
-  .field-upload .upload-box {
+  .field-upload   .upload-box {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -481,6 +513,12 @@
     max-width: 100%;
     min-width: 0;
     box-sizing: border-box;
+    outline: none;
+  }
+
+  .upload-box:focus-visible {
+    box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.2);
+    border-radius: 8px;
   }
 
   .upload-trigger {
