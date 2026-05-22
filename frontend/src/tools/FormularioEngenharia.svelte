@@ -5,11 +5,14 @@
     normalizeFormData,
     emptyPasso,
     getPdfPageCount,
+    measurePassoSplitsFromDocument,
+    getPassoLayoutWarnings,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
     printEngineeringPdf,
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
+    waitForPrintImages,
     sanitizeRichHtml
   } from './formularioPdfShared.js';
 
@@ -40,12 +43,25 @@
   const descricaoEditorReady = {};
   const MAX_PASSO_IMAGE_MB = 8;
 
+  /** Quando true, prévia monta passos em página única para medir altura */
+  let measuringPassoSplits = false;
+  let passoSplits = [];
+  let passoLayoutWarnings = [];
+  let measurePassoTimer = null;
+
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: previewHtml = buildFullPdfHtml(formData, {}, {
     baseUrl: previewBaseUrl,
     logoDataUrl,
-    capaOndasDataUrl
+    capaOndasDataUrl,
+    passoSplits: measuringPassoSplits ? formData.passos.map(() => false) : passoSplits
   });
+
+  $: measurePassoKey = assetsReady
+    ? JSON.stringify(
+        formData.passos.map((p) => [p.tituloPasso, p.descricao, p.imagemDataUrl?.length || 0])
+      )
+    : '';
 
   function toggleSection(sectionId) {
     expandedSections = {
@@ -54,11 +70,49 @@
     };
   }
 
-  $: pdfPageCount = getPdfPageCount(formData);
+  $: pdfPageCount = getPdfPageCount(formData, { passoSplits });
   $: previewPagesHint = `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material)`;
+
+  function schedulePassoSplitMeasure() {
+    if (typeof window === 'undefined' || !assetsReady) return;
+    clearTimeout(measurePassoTimer);
+    measuringPassoSplits = true;
+    measurePassoTimer = setTimeout(() => {
+      measuringPassoSplits = false;
+    }, 8000);
+  }
+
+  async function onPreviewIframeLoad() {
+    if (!previewIframeEl?.contentDocument?.body || !assetsReady) return;
+
+    const doc = previewIframeEl.contentDocument;
+
+    if (measuringPassoSplits) {
+      await waitForPrintImages(doc);
+      const next = measurePassoSplitsFromDocument(doc, formData.passos);
+      const changed = JSON.stringify(next) !== JSON.stringify(passoSplits);
+      passoSplits = next;
+      measuringPassoSplits = false;
+      clearTimeout(measurePassoTimer);
+      if (changed) {
+        await tick();
+        return;
+      }
+    }
+
+    passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoSplits, doc);
+  }
+
+  $: if (measurePassoKey) {
+    schedulePassoSplitMeasure();
+  }
 
   function passoSectionId(index) {
     return `passo-${index}`;
+  }
+
+  function passoLayoutWarning(passoIndex) {
+    return passoLayoutWarnings.find((w) => w.passoIndex === passoIndex);
   }
 
   function updatePasso(index, patch) {
@@ -643,6 +697,11 @@
                   </div>
                 </div>
               </div>
+              {#if passoLayoutWarning(passoIndex)}
+                <p class="passo-layout-warning" role="status">
+                  {passoLayoutWarning(passoIndex).message}
+                </p>
+              {/if}
             {/if}
           </section>
         {/each}
@@ -714,6 +773,7 @@
           srcdoc={previewHtml}
           sandbox="allow-same-origin allow-modals"
           tabindex="-1"
+          on:load={onPreviewIframeLoad}
         ></iframe>
       </div>
     </main>
@@ -1096,6 +1156,17 @@
     font-size: 0.75rem;
     line-height: 1.4;
     color: #64748b;
+  }
+
+  .passo-layout-warning {
+    margin: 0.65rem 1rem 0;
+    padding: 0.5rem 0.65rem;
+    font-size: 0.75rem;
+    line-height: 1.4;
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-radius: 6px;
   }
 
   .preview-column {
