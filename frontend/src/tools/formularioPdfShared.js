@@ -233,17 +233,6 @@ function getClientLabel(formData) {
   );
 }
 
-/** Nome do cliente no box Cabeçalho (página 2) */
-function getCabecalhoClienteLabel(formData) {
-  return formData.cabecalho?.cliente?.trim() || '';
-}
-
-function buildCabecalhoPageTitleHtml(formData) {
-  const cliente = getCabecalhoClienteLabel(formData);
-  if (!cliente) return 'Informações do projeto';
-  return `Informações do projeto <span class="page-title-cliente">- ${escapeHtml(cliente)}</span>`;
-}
-
 function buildBrandLayers(logoUrl, variant = 'inner') {
   const capaClass = variant === 'capa' ? ' brand-layer-capa' : '';
   const logoBg = logoUrl
@@ -561,12 +550,6 @@ export const FORMULARIO_PDF_STYLES = `
     border-bottom: 2px solid ${BRAND.cores.accent};
     line-height: 1.3;
   }
-  .page-title-cliente {
-    font-weight: 700;
-    color: ${BRAND.cores.primaria};
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-  }
   .page-content { flex: 1; }
   .report-info {
     display: grid;
@@ -647,15 +630,17 @@ export const FORMULARIO_PDF_STYLES = `
     padding-bottom: 4px;
   }
   .pdf-page-cabecalho .report-info {
-    gap: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
   }
   .pdf-page-cabecalho .report-info-line {
     display: block;
     margin: 0;
-    padding: 3px 0;
+    padding: 4px 0 5px;
     border-bottom: 1px solid #f0f0f0;
     font-size: 11px;
-    line-height: 1.45;
+    line-height: 1.55;
     color: #111;
   }
   .pdf-page-cabecalho .report-info-line:last-child {
@@ -829,9 +814,13 @@ export const FORMULARIO_PDF_STYLES = `
       page-break-inside: avoid !important;
       break-inside: avoid-page !important;
     }
+    .pdf-page-cabecalho .report-info {
+      gap: 4px !important;
+    }
     .pdf-page-cabecalho .report-info-line {
-      padding: 2px 0 !important;
+      padding: 3px 0 4px !important;
       font-size: 10.5px !important;
+      line-height: 1.5 !important;
     }
     .pdf-page-cabecalho .report-info-line .report-info-label,
     .pdf-page-cabecalho .report-info-line .report-info-colon,
@@ -941,7 +930,7 @@ function buildPageCabecalho(formData, options = {}) {
           ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
         </div>
         <div class="page-body-inner page-body-artwork">
-          <h2 class="page-title">${buildCabecalhoPageTitleHtml(formData)}</h2>
+          <h2 class="page-title">Informações do projeto</h2>
           <div class="page-content">
             <div class="report-info report-info-cabecalho">
               ${buildSectionFields(
