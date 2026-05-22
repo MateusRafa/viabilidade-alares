@@ -17,4 +17,5 @@ export const BRAND = {
   }
 };
 
+/** @deprecated Use getPdfPageCount(formData) — total dinâmico conforme passos */
 export const TOTAL_PDF_PAGES = 3;
