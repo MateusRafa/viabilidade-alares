@@ -147,7 +147,26 @@ export function getPdfPagesMeta(formData, options = {}) {
   return pages;
 }
 
-/** Mede na prévia (passos em página única) se texto + imagem estouram a folha */
+/** Área útil para conteúdo dentro de uma folha de passo (px) */
+export function getPassoContentAreaHeight(pageEl) {
+  if (!pageEl) return PDF_PASSO_PAGE_CONTENT_PX;
+  const pageContent = pageEl.querySelector('.page-content');
+  if (pageContent && pageContent.clientHeight > 80) {
+    return pageContent.clientHeight;
+  }
+  const pageH = pageEl.clientHeight || PDF_PASSO_PAGE_CONTENT_PX;
+  let chrome = 0;
+  pageEl.querySelectorAll('.capa-logo-wrap, .page-title, .artwork-page-footer').forEach((el) => {
+    chrome += el.offsetHeight || 0;
+  });
+  const style = pageEl.ownerDocument?.defaultView?.getComputedStyle(pageEl);
+  const pad = style
+    ? (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0)
+    : 0;
+  return Math.max(120, pageH - chrome - pad - 12);
+}
+
+/** Mede na prévia (passo em página única, altura fixa) se texto + imagem estouram a folha */
 export function measurePassoSplitsFromDocument(doc, passos = []) {
   if (!doc?.body) return passos.map(() => false);
 
@@ -157,23 +176,19 @@ export function measurePassoSplitsFromDocument(doc, passos = []) {
     const page = doc.querySelector(`.pdf-page-passo[data-passo-index="${i}"]`);
     if (!page) return false;
 
+    const block = page.querySelector('.passo-conteudo-bloco');
+    const pageContent = page.querySelector('.page-content');
+    if (!block || !pageContent) return false;
+
+    const available = pageContent.clientHeight || getPassoContentAreaHeight(page);
+
+    if (block.scrollHeight > available + 6) return true;
+
     const desc = page.querySelector('.passo-descricao-body');
     const imgBlock = page.querySelector('.passo-imagem-body');
     if (!desc || !imgBlock) return false;
 
-    const shell = page.querySelector('.page-shell-artwork');
-    const shellH = shell?.clientHeight || page.clientHeight || PDF_PASSO_PAGE_CONTENT_PX;
-
-    let chrome = 0;
-    page.querySelectorAll('.capa-logo-wrap, .page-title, .artwork-page-footer').forEach((el) => {
-      chrome += el.offsetHeight || 0;
-    });
-
-    const budget = Math.max(120, shellH - chrome - 16);
-    const descH = desc.scrollHeight;
-    const imgH = imgBlock.scrollHeight;
-
-    return descH + imgH > budget;
+    return desc.scrollHeight + imgBlock.scrollHeight > available + 6;
   });
 }
 
@@ -196,15 +211,9 @@ export function getPassoLayoutWarnings(passos, passoSplits, doc) {
     const desc = page?.querySelector('.passo-descricao-body');
     if (!desc) return;
 
-    const shell = page.querySelector('.page-shell-artwork');
-    const shellH = shell?.clientHeight || page.clientHeight || PDF_PASSO_PAGE_CONTENT_PX;
-    let chrome = 0;
-    page.querySelectorAll('.capa-logo-wrap, .page-title, .artwork-page-footer').forEach((el) => {
-      chrome += el.offsetHeight || 0;
-    });
-    const budget = Math.max(120, shellH - chrome - 16);
+    const available = getPassoContentAreaHeight(page);
 
-    if (desc.scrollHeight > budget) {
+    if (desc.scrollHeight > available + 6) {
       warnings.push({
         passoIndex: i,
         message: `Passo ${n}°: o texto é longo e pode ocupar mais de uma página no PDF.`
@@ -468,6 +477,11 @@ export const FORMULARIO_PDF_STYLES = `
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    box-sizing: border-box;
+  }
+  .pdf-page:not(.pdf-page-capa) {
+    height: 277mm;
+    max-height: 277mm;
   }
   .pdf-page + .pdf-page { margin-top: 12px; }
 
@@ -567,8 +581,24 @@ export const FORMULARIO_PDF_STYLES = `
     z-index: 1;
     display: flex;
     flex-direction: column;
-    min-height: 100%;
+    min-height: 0;
     flex: 1;
+    height: 100%;
+  }
+  .page-body-artwork {
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .pdf-page-passo .page-content,
+  .pdf-page-passo-imagem .page-content,
+  .pdf-page-lista-material .page-content {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
   }
   .page-shell-artwork .capa-logo-wrap {
     margin-bottom: 6mm;
@@ -581,10 +611,6 @@ export const FORMULARIO_PDF_STYLES = `
     text-transform: uppercase;
     letter-spacing: 0.02em;
     line-height: 1.35;
-  }
-  .page-body-artwork {
-    flex: 1;
-    padding: 0;
   }
   .artwork-page-footer {
     position: relative;
@@ -991,6 +1017,11 @@ export const FORMULARIO_PDF_STYLES = `
       break-inside: avoid-page !important;
       box-shadow: none !important;
     }
+    .pdf-page:not(.pdf-page-capa) {
+      height: 277mm !important;
+      max-height: 277mm !important;
+      overflow: hidden !important;
+    }
     .pdf-page:last-child {
       page-break-after: auto !important;
       break-after: auto !important;
@@ -1352,6 +1383,7 @@ export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
 }
 
 export function buildFullPdfHtml(formData, meta = {}, options = {}) {
+  const measureNonce = options.measureNonce ?? '';
   const fileBase =
     formData.cabecalho.ordemJira?.trim() ||
     formData.cabecalho.contrato?.trim() ||
@@ -1371,7 +1403,7 @@ export function buildFullPdfHtml(formData, meta = {}, options = {}) {
     <title>${escapeHtml(title)}</title>
     <style>${FORMULARIO_PDF_STYLES}</style>
   </head>
-  <body>
+  <body data-measure-nonce="${escapeHtml(measureNonce)}">
     ${buildPdfBodyHtml(formData, meta, options)}
   </body>
 </html>`;
