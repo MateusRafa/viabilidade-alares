@@ -68,15 +68,18 @@ export const PDF_PASSO_PAGE_CONTENT_PX = 1046;
 /** Layout de páginas de um passo: blocos de texto + página de imagem opcional */
 export function defaultPassoLayout(passo) {
   const inner = getPassoDescricaoInnerHtml(passo);
+  const hasImage = !!passo?.imagemDataUrl?.trim();
   return {
     textChunkHtmls: [inner],
-    hasImagePage: !!passo?.imagemDataUrl?.trim()
+    hasImagePage: false,
+    imageOnFirstPage: hasImage
   };
 }
 
 function countPassoPages(layout) {
   if (!layout) return 1;
   const textPages = layout.textChunkHtmls?.length || 1;
+  if (layout.imageOnFirstPage) return textPages;
   if (!layout.hasImagePage) return textPages;
   if (textPages > 1) return textPages;
   return textPages + 1;
@@ -149,7 +152,7 @@ export function getPdfPagesMeta(formData, options = {}) {
         title: `Passo ${n}° — ${titulo}${suffix}`
       });
     }
-    if (layout.hasImagePage && chunkCount === 1) {
+    if (layout.hasImagePage && chunkCount === 1 && !layout.imageOnFirstPage) {
       pages.push({
         id: `passo-${n}-imagem`,
         number: pages.length + 1,
@@ -447,12 +450,33 @@ function measurePassoImageAppendHeight(passo, passoNumero, doc) {
   return h + 14;
 }
 
+/** Altura do bloco de texto do passo (rótulo + descrição + imagem opcional) */
+function measurePassoTextBlockHeight(chunkHtml, passo, passoNumero, doc, { includeImage = false } = {}) {
+  const probe = doc.createElement('div');
+  probe.className = 'passo-texto-bloco';
+  probe.style.cssText = PASSO_DESC_PROBE_STYLE;
+  doc.body.appendChild(probe);
+  const imageHtml = includeImage
+    ? `<div class="passo-imagem-apos-texto">${buildPassoImageBlock(passo, `Imagem do passo ${passoNumero}`, { showLabel: true })}</div>`
+    : '';
+  probe.innerHTML = `
+    <span class="report-info-label">Descrição</span>
+    <div class="passo-descricao-body">
+      <div class="${PASSO_DESC_MEASURE_CLASS}">${chunkHtml}</div>
+    </div>
+    ${imageHtml}`;
+  const h = probe.scrollHeight;
+  probe.remove();
+  return h;
+}
+
 /** Mede na prévia (passo em folha única para medição) quantas páginas de texto e se há página de imagem */
 export function measurePassoLayoutsFromDocument(doc, passos = []) {
   if (!doc?.body) return passos.map((p) => defaultPassoLayout(p));
 
   return passos.map((passo, i) => {
-    const hasImagePage = !!passo?.imagemDataUrl?.trim();
+    const hasImage = !!passo?.imagemDataUrl?.trim();
+    const passoNumero = i + 1;
     const page = doc.querySelector(`.pdf-page-passo[data-passo-index="${i}"]`);
 
     if (!page) {
@@ -472,26 +496,57 @@ export function measurePassoLayoutsFromDocument(doc, passos = []) {
       firstPageExtraPx: labelReserve
     });
 
-    if (hasImagePage && textChunkHtmls.length > 1) {
-      const probe = createPassoDescMeasureProbe(doc);
-      const imageReserve = measurePassoImageAppendHeight(passo, i + 1, doc);
-      const continLabelReserve = 24;
-      const lastChunk = textChunkHtmls[textChunkHtmls.length - 1];
-      const lastTextH = measurePassoDescHtmlHeight(lastChunk, probe);
+    let imageOnFirstPage = false;
+    let hasImagePage = false;
 
-      if (lastTextH + imageReserve > available + 8) {
-        const lastBudget = Math.max(100, available - imageReserve - continLabelReserve);
-        const reSplit = splitRichHtmlByMaxHeight(lastChunk, lastBudget, doc, {
-          firstPageExtraPx: continLabelReserve
+    if (hasImage) {
+      const imageReserve = measurePassoImageAppendHeight(passo, passoNumero, doc);
+
+      if (textChunkHtmls.length === 1) {
+        const chunk = textChunkHtmls[0];
+        const withImageH = measurePassoTextBlockHeight(chunk, passo, passoNumero, doc, {
+          includeImage: true
         });
-        textChunkHtmls = [...textChunkHtmls.slice(0, -1), ...reSplit];
+        const textOnlyH = measurePassoTextBlockHeight(chunk, passo, passoNumero, doc, {
+          includeImage: false
+        });
+
+        if (withImageH <= available + 8) {
+          imageOnFirstPage = true;
+        } else if (textOnlyH <= available + 8) {
+          hasImagePage = true;
+        } else {
+          textChunkHtmls = splitRichHtmlByMaxHeight(contentHtml, available, doc, {
+            firstPageExtraPx: labelReserve + imageReserve
+          });
+          if (textChunkHtmls.length === 1) {
+            hasImagePage = true;
+          }
+        }
       }
-      probe.remove();
+
+      if (textChunkHtmls.length > 1) {
+        hasImagePage = true;
+        const probe = createPassoDescMeasureProbe(doc);
+        const continLabelReserve = 24;
+        const lastChunk = textChunkHtmls[textChunkHtmls.length - 1];
+        const lastTextH = measurePassoDescHtmlHeight(lastChunk, probe);
+
+        if (lastTextH + imageReserve > available + 8) {
+          const lastBudget = Math.max(100, available - imageReserve - continLabelReserve);
+          const reSplit = splitRichHtmlByMaxHeight(lastChunk, lastBudget, doc, {
+            firstPageExtraPx: continLabelReserve
+          });
+          textChunkHtmls = [...textChunkHtmls.slice(0, -1), ...reSplit];
+        }
+        probe.remove();
+      }
     }
 
     return {
       textChunkHtmls: textChunkHtmls.length ? textChunkHtmls : [contentHtml],
-      hasImagePage
+      hasImagePage,
+      imageOnFirstPage
     };
   });
 }
@@ -518,7 +573,7 @@ export function getPassoLayoutWarnings(passos, passoLayouts) {
       });
     }
 
-    if (layout.hasImagePage) {
+    if (layout.hasImagePage && !layout.imageOnFirstPage) {
       const msg =
         textPages > 1
           ? `Passo ${n}°: a imagem ficará na mesma página da continuação do texto, abaixo do trecho que passou do limite.`
@@ -1683,10 +1738,13 @@ function buildPassoPagesHtml(passo, passoNumero, passoIndex, startPageNum, optio
   let pageNum = startPageNum;
 
   const imageOnContinuation = layout.hasImagePage && chunks.length > 1;
+  const imageOnFirstPage = layout.imageOnFirstPage === true;
 
   chunks.forEach((chunkHtml, chunkIndex) => {
     pageNum += 1;
     const isLastChunk = chunkIndex === chunks.length - 1;
+    const appendImage =
+      (imageOnFirstPage && chunkIndex === 0) || (imageOnContinuation && isLastChunk);
     html += buildPagePassoTextChunk(
       passo,
       passoNumero,
@@ -1695,11 +1753,11 @@ function buildPassoPagesHtml(passo, passoNumero, passoIndex, startPageNum, optio
       chunkHtml,
       chunkIndex,
       options,
-      { appendImage: imageOnContinuation && isLastChunk }
+      { appendImage }
     );
   });
 
-  if (layout.hasImagePage && !imageOnContinuation) {
+  if (layout.hasImagePage && !imageOnContinuation && !imageOnFirstPage) {
     pageNum += 1;
     html += buildPagePassoImageOnly(passo, passoNumero, passoIndex, pageNum, options);
   }
