@@ -57,8 +57,10 @@
   let previewHtmlDisplayed = '';
   /** HTML do iframe oculto só para medição de quebra de página */
   let measureHtml = '';
-  /** Scroll / página visível restaurados após recarregar a prévia */
-  let pendingPreviewScroll = null;
+  /** Seção do formulário em edição — prévia volta sempre para a página correspondente */
+  let previewFocusAnchor = 'capa';
+  /** Ignora eventos load antigos do iframe quando várias atualizações seguidas */
+  let previewApplyGeneration = 0;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: layoutsForPreview =
@@ -92,80 +94,87 @@
     };
   }
 
-  function capturePreviewScroll() {
-    if (typeof window === 'undefined') return;
-    const wrapper = previewFrameWrapperEl;
-    const win = previewIframeEl?.contentWindow;
-    const doc = previewIframeEl?.contentDocument;
-    let anchorPage = null;
+  function syncPreviewFocusFromTarget(target) {
+    if (!target?.closest) return false;
 
-    if (doc && win) {
-      const pages = doc.querySelectorAll('[data-pdf-page]');
-      const viewMid = win.innerHeight * 0.35;
-      for (const el of pages) {
-        const rect = el.getBoundingClientRect();
-        if (rect.bottom > viewMid) {
-          anchorPage = el.getAttribute('data-pdf-page');
-          break;
-        }
-      }
+    const editor = target.closest('.rich-editor[data-passo-index]');
+    if (editor) {
+      previewFocusAnchor = `passo:${editor.dataset.passoIndex ?? '0'}`;
+      return true;
     }
 
-    pendingPreviewScroll = {
-      wrapperTop: wrapper?.scrollTop ?? 0,
-      iframeTop:
-        win?.scrollY ??
-        doc?.documentElement?.scrollTop ??
-        doc?.body?.scrollTop ??
-        0,
-      anchorPage
-    };
+    if (target.closest('[data-editor="material"]')) {
+      previewFocusAnchor = 'listaMaterial';
+      return true;
+    }
+
+    const box = target.closest('[data-preview-anchor]');
+    if (!box) return false;
+
+    const anchor = box.dataset.previewAnchor;
+    if (anchor === 'passo') {
+      previewFocusAnchor = `passo:${box.dataset.passoIndex ?? '0'}`;
+    } else {
+      previewFocusAnchor = anchor;
+    }
+    return true;
   }
 
-  function restorePreviewScroll() {
-    const saved = pendingPreviewScroll;
-    if (!saved || !previewIframeEl?.contentDocument) return;
+  function handleFormPreviewActivity(event) {
+    syncPreviewFocusFromTarget(event.target);
+  }
 
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        const doc = previewIframeEl.contentDocument;
-        const win = previewIframeEl.contentWindow;
+  function findPreviewAnchorPageElement(doc) {
+    if (!doc || !previewFocusAnchor) return null;
 
-        if (saved.anchorPage != null && doc) {
-          const pageEl = doc.querySelector(`[data-pdf-page="${saved.anchorPage}"]`);
-          if (pageEl) {
-            pageEl.scrollIntoView({ block: 'start', behavior: 'auto' });
-            pendingPreviewScroll = null;
-            return;
-          }
-        }
+    if (previewFocusAnchor === 'capa') {
+      return doc.querySelector('.pdf-page-capa');
+    }
+    if (previewFocusAnchor === 'cabecalho') {
+      return doc.querySelector('.pdf-page-cabecalho');
+    }
+    if (previewFocusAnchor === 'listaMaterial') {
+      return (
+        doc.querySelector('[data-pdf-section="lista-material"]') ||
+        doc.querySelector('.pdf-page-lista-material')
+      );
+    }
+    if (previewFocusAnchor.startsWith('passo:')) {
+      const passoIndex = previewFocusAnchor.split(':')[1];
+      const passoNumero = Number(passoIndex) + 1;
+      return (
+        doc.querySelector(`.pdf-page-passo[data-passo-index="${passoIndex}"]`) ||
+        doc.querySelector(`[data-pdf-section="passo-${passoNumero}"]`)
+      );
+    }
+    return null;
+  }
 
-        const maxScroll = Math.max(
-          0,
-          (doc?.documentElement?.scrollHeight || 0) - (win?.innerHeight || 0)
-        );
-        const top = Math.min(saved.iframeTop, maxScroll);
-        if (win) win.scrollTo(0, top);
-        if (previewFrameWrapperEl) {
-          const wrapMax = Math.max(
-            0,
-            previewFrameWrapperEl.scrollHeight - previewFrameWrapperEl.clientHeight
-          );
-          previewFrameWrapperEl.scrollTop = Math.min(saved.wrapperTop, wrapMax);
-        }
-        pendingPreviewScroll = null;
-      });
-    });
+  function scrollPreviewToFocusAnchor(expectedGeneration) {
+    if (expectedGeneration != null && expectedGeneration !== previewApplyGeneration) return;
+
+    const doc = previewIframeEl?.contentDocument;
+    const win = previewIframeEl?.contentWindow;
+    if (!doc || !win) return;
+
+    const pageEl = findPreviewAnchorPageElement(doc);
+    if (pageEl) {
+      pageEl.scrollIntoView({ block: 'start', behavior: 'auto' });
+      return;
+    }
+
+    const fallback = doc.querySelector('.pdf-page-capa');
+    fallback?.scrollIntoView({ block: 'start', behavior: 'auto' });
   }
 
   function applyPreviewHtml() {
     if (!assetsReady) return;
+    previewApplyGeneration += 1;
     previewHtmlDisplayed = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
   }
 
   function schedulePreviewRefresh(immediate = false) {
     if (!assetsReady) return;
-    capturePreviewScroll();
     clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(
       () => {
@@ -177,7 +186,6 @@
 
   async function flushPreviewRefresh() {
     clearTimeout(previewDebounceTimer);
-    capturePreviewScroll();
     applyPreviewHtml();
     await tick();
     await new Promise((resolve) => {
@@ -192,7 +200,9 @@
       }
       previewIframeEl.addEventListener('load', done, { once: true });
     });
-    restorePreviewScroll();
+    const doc = previewIframeEl?.contentDocument;
+    if (doc) await waitForPrintImages(doc);
+    scrollPreviewToFocusAnchor(previewApplyGeneration);
   }
 
   function toggleSection(sectionId) {
@@ -253,7 +263,17 @@
 
   async function onPreviewIframeLoad() {
     if (!previewIframeEl?.contentDocument?.body || !assetsReady) return;
-    restorePreviewScroll();
+
+    const gen = previewApplyGeneration;
+    const doc = previewIframeEl.contentDocument;
+    await waitForPrintImages(doc);
+    await new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+
+    if (gen !== previewApplyGeneration) return;
+
+    scrollPreviewToFocusAnchor(gen);
     passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoLayouts);
   }
 
@@ -524,6 +544,7 @@
   }
 
   function handlePassoDescricaoInput(passoIndex, event) {
+    previewFocusAnchor = `passo:${passoIndex}`;
     syncDescricaoEditor(passoIndex, event.currentTarget);
     schedulePassoLayoutMeasure();
   }
@@ -651,9 +672,13 @@
   <div class="workspace">
     <!-- Coluna esquerda: formulário -->
     <aside class="form-column">
-      <div class="form-scroll">
+      <div
+        class="form-scroll"
+        on:focusin|capture={handleFormPreviewActivity}
+        on:input|capture={handleFormPreviewActivity}
+      >
         <!-- Box: Capa -->
-        <section class="form-box" class:expanded={expandedSections.capa}>
+        <section class="form-box" class:expanded={expandedSections.capa} data-preview-anchor="capa">
           <button
             type="button"
             class="form-box-header"
@@ -702,7 +727,7 @@
         </section>
 
         <!-- Box: Informações do projeto -->
-        <section class="form-box" class:expanded={expandedSections.cabecalho}>
+        <section class="form-box" class:expanded={expandedSections.cabecalho} data-preview-anchor="cabecalho">
           <button
             type="button"
             class="form-box-header"
@@ -752,7 +777,12 @@
           {@const uploadCtx = { type: 'passo', index: passoIndex }}
           {@const isLastPasso = passoIndex === formData.passos.length - 1}
           {@const canRemovePasso = passoIndex >= 1}
-          <section class="form-box" class:expanded={expandedSections[sectionId]}>
+          <section
+            class="form-box"
+            class:expanded={expandedSections[sectionId]}
+            data-preview-anchor="passo"
+            data-passo-index={passoIndex}
+          >
             <div class="form-box-header-row">
               <button
                 type="button"
@@ -867,7 +897,7 @@
         {/each}
 
         <!-- Box: Lista de Material -->
-        <section class="form-box" class:expanded={expandedSections.listaMaterial}>
+        <section class="form-box" class:expanded={expandedSections.listaMaterial} data-preview-anchor="listaMaterial">
           <button
             type="button"
             class="form-box-header"
