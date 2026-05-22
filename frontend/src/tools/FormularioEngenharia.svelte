@@ -87,6 +87,50 @@
     };
   }
 
+  function removePasso(passoIndex) {
+    if (passoIndex < 1 || formData.passos.length <= 1) return;
+
+    const passoExpanded = {};
+    formData.passos.forEach((_, i) => {
+      if (i === passoIndex) return;
+      const newIndex = i < passoIndex ? i : i - 1;
+      const oldId = passoSectionId(i);
+      if (expandedSections[oldId] !== undefined) {
+        passoExpanded[passoSectionId(newIndex)] = expandedSections[oldId];
+      }
+    });
+
+    expandedSections = {
+      capa: expandedSections.capa,
+      cabecalho: expandedSections.cabecalho,
+      listaMaterial: expandedSections.listaMaterial,
+      ...passoExpanded
+    };
+
+    for (const key of Object.keys(descricaoEditorEls)) {
+      if (key.startsWith('passo-')) delete descricaoEditorEls[key];
+    }
+    for (const key of Object.keys(descricaoEditorReady)) {
+      if (key.startsWith('passo-')) delete descricaoEditorReady[key];
+    }
+
+    formData = {
+      ...formData,
+      passos: formData.passos.filter((_, i) => i !== passoIndex)
+    };
+
+    if (uploadTarget?.type === 'passo' && uploadTarget.index === passoIndex) {
+      uploadTarget = null;
+    } else if (uploadTarget?.type === 'passo' && uploadTarget.index > passoIndex) {
+      uploadTarget = { type: 'passo', index: uploadTarget.index - 1 };
+    }
+    if (armedUploadTarget?.type === 'passo' && armedUploadTarget.index === passoIndex) {
+      disarmImagePaste();
+    } else if (armedUploadTarget?.type === 'passo' && armedUploadTarget.index > passoIndex) {
+      armedUploadTarget = { type: 'passo', index: armedUploadTarget.index - 1 };
+    }
+  }
+
   function applyImageToTarget(file) {
     if (!file) return false;
     if (!uploadTarget) return false;
@@ -491,6 +535,7 @@
           {@const editorKey = descricaoEditorKey(passoIndex)}
           {@const uploadCtx = { type: 'passo', index: passoIndex }}
           {@const isLastPasso = passoIndex === formData.passos.length - 1}
+          {@const canRemovePasso = passoIndex >= 1}
           <section class="form-box" class:expanded={expandedSections[sectionId]}>
             <div class="form-box-header-row">
               <button
@@ -504,6 +549,17 @@
                 >
                 <span class="chevron" class:open={expandedSections[sectionId]}>▼</span>
               </button>
+              {#if canRemovePasso}
+                <button
+                  type="button"
+                  class="btn-remove-passo"
+                  title="Remover Passo {passoIndex + 1}°"
+                  aria-label="Remover este passo"
+                  on:click|stopPropagation={() => removePasso(passoIndex)}
+                >
+                  −
+                </button>
+              {/if}
               {#if isLastPasso}
                 <button
                   type="button"
@@ -756,6 +812,24 @@
 
   .btn-add-passo:hover {
     filter: brightness(1.1);
+  }
+
+  .btn-remove-passo {
+    flex-shrink: 0;
+    width: 2.75rem;
+    border: none;
+    border-left: 1px solid rgba(255, 255, 255, 0.35);
+    background: linear-gradient(135deg, #9b2c2c 0%, #c53030 100%);
+    color: white;
+    font-size: 1.35rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .btn-remove-passo:hover {
+    filter: brightness(1.08);
   }
 
   .form-box-header {
