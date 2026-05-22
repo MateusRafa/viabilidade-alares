@@ -37,6 +37,8 @@
   let assetsReady = false;
   let passoImageInput;
   let previewIframeEl;
+  let measureIframeEl;
+  let previewFrameWrapperEl;
   /** { type: 'passo', index: number } | { type: 'material' } */
   let uploadTarget = null;
   let armedUploadTarget = null;
@@ -44,32 +46,154 @@
   const descricaoEditorReady = {};
   const MAX_PASSO_IMAGE_MB = 8;
 
-  /** Quando true, prévia monta passos em página única para medir altura */
-  let measuringPassoLayouts = false;
+  const PREVIEW_DEBOUNCE_MS = 420;
+  const MEASURE_DEBOUNCE_MS = 420;
+
   let passoLayouts = [];
   let passoLayoutWarnings = [];
-  let measurePassoTimer = null;
   let measureDebounceTimer = null;
+  let previewDebounceTimer = null;
+  /** HTML aplicado no iframe visível (atualização com debounce) */
+  let previewHtmlDisplayed = '';
+  /** HTML do iframe oculto só para medição de quebra de página */
+  let measureHtml = '';
+  /** Scroll / página visível restaurados após recarregar a prévia */
+  let pendingPreviewScroll = null;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: layoutsForPreview =
     passoLayouts.length === formData.passos.length
       ? passoLayouts
       : formData.passos.map((p) => defaultPassoLayout(p));
-  $: previewHtml = buildFullPdfHtml(formData, {}, {
-    baseUrl: previewBaseUrl,
-    logoDataUrl,
-    capaOndasDataUrl,
-    passoLayouts: layoutsForPreview,
-    measurePassoLayout: measuringPassoLayouts,
-    measureNonce: measuringPassoLayouts ? `${measurePassoKey}-m` : `${measurePassoKey}-v`
-  });
 
   $: measurePassoKey = assetsReady
     ? JSON.stringify(
         formData.passos.map((p) => [p.tituloPasso, p.descricao, p.imagemDataUrl?.length || 0])
       )
     : '';
+
+  $: formPreviewKey = assetsReady
+    ? JSON.stringify({
+        capa: formData.capa,
+        cabecalho: formData.cabecalho,
+        passos: formData.passos,
+        listaMaterial: formData.listaMaterial
+      })
+    : '';
+
+  function buildPreviewHtmlOptions({ measurePassoLayout = false, measureNonce = '' } = {}) {
+    return {
+      baseUrl: previewBaseUrl,
+      logoDataUrl,
+      capaOndasDataUrl,
+      passoLayouts: layoutsForPreview,
+      measurePassoLayout,
+      measureNonce
+    };
+  }
+
+  function capturePreviewScroll() {
+    if (typeof window === 'undefined') return;
+    const wrapper = previewFrameWrapperEl;
+    const win = previewIframeEl?.contentWindow;
+    const doc = previewIframeEl?.contentDocument;
+    let anchorPage = null;
+
+    if (doc && win) {
+      const pages = doc.querySelectorAll('[data-pdf-page]');
+      const viewMid = win.innerHeight * 0.35;
+      for (const el of pages) {
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom > viewMid) {
+          anchorPage = el.getAttribute('data-pdf-page');
+          break;
+        }
+      }
+    }
+
+    pendingPreviewScroll = {
+      wrapperTop: wrapper?.scrollTop ?? 0,
+      iframeTop:
+        win?.scrollY ??
+        doc?.documentElement?.scrollTop ??
+        doc?.body?.scrollTop ??
+        0,
+      anchorPage
+    };
+  }
+
+  function restorePreviewScroll() {
+    const saved = pendingPreviewScroll;
+    if (!saved || !previewIframeEl?.contentDocument) return;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const doc = previewIframeEl.contentDocument;
+        const win = previewIframeEl.contentWindow;
+
+        if (saved.anchorPage != null && doc) {
+          const pageEl = doc.querySelector(`[data-pdf-page="${saved.anchorPage}"]`);
+          if (pageEl) {
+            pageEl.scrollIntoView({ block: 'start', behavior: 'auto' });
+            pendingPreviewScroll = null;
+            return;
+          }
+        }
+
+        const maxScroll = Math.max(
+          0,
+          (doc?.documentElement?.scrollHeight || 0) - (win?.innerHeight || 0)
+        );
+        const top = Math.min(saved.iframeTop, maxScroll);
+        if (win) win.scrollTo(0, top);
+        if (previewFrameWrapperEl) {
+          const wrapMax = Math.max(
+            0,
+            previewFrameWrapperEl.scrollHeight - previewFrameWrapperEl.clientHeight
+          );
+          previewFrameWrapperEl.scrollTop = Math.min(saved.wrapperTop, wrapMax);
+        }
+        pendingPreviewScroll = null;
+      });
+    });
+  }
+
+  function applyPreviewHtml() {
+    if (!assetsReady) return;
+    previewHtmlDisplayed = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
+  }
+
+  function schedulePreviewRefresh(immediate = false) {
+    if (!assetsReady) return;
+    capturePreviewScroll();
+    clearTimeout(previewDebounceTimer);
+    previewDebounceTimer = setTimeout(
+      () => {
+        applyPreviewHtml();
+      },
+      immediate ? 0 : PREVIEW_DEBOUNCE_MS
+    );
+  }
+
+  async function flushPreviewRefresh() {
+    clearTimeout(previewDebounceTimer);
+    capturePreviewScroll();
+    applyPreviewHtml();
+    await tick();
+    await new Promise((resolve) => {
+      if (!previewIframeEl) {
+        resolve();
+        return;
+      }
+      const done = () => resolve();
+      if (previewIframeEl.contentDocument?.body?.querySelector('.pdf-document')) {
+        done();
+        return;
+      }
+      previewIframeEl.addEventListener('load', done, { once: true });
+    });
+    restorePreviewScroll();
+  }
 
   function toggleSection(sectionId) {
     expandedSections = {
@@ -82,9 +206,9 @@
   $: previewPagesHint = `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material)`;
 
   async function runPassoLayoutMeasure() {
-    if (!previewIframeEl?.contentDocument?.body || !assetsReady) return;
+    if (!measureIframeEl?.contentDocument?.body || !assetsReady) return;
 
-    const doc = previewIframeEl.contentDocument;
+    const doc = measureIframeEl.contentDocument;
     await waitForPrintImages(doc);
     await new Promise((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -93,11 +217,9 @@
     const next = measurePassoLayoutsFromDocument(doc, formData.passos);
     const changed = JSON.stringify(next) !== JSON.stringify(passoLayouts);
 
-    measuringPassoLayouts = false;
-    clearTimeout(measurePassoTimer);
-
     if (changed) {
       passoLayouts = next;
+      schedulePreviewRefresh(true);
       await tick();
       return;
     }
@@ -108,37 +230,39 @@
   function schedulePassoLayoutMeasure(immediate = false) {
     if (typeof window === 'undefined' || !assetsReady) return;
 
-    const startMeasure = () => {
-      clearTimeout(measurePassoTimer);
-      clearTimeout(measureDebounceTimer);
-      measuringPassoLayouts = true;
-      measurePassoTimer = setTimeout(() => {
-        measuringPassoLayouts = false;
-      }, 10000);
-    };
-
-    if (immediate) {
-      startMeasure();
-      return;
-    }
-
     clearTimeout(measureDebounceTimer);
-    measureDebounceTimer = setTimeout(startMeasure, 400);
+    measureDebounceTimer = setTimeout(
+      () => {
+        measureHtml = buildFullPdfHtml(
+          formData,
+          {},
+          buildPreviewHtmlOptions({
+            measurePassoLayout: true,
+            measureNonce: `${measurePassoKey}-m`
+          })
+        );
+      },
+      immediate ? 0 : MEASURE_DEBOUNCE_MS
+    );
+  }
+
+  async function onMeasureIframeLoad() {
+    if (!measureIframeEl?.contentDocument?.body || !assetsReady || !measureHtml) return;
+    await runPassoLayoutMeasure();
   }
 
   async function onPreviewIframeLoad() {
     if (!previewIframeEl?.contentDocument?.body || !assetsReady) return;
-
-    if (measuringPassoLayouts) {
-      await runPassoLayoutMeasure();
-      return;
-    }
-
+    restorePreviewScroll();
     passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoLayouts);
   }
 
   $: if (measurePassoKey) {
     schedulePassoLayoutMeasure();
+  }
+
+  $: if (formPreviewKey) {
+    schedulePreviewRefresh();
   }
 
   function passoSectionId(index) {
@@ -466,9 +590,10 @@
     }
     generatingPDF = true;
     pdfError = '';
-    await tick();
+    await flushPreviewRefresh();
     const fileName = `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
-    const result = await printEngineeringPdf(previewIframeEl, previewHtml, {
+    const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
+    const result = await printEngineeringPdf(previewIframeEl, printHtml, {
       title: fileName.replace('.pdf', '')
     });
     generatingPDF = false;
@@ -499,6 +624,8 @@
       logoDataUrl = logo;
       capaOndasDataUrl = ondas;
       assetsReady = true;
+      applyPreviewHtml();
+      schedulePassoLayoutMeasure(true);
 
       const onWindowPaste = (e) => {
         if (!armedUploadTarget) return;
@@ -514,6 +641,8 @@
     return () => {
       removeWindowPaste?.();
       disarmImagePaste();
+      clearTimeout(previewDebounceTimer);
+      clearTimeout(measureDebounceTimer);
     };
   });
 </script>
@@ -790,18 +919,28 @@
     <main class="preview-column">
       <div class="preview-header">
         <h2>Prévia do PDF</h2>
-        <span class="preview-hint">{previewPagesHint} — atualiza em tempo real</span>
+        <span class="preview-hint">{previewPagesHint} — atualiza após você pausar a edição (~0,4 s)</span>
       </div>
-      <div class="preview-frame-wrapper">
+      <div class="preview-frame-wrapper" bind:this={previewFrameWrapperEl}>
         {#if !assetsReady}
           <p class="preview-loading">Carregando imagens da capa…</p>
         {/if}
+        <iframe
+          bind:this={measureIframeEl}
+          title="Medição de layout do PDF"
+          class="pdf-measure-iframe"
+          srcdoc={measureHtml}
+          sandbox="allow-same-origin"
+          tabindex="-1"
+          aria-hidden="true"
+          on:load={onMeasureIframeLoad}
+        ></iframe>
         <iframe
           bind:this={previewIframeEl}
           title="Prévia do PDF"
           class="pdf-preview-iframe"
           class:hidden-until-ready={!assetsReady}
-          srcdoc={previewHtml}
+          srcdoc={previewHtmlDisplayed}
           sandbox="allow-same-origin allow-modals"
           tabindex="-1"
           on:load={onPreviewIframeLoad}
@@ -1245,6 +1384,18 @@
     margin: 0 0 0.75rem;
     font-size: 0.875rem;
     color: #6b7280;
+  }
+
+  .pdf-measure-iframe {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+    border: 0;
+    left: -9999px;
+    top: 0;
   }
 
   .pdf-preview-iframe.hidden-until-ready {
