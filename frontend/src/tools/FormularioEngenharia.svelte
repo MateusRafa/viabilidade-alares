@@ -5,7 +5,8 @@
     normalizeFormData,
     emptyPasso,
     getPdfPageCount,
-    measurePassoSplitsFromDocument,
+    defaultPassoLayout,
+    measurePassoLayoutsFromDocument,
     getPassoLayoutWarnings,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
@@ -44,19 +45,24 @@
   const MAX_PASSO_IMAGE_MB = 8;
 
   /** Quando true, prévia monta passos em página única para medir altura */
-  let measuringPassoSplits = false;
-  let passoSplits = [];
+  let measuringPassoLayouts = false;
+  let passoLayouts = [];
   let passoLayoutWarnings = [];
   let measurePassoTimer = null;
   let measureDebounceTimer = null;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
+  $: layoutsForPreview =
+    passoLayouts.length === formData.passos.length
+      ? passoLayouts
+      : formData.passos.map((p) => defaultPassoLayout(p));
   $: previewHtml = buildFullPdfHtml(formData, {}, {
     baseUrl: previewBaseUrl,
     logoDataUrl,
     capaOndasDataUrl,
-    passoSplits: measuringPassoSplits ? formData.passos.map(() => false) : passoSplits,
-    measureNonce: measuringPassoSplits ? `${measurePassoKey}-m` : `${measurePassoKey}-v`
+    passoLayouts: layoutsForPreview,
+    measurePassoLayout: measuringPassoLayouts,
+    measureNonce: measuringPassoLayouts ? `${measurePassoKey}-m` : `${measurePassoKey}-v`
   });
 
   $: measurePassoKey = assetsReady
@@ -72,10 +78,10 @@
     };
   }
 
-  $: pdfPageCount = getPdfPageCount(formData, { passoSplits });
+  $: pdfPageCount = getPdfPageCount(formData, { passoLayouts: layoutsForPreview });
   $: previewPagesHint = `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material)`;
 
-  async function runPassoSplitMeasure() {
+  async function runPassoLayoutMeasure() {
     if (!previewIframeEl?.contentDocument?.body || !assetsReady) return;
 
     const doc = previewIframeEl.contentDocument;
@@ -84,30 +90,30 @@
       requestAnimationFrame(() => requestAnimationFrame(resolve));
     });
 
-    const next = measurePassoSplitsFromDocument(doc, formData.passos);
-    const changed = JSON.stringify(next) !== JSON.stringify(passoSplits);
+    const next = measurePassoLayoutsFromDocument(doc, formData.passos);
+    const changed = JSON.stringify(next) !== JSON.stringify(passoLayouts);
 
-    measuringPassoSplits = false;
+    measuringPassoLayouts = false;
     clearTimeout(measurePassoTimer);
 
     if (changed) {
-      passoSplits = next;
+      passoLayouts = next;
       await tick();
       return;
     }
 
-    passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoSplits, doc);
+    passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoLayouts);
   }
 
-  function schedulePassoSplitMeasure(immediate = false) {
+  function schedulePassoLayoutMeasure(immediate = false) {
     if (typeof window === 'undefined' || !assetsReady) return;
 
     const startMeasure = () => {
       clearTimeout(measurePassoTimer);
       clearTimeout(measureDebounceTimer);
-      measuringPassoSplits = true;
+      measuringPassoLayouts = true;
       measurePassoTimer = setTimeout(() => {
-        measuringPassoSplits = false;
+        measuringPassoLayouts = false;
       }, 10000);
     };
 
@@ -123,28 +129,20 @@
   async function onPreviewIframeLoad() {
     if (!previewIframeEl?.contentDocument?.body || !assetsReady) return;
 
-    if (measuringPassoSplits) {
-      await runPassoSplitMeasure();
+    if (measuringPassoLayouts) {
+      await runPassoLayoutMeasure();
       return;
     }
 
-    passoLayoutWarnings = getPassoLayoutWarnings(
-      formData.passos,
-      passoSplits,
-      previewIframeEl.contentDocument
-    );
+    passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoLayouts);
   }
 
   $: if (measurePassoKey) {
-    schedulePassoSplitMeasure();
+    schedulePassoLayoutMeasure();
   }
 
   function passoSectionId(index) {
     return `passo-${index}`;
-  }
-
-  function passoLayoutWarning(passoIndex) {
-    return passoLayoutWarnings.find((w) => w.passoIndex === passoIndex);
   }
 
   function updatePasso(index, patch) {
@@ -240,7 +238,7 @@
       const patch = { imagemDataUrl: dataUrl, imagemNome: nome };
       if (uploadTarget.type === 'passo') {
         updatePasso(uploadTarget.index, patch);
-        schedulePassoSplitMeasure(true);
+        schedulePassoLayoutMeasure(true);
       }
     };
     reader.onerror = () => {
@@ -403,7 +401,7 @@
 
   function handlePassoDescricaoInput(passoIndex, event) {
     syncDescricaoEditor(passoIndex, event.currentTarget);
-    schedulePassoSplitMeasure();
+    schedulePassoLayoutMeasure();
   }
 
   function handleMaterialDescricaoInput(event) {
@@ -445,7 +443,7 @@
 
   function clearPassoImage(passoIndex) {
     updatePasso(passoIndex, { imagemDataUrl: '', imagemNome: '' });
-    schedulePassoSplitMeasure(true);
+    schedulePassoLayoutMeasure(true);
   }
 
   function registerDescricaoEditor(node, params) {
@@ -732,11 +730,9 @@
                   </div>
                 </div>
               </div>
-              {#if passoLayoutWarning(passoIndex)}
-                <p class="passo-layout-warning" role="status">
-                  {passoLayoutWarning(passoIndex).message}
-                </p>
-              {/if}
+              {#each passoLayoutWarnings.filter((w) => w.passoIndex === passoIndex) as w (w.message)}
+                <p class="passo-layout-warning" role="status">{w.message}</p>
+              {/each}
             {/if}
           </section>
         {/each}
