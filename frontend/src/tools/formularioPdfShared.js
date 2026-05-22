@@ -934,7 +934,8 @@ export const FORMULARIO_PDF_STYLES = `
     display: none;
   }
 
-  /* —— Páginas 2 e 3 — visual alinhado à capa (Imagem1 + Imagem2) —— */
+  /* —— Páginas internas — visual alinhado à capa (Imagem1 + Imagem2) —— */
+  .pdf-page-cabecalho,
   .pdf-page-passo1,
   .pdf-page-passo,
   .pdf-page-lista-material {
@@ -957,6 +958,7 @@ export const FORMULARIO_PDF_STYLES = `
     flex-direction: column;
     overflow: hidden;
   }
+  .pdf-page-cabecalho .page-content,
   .pdf-page-passo .page-content,
   .pdf-page-passo-imagem .page-content,
   .pdf-page-lista-material .page-content {
@@ -1154,25 +1156,8 @@ export const FORMULARIO_PDF_STYLES = `
   }
   .empty-value { color: #aaa; font-style: italic; }
 
-  /* Página 2 — rótulo e valor na mesma linha (cabe tudo em 1 folha) */
-  .pdf-page-cabecalho {
-    padding: 14mm 14mm 10mm;
-  }
-  .pdf-page-cabecalho .page-shell-artwork .capa-logo-wrap {
-    margin-bottom: 4mm;
-  }
-  .pdf-page-cabecalho .capa-logo {
-    height: 48px;
-  }
-  .pdf-page-cabecalho .page-body-artwork {
-    padding: 0;
-  }
-  .pdf-page-cabecalho .page-title {
-    font-size: 14px;
-    margin-bottom: 6px;
-    padding-bottom: 4px;
-  }
-  .pdf-page-cabecalho .report-info {
+  /* Informações do projeto — rótulo e valor na mesma linha (Operação: Alares) */
+  .pdf-page-cabecalho .report-info-cabecalho {
     display: flex;
     flex-direction: column;
     gap: 5px;
@@ -1216,9 +1201,6 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-cabecalho .report-info-line-multiline .report-info-value-multiline {
     display: inline;
     white-space: pre-wrap;
-  }
-  .pdf-page-cabecalho .artwork-page-footer {
-    padding-top: 4mm;
   }
 
   .pdf-page-lista-material .lista-material-body {
@@ -1421,11 +1403,13 @@ export const FORMULARIO_PDF_STYLES = `
     .pdf-page + .pdf-page {
       margin-top: 0 !important;
     }
-    .pdf-page-cabecalho {
+    .pdf-page-cabecalho,
+    .pdf-page-passo,
+    .pdf-page-passo-imagem {
       page-break-inside: avoid !important;
       break-inside: avoid-page !important;
     }
-    .pdf-page-cabecalho .report-info {
+    .pdf-page-cabecalho .report-info-cabecalho {
       gap: 4px !important;
     }
     .pdf-page-cabecalho .report-info-line {
@@ -1437,11 +1421,6 @@ export const FORMULARIO_PDF_STYLES = `
     .pdf-page-cabecalho .report-info-line .report-info-colon,
     .pdf-page-cabecalho .report-info-line .report-info-value {
       font-size: 10.5px !important;
-    }
-    .pdf-page-passo,
-    .pdf-page-passo-imagem {
-      page-break-inside: avoid !important;
-      break-inside: avoid-page !important;
     }
     .passo-conteudo-bloco,
     .passo-descricao-body,
@@ -1551,7 +1530,7 @@ function buildPageCabecalho(formData, options = {}) {
     : '';
 
   return `
-    <div class="pdf-page pdf-page-cabecalho" data-pdf-page="2">
+    <div class="pdf-page pdf-page-cabecalho" data-pdf-page="2" data-pdf-section="cabecalho">
       ${ondasImg}
       <div class="page-shell-artwork">
         <div class="capa-logo-wrap">
