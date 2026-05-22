@@ -46,7 +46,52 @@ function emptyCabecalho() {
   return Object.fromEntries(CABECALHO_FIELDS.map(({ key }) => [key, '']));
 }
 
-/** Estado inicial do formulário (Capa, Cabeçalho, Passo 1) */
+/** Bloco de passo ou lista de material (mesma estrutura) */
+export function emptyPasso() {
+  return {
+    tituloPasso: 'XXXXX',
+    descricao: '',
+    imagemDataUrl: '',
+    imagemNome: ''
+  };
+}
+
+export function emptyListaMaterial() {
+  return {
+    descricao: '',
+    imagemDataUrl: '',
+    imagemNome: ''
+  };
+}
+
+/** Total de páginas: capa + informações + N passos + lista de material */
+export function getPdfPageCount(formData) {
+  const passos = formData?.passos?.length ?? 1;
+  return 2 + passos + 1;
+}
+
+export function normalizeFormData(data) {
+  const base = defaultFormData();
+  if (!data || typeof data !== 'object') return base;
+
+  let passos = data.passos;
+  if (!Array.isArray(passos) || !passos.length) {
+    passos = data.passo1 ? [{ ...emptyPasso(), ...data.passo1 }] : base.passos;
+  } else {
+    passos = passos.map((p) => ({ ...emptyPasso(), ...p }));
+  }
+
+  return {
+    ...base,
+    ...data,
+    capa: { ...base.capa, ...data.capa },
+    cabecalho: { ...base.cabecalho, ...data.cabecalho },
+    passos,
+    listaMaterial: { ...emptyListaMaterial(), ...data.listaMaterial }
+  };
+}
+
+/** Estado inicial do formulário */
 export function defaultFormData() {
   return {
     capa: {
@@ -56,15 +101,34 @@ export function defaultFormData() {
       cidade: ''
     },
     cabecalho: emptyCabecalho(),
-    passo1: {
-      tituloPasso: 'XXXXX',
-      descricao: '',
-      imagemDataUrl: '',
-      imagemNome: ''
-    }
+    passos: [emptyPasso()],
+    listaMaterial: emptyListaMaterial()
   };
 }
 
+export function getPdfPagesMeta(formData) {
+  const pages = [
+    { id: 'capa', number: 1, title: 'Capa' },
+    { id: 'cabecalho', number: 2, title: 'Informações do projeto' }
+  ];
+  (formData.passos || []).forEach((passo, i) => {
+    const n = i + 1;
+    const titulo = passo.tituloPasso?.trim() || 'XXXXX';
+    pages.push({
+      id: `passo-${n}`,
+      number: pages.length + 1,
+      title: `Passo ${n}° — ${titulo}`
+    });
+  });
+  pages.push({
+    id: 'listaMaterial',
+    number: pages.length + 1,
+    title: 'Lista de Material'
+  });
+  return pages;
+}
+
+/** @deprecated Prefer getPdfPagesMeta(formData) */
 export const PDF_PAGES = [
   { id: 'capa', number: 1, title: 'Capa', formKey: 'capa' },
   { id: 'cabecalho', number: 2, title: 'Informações do projeto', formKey: 'cabecalho' },
@@ -406,7 +470,9 @@ export const FORMULARIO_PDF_STYLES = `
   }
 
   /* —— Páginas 2 e 3 — visual alinhado à capa (Imagem1 + Imagem2) —— */
-  .pdf-page-passo1 {
+  .pdf-page-passo1,
+  .pdf-page-passo,
+  .pdf-page-lista-material {
     padding: 18mm 16mm 14mm;
   }
   .page-shell-artwork {
@@ -950,8 +1016,8 @@ function buildPageCabecalho(formData, options = {}) {
   `;
 }
 
-function buildPasso1ImageBlock(passo1 = {}) {
-  const src = passo1.imagemDataUrl?.trim();
+function buildPassoImageBlock(passo = {}, altFallback = 'Imagem') {
+  const src = passo.imagemDataUrl?.trim();
   if (!src) {
     return `
       <div class="passo1-imagem-wrap">
@@ -965,54 +1031,93 @@ function buildPasso1ImageBlock(passo1 = {}) {
       <img
         class="passo1-imagem"
         src="${attrUrl(src)}"
-        alt="${escapeHtml(passo1.imagemNome || 'Imagem do passo 1')}"
+        alt="${escapeHtml(passo.imagemNome || altFallback)}"
       />
     </div>`;
 }
 
-function buildPagePasso1(formData, options = {}) {
+function buildPagePasso(passo, passoNumero, pageNum, formData, options = {}) {
   const logoUrl = getLogoUrl(options);
   const ondasUrl = getCapaOndasUrl(options);
-  const clientLabel = getClientLabel(formData);
-  const tituloPasso = formData.passo1.tituloPasso?.trim() || 'XXXXX';
+  const tituloPasso = passo.tituloPasso?.trim() || 'XXXXX';
   const ondasImg = ondasUrl
     ? `<img class="capa-ondas-svg" src="${attrUrl(ondasUrl)}" alt="" aria-hidden="true" />`
     : '';
-  const clientBlock = clientLabel
-    ? `<p class="page-top-client">${escapeHtml(clientLabel)}</p>`
-    : '';
 
   return `
-    <div class="pdf-page pdf-page-passo1" data-pdf-page="3">
+    <div class="pdf-page pdf-page-passo" data-pdf-page="${pageNum}" data-pdf-section="passo-${passoNumero}">
       ${ondasImg}
       <div class="page-shell-artwork">
         <div class="capa-logo-wrap">
           ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
         </div>
-        ${clientBlock}
         <div class="page-body-inner page-body-artwork">
-          <h2 class="page-title">Passo 1° — ${escapeHtml(tituloPasso)}</h2>
+          <h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}</h2>
           <div class="page-content">
             <div class="report-info">
               ${buildSectionFields([
-                { label: 'Descrição', value: formData.passo1.descricao, rich: true }
+                { label: 'Descrição', value: passo.descricao, rich: true }
               ])}
-              ${buildPasso1ImageBlock(formData.passo1)}
+              ${buildPassoImageBlock(passo, `Imagem do passo ${passoNumero}`)}
             </div>
           </div>
         </div>
-        ${buildArtworkPageFooter(3)}
+        ${buildArtworkPageFooter(pageNum)}
+      </div>
+    </div>
+  `;
+}
+
+function buildPageListaMaterial(formData, pageNum, options = {}) {
+  const logoUrl = getLogoUrl(options);
+  const ondasUrl = getCapaOndasUrl(options);
+  const material = formData.listaMaterial || emptyListaMaterial();
+  const ondasImg = ondasUrl
+    ? `<img class="capa-ondas-svg" src="${attrUrl(ondasUrl)}" alt="" aria-hidden="true" />`
+    : '';
+
+  return `
+    <div class="pdf-page pdf-page-lista-material" data-pdf-page="${pageNum}" data-pdf-section="lista-material">
+      ${ondasImg}
+      <div class="page-shell-artwork">
+        <div class="capa-logo-wrap">
+          ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
+        </div>
+        <div class="page-body-inner page-body-artwork">
+          <h2 class="page-title">Lista de Material</h2>
+          <div class="page-content">
+            <div class="report-info">
+              ${buildSectionFields([
+                { label: 'Descrição', value: material.descricao, rich: true }
+              ])}
+              ${buildPassoImageBlock(material, 'Imagem da lista de material')}
+            </div>
+          </div>
+        </div>
+        ${buildArtworkPageFooter(pageNum)}
       </div>
     </div>
   `;
 }
 
 export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
+  const passos = formData.passos?.length ? formData.passos : [emptyPasso()];
+  let pageNum = 2;
+  const passosHtml = passos
+    .map((passo, index) => {
+      pageNum += 1;
+      return buildPagePasso(passo, index + 1, pageNum, formData, options);
+    })
+    .join('');
+  pageNum += 1;
+  const listaMaterialHtml = buildPageListaMaterial(formData, pageNum, options);
+
   return `
     <div class="pdf-document">
       ${buildPageCapa(formData, options)}
       ${buildPageCabecalho(formData, options)}
-      ${buildPagePasso1(formData, options)}
+      ${passosHtml}
+      ${listaMaterialHtml}
     </div>
   `;
 }
