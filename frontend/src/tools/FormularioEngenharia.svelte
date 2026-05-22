@@ -796,7 +796,8 @@
     min-width: 0;
   }
 
-  .btn-add-passo {
+  .btn-add-passo,
+  .btn-remove-passo {
     flex-shrink: 0;
     width: 2.75rem;
     border: none;
@@ -810,26 +811,9 @@
     padding: 0;
   }
 
-  .btn-add-passo:hover {
-    filter: brightness(1.1);
-  }
-
-  .btn-remove-passo {
-    flex-shrink: 0;
-    width: 2.75rem;
-    border: none;
-    border-left: 1px solid rgba(255, 255, 255, 0.35);
-    background: linear-gradient(135deg, #9b2c2c 0%, #c53030 100%);
-    color: white;
-    font-size: 1.35rem;
-    font-weight: 700;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0;
-  }
-
+  .btn-add-passo:hover,
   .btn-remove-passo:hover {
-    filter: brightness(1.08);
+    filter: brightness(1.1);
   }
 
   .form-box-header {
