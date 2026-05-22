@@ -58,9 +58,7 @@ export function emptyPasso() {
 
 export function emptyListaMaterial() {
   return {
-    descricao: '',
-    imagemDataUrl: '',
-    imagemNome: ''
+    descricao: ''
   };
 }
 
@@ -744,6 +742,15 @@ export const FORMULARIO_PDF_STYLES = `
     padding-top: 4mm;
   }
 
+  .pdf-page-lista-material .lista-material-body {
+    margin-top: 2mm;
+  }
+  .pdf-page-lista-material .lista-material-conteudo {
+    font-size: 12px;
+    line-height: 1.5;
+    color: #333;
+  }
+
   .passo1-imagem-wrap {
     display: flex;
     flex-direction: column;
@@ -1068,6 +1075,16 @@ function buildPagePasso(passo, passoNumero, pageNum, formData, options = {}) {
   `;
 }
 
+function buildListaMaterialConteudoHtml(material) {
+  const valueHtml = displayDescricaoValue(material.descricao);
+  const isEmpty = valueHtml.includes('empty-value');
+  const valueClass = isEmpty
+    ? 'report-info-value report-info-value-multiline lista-material-conteudo'
+    : 'report-info-value report-info-value-multiline report-info-rich lista-material-conteudo';
+  const tag = isEmpty ? 'span' : 'div';
+  return `<${tag} class="${valueClass}">${valueHtml}</${tag}>`;
+}
+
 function buildPageListaMaterial(formData, pageNum, options = {}) {
   const logoUrl = getLogoUrl(options);
   const ondasUrl = getCapaOndasUrl(options);
@@ -1086,11 +1103,8 @@ function buildPageListaMaterial(formData, pageNum, options = {}) {
         <div class="page-body-inner page-body-artwork">
           <h2 class="page-title">Lista de Material</h2>
           <div class="page-content">
-            <div class="report-info">
-              ${buildSectionFields([
-                { label: 'Descrição', value: material.descricao, rich: true }
-              ])}
-              ${buildPassoImageBlock(material, 'Imagem da lista de material')}
+            <div class="lista-material-body">
+              ${buildListaMaterialConteudoHtml(material)}
             </div>
           </div>
         </div>
