@@ -504,29 +504,23 @@ export function measurePassoLayoutsFromDocument(doc, passos = []) {
 
       if (textChunkHtmls.length === 1) {
         const chunk = textChunkHtmls[0];
-        const withImageH = measurePassoTextBlockHeight(chunk, passo, passoNumero, doc, {
-          includeImage: true
-        });
         const textOnlyH = measurePassoTextBlockHeight(chunk, passo, passoNumero, doc, {
           includeImage: false
         });
 
-        if (withImageH <= available + 8) {
-          imageOnFirstPage = true;
-        } else if (textOnlyH <= available + 8) {
-          hasImagePage = true;
-        } else {
+        if (textOnlyH > available + 8) {
           textChunkHtmls = splitRichHtmlByMaxHeight(contentHtml, available, doc, {
-            firstPageExtraPx: labelReserve + imageReserve
+            firstPageExtraPx: labelReserve
           });
-          if (textChunkHtmls.length === 1) {
-            hasImagePage = true;
-          }
         }
       }
 
-      if (textChunkHtmls.length > 1) {
+      if (textChunkHtmls.length === 1) {
+        imageOnFirstPage = true;
+        hasImagePage = false;
+      } else if (textChunkHtmls.length > 1) {
         hasImagePage = true;
+        imageOnFirstPage = false;
         const probe = createPassoDescMeasureProbe(doc);
         const continLabelReserve = 24;
         const lastChunk = textChunkHtmls[textChunkHtmls.length - 1];
@@ -1617,14 +1611,16 @@ function buildPassoPageShell({
 /** Página única para medição na prévia (texto completo + imagem oculta) */
 function buildPagePassoMeasure(passo, passoNumero, passoIndex, pageNum, options) {
   const tituloPasso = passo.tituloPasso?.trim() || 'XXXXX';
+  const descHtml = getPassoDescricaoInnerHtml(passo);
   const bodyHtml = `
-            <div class="report-info passo-conteudo-bloco">
+            <div class="report-info passo-conteudo-bloco passo-texto-bloco">
+              <span class="report-info-label">Descrição</span>
               <div class="passo-descricao-body">
-                ${buildSectionFields([{ label: 'Descrição', value: passo.descricao, rich: true }])}
+                <div class="${PASSO_DESC_MEASURE_CLASS}">${descHtml}</div>
               </div>
               ${
                 passo.imagemDataUrl?.trim()
-                  ? `<div class="passo-imagem-body passo-imagem-measure-only" aria-hidden="true">${buildPassoImageBlock(passo, `Imagem do passo ${passoNumero}`)}</div>`
+                  ? `<div class="passo-imagem-apos-texto passo-imagem-measure-only" aria-hidden="true">${buildPassoImageBlock(passo, `Imagem do passo ${passoNumero}`, { showLabel: true })}</div>`
                   : ''
               }
             </div>`;
