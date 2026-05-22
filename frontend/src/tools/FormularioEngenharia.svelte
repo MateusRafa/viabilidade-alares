@@ -46,8 +46,8 @@
   const descricaoEditorReady = {};
   const MAX_PASSO_IMAGE_MB = 8;
 
-  const PREVIEW_DEBOUNCE_MS = 100;
-  const MEASURE_DEBOUNCE_MS = 100;
+  const PREVIEW_DEBOUNCE_MS = 50;
+  const MEASURE_DEBOUNCE_MS = 50;
 
   let passoLayouts = [];
   let passoLayoutWarnings = [];
@@ -919,7 +919,7 @@
     <main class="preview-column">
       <div class="preview-header">
         <h2>Prévia do PDF</h2>
-        <span class="preview-hint">{previewPagesHint} — atualiza após você pausar a edição (~0,1 s)</span>
+        <span class="preview-hint">{previewPagesHint} — atualiza após você pausar a edição (~50 ms)</span>
       </div>
       <div class="preview-frame-wrapper" bind:this={previewFrameWrapperEl}>
         {#if !assetsReady}
