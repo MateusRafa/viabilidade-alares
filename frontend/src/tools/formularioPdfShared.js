@@ -77,7 +77,9 @@ export function defaultPassoLayout(passo) {
 function countPassoPages(layout) {
   if (!layout) return 1;
   const textPages = layout.textChunkHtmls?.length || 1;
-  return textPages + (layout.hasImagePage ? 1 : 0);
+  if (!layout.hasImagePage) return textPages;
+  if (textPages > 1) return textPages;
+  return textPages + 1;
 }
 
 /** Total de páginas: capa + informações + páginas dos passos + lista de material */
@@ -147,7 +149,7 @@ export function getPdfPagesMeta(formData, options = {}) {
         title: `Passo ${n}° — ${titulo}${suffix}`
       });
     }
-    if (layout.hasImagePage) {
+    if (layout.hasImagePage && chunkCount === 1) {
       pages.push({
         id: `passo-${n}-imagem`,
         number: pages.length + 1,
@@ -191,68 +193,258 @@ function getPassoDescricaoInnerHtml(passo) {
 const PASSO_DESC_MEASURE_CLASS =
   'passo-descricao-body report-info-value-multiline report-info-rich';
 
-function splitRichHtmlByMaxHeight(innerHtml, maxHeightPx, doc) {
-  if (!doc?.body) return [innerHtml];
+const PASSO_DESC_PROBE_STYLE =
+  'position:absolute;left:-9999px;top:0;width:170mm;max-width:170mm;visibility:hidden;pointer-events:none;';
 
-  const className = PASSO_DESC_MEASURE_CLASS;
-  const style =
-    'position:absolute;left:-9999px;top:0;width:170mm;max-width:170mm;visibility:hidden;pointer-events:none;';
-
-  const measureRoot = doc.createElement('div');
-  measureRoot.className = className;
-  measureRoot.style.cssText = style;
-  measureRoot.innerHTML = innerHtml;
-  doc.body.appendChild(measureRoot);
-
-  if (measureRoot.scrollHeight <= maxHeightPx + 8) {
-    const chunk = measureRoot.innerHTML;
-    measureRoot.remove();
-    return [chunk];
+/** HTML só do valor da descrição (sem rótulo "Descrição") */
+function extractPassoDescricaoContentHtml(innerHtml) {
+  if (!innerHtml?.trim()) return '';
+  const doc = typeof DOMParser !== 'undefined' ? new DOMParser().parseFromString(innerHtml, 'text/html') : null;
+  const root = doc?.body;
+  if (root) {
+    const valueEl =
+      root.querySelector('.report-info-rich') ||
+      root.querySelector('.report-info-value-multiline') ||
+      root.querySelector('.report-info-value');
+    if (valueEl) return valueEl.innerHTML;
   }
+  const richMatch = innerHtml.match(
+    /class="[^"]*report-info-rich[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span)>/i
+  );
+  if (richMatch) return richMatch[1];
+  const multiMatch = innerHtml.match(
+    /class="[^"]*report-info-value-multiline[^"]*"[^>]*>([\s\S]*?)<\/(?:div|span)>/i
+  );
+  if (multiMatch) return multiMatch[1];
+  return innerHtml;
+}
 
-  const chunks = [];
+function createPassoDescMeasureProbe(doc) {
   const probe = doc.createElement('div');
-  probe.className = className;
-  probe.style.cssText = style;
+  probe.className = PASSO_DESC_MEASURE_CLASS;
+  probe.style.cssText = PASSO_DESC_PROBE_STYLE;
   doc.body.appendChild(probe);
+  return probe;
+}
 
-  const nodes = Array.from(measureRoot.childNodes);
-  measureRoot.remove();
+function measurePassoDescHtmlHeight(html, probe) {
+  probe.innerHTML = html || '';
+  return probe.scrollHeight;
+}
 
-  const flushBatch = (batch) => {
-    if (!batch.length) return;
-    probe.innerHTML = '';
-    batch.forEach((n) => probe.appendChild(n.cloneNode(true)));
-    chunks.push(probe.innerHTML);
-  };
+function extractSplitUnitsFromHtml(contentHtml, doc) {
+  const temp = doc.createElement('div');
+  temp.className = PASSO_DESC_MEASURE_CLASS;
+  temp.innerHTML = contentHtml;
+  const container =
+    temp.querySelector('.report-info-rich, .report-info-value-multiline') || temp;
+  const units = [];
 
-  if (!nodes.length) {
-    probe.innerHTML = innerHtml;
-    if (probe.scrollHeight <= maxHeightPx + 8) {
-      chunks.push(probe.innerHTML);
-    } else {
-      chunks.push(innerHtml);
-    }
-    probe.remove();
-    return chunks.length ? chunks : [innerHtml];
-  }
-
-  let batch = [];
-  nodes.forEach((node) => {
-    probe.innerHTML = '';
-    batch.forEach((n) => probe.appendChild(n.cloneNode(true)));
-    probe.appendChild(node.cloneNode(true));
-    if (probe.scrollHeight > maxHeightPx + 8 && batch.length > 0) {
-      flushBatch(batch);
-      batch = [node];
-    } else {
-      batch.push(node);
+  Array.from(container.childNodes).forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent || '';
+      if (text.trim()) units.push({ html: escapeHtml(text) });
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      units.push({ html: node.outerHTML });
     }
   });
-  flushBatch(batch);
+
+  if (!units.length && contentHtml.trim()) {
+    units.push({ html: contentHtml });
+  }
+
+  return units;
+}
+
+function unitsToHtml(units) {
+  return units.map((u) => u.html).join('');
+}
+
+function splitOversizedHtmlUnit(html, maxHeightPx, probe) {
+  const wrap = probe.ownerDocument.createElement('div');
+  wrap.className = PASSO_DESC_MEASURE_CLASS;
+  wrap.innerHTML = html;
+  const paragraphs = Array.from(wrap.querySelectorAll('p'));
+
+  if (paragraphs.length > 1) {
+    const chunks = [];
+    let batch = [];
+    let budget = maxHeightPx;
+
+    const flush = () => {
+      if (!batch.length) return;
+      const part = unitsToHtml(batch);
+      if (part.trim()) chunks.push(part);
+      batch = [];
+    };
+
+    for (const p of paragraphs) {
+      const unit = { html: p.outerHTML };
+      const trial = unitsToHtml([...batch, unit]);
+      if (measurePassoDescHtmlHeight(trial, probe) <= budget + 4) {
+        batch.push(unit);
+      } else {
+        flush();
+        budget = maxHeightPx;
+        const aloneH = measurePassoDescHtmlHeight(unit.html, probe);
+        if (aloneH > budget + 4) {
+          const split = splitPlainTextInHtml(unit.html, budget, probe);
+          if (split.fit?.trim()) chunks.push(split.fit);
+          if (split.rest?.trim()) batch = [{ html: split.rest }];
+        } else {
+          batch.push(unit);
+        }
+      }
+    }
+    flush();
+    if (chunks.length >= 2) {
+      return { fit: chunks[0], rest: chunks.slice(1).join('') };
+    }
+    if (chunks.length === 1) {
+      return { fit: chunks[0], rest: '' };
+    }
+  }
+
+  return splitPlainTextInHtml(html, maxHeightPx, probe);
+}
+
+function splitPlainTextInHtml(html, maxHeightPx, probe) {
+  const plain = html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!plain) return { fit: html, rest: '' };
+
+  const words = plain.split(' ').filter(Boolean);
+  if (!words.length) return { fit: html, rest: '' };
+
+  let lo = 0;
+  let hi = words.length;
+  let best = 0;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (mid === 0) {
+      lo = 1;
+      continue;
+    }
+    const trial = words.slice(0, mid).join(' ');
+    const trialHtml = /<p[\s>]/i.test(html) ? `<p>${escapeHtml(trial)}</p>` : escapeHtml(trial);
+    if (measurePassoDescHtmlHeight(trialHtml, probe) <= maxHeightPx + 2) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  if (best === 0) best = 1;
+
+  const fitText = words.slice(0, best).join(' ');
+  const restText = words.slice(best).join(' ');
+  const useP = /<p[\s>]/i.test(html);
+
+  return {
+    fit: fitText ? (useP ? `<p>${escapeHtml(fitText)}</p>` : escapeHtml(fitText)) : '',
+    rest: restText ? (useP ? `<p>${escapeHtml(restText)}</p>` : escapeHtml(restText)) : ''
+  };
+}
+
+function splitUnitsByHeights(units, firstBudgetPx, nextBudgetPx, probe) {
+  const chunks = [];
+  let budget = firstBudgetPx;
+  let batch = [];
+
+  const pushChunk = (html) => {
+    if (html?.trim()) chunks.push(html);
+  };
+
+  const flushBatch = () => {
+    if (!batch.length) return;
+    pushChunk(unitsToHtml(batch));
+    batch = [];
+    budget = nextBudgetPx;
+  };
+
+  for (let i = 0; i < units.length; i++) {
+    let unit = units[i];
+
+    while (true) {
+      const trialHtml = unitsToHtml([...batch, unit]);
+      const trialH = measurePassoDescHtmlHeight(trialHtml, probe);
+
+      if (trialH <= budget + 4) {
+        batch.push(unit);
+        break;
+      }
+
+      if (batch.length > 0) {
+        flushBatch();
+        continue;
+      }
+
+      const aloneH = measurePassoDescHtmlHeight(unit.html, probe);
+      if (aloneH > budget + 4) {
+        const { fit, rest } = splitOversizedHtmlUnit(unit.html, budget, probe);
+        if (fit?.trim()) pushChunk(fit);
+        budget = nextBudgetPx;
+        if (rest?.trim()) {
+          unit = { html: rest };
+          batch = [];
+          continue;
+        }
+        break;
+      }
+
+      batch.push(unit);
+      break;
+    }
+  }
+
+  if (batch.length) pushChunk(unitsToHtml(batch));
+  return chunks;
+}
+
+function splitRichHtmlByMaxHeight(innerHtml, maxHeightPx, doc, splitOptions = {}) {
+  if (!doc?.body) return [innerHtml];
+
+  const contentHtml = extractPassoDescricaoContentHtml(innerHtml) || innerHtml;
+  const firstPageExtraPx = splitOptions.firstPageExtraPx ?? 0;
+  const firstBudget = Math.max(100, maxHeightPx - firstPageExtraPx);
+  const nextBudget = maxHeightPx;
+
+  const probe = createPassoDescMeasureProbe(doc);
+  const totalH = measurePassoDescHtmlHeight(contentHtml, probe);
+
+  if (totalH <= firstBudget + 6) {
+    probe.remove();
+    return [contentHtml];
+  }
+
+  const units = extractSplitUnitsFromHtml(contentHtml, doc);
+  if (!units.length) {
+    probe.remove();
+    return [contentHtml];
+  }
+
+  const chunks = splitUnitsByHeights(units, firstBudget, nextBudget, probe);
   probe.remove();
 
-  return chunks.length ? chunks : [innerHtml];
+  return chunks.length ? chunks : [contentHtml];
+}
+
+function measurePassoImageAppendHeight(passo, passoNumero, doc) {
+  const probe = doc.createElement('div');
+  probe.className = 'passo-imagem-apos-texto';
+  probe.style.cssText = PASSO_DESC_PROBE_STYLE;
+  doc.body.appendChild(probe);
+  probe.innerHTML = buildPassoImageBlock(passo, `Imagem do passo ${passoNumero}`, { showLabel: true });
+  const h = probe.scrollHeight;
+  probe.remove();
+  return h + 14;
 }
 
 /** Mede na prévia (passo em folha única para medição) quantas páginas de texto e se há página de imagem */
@@ -270,13 +462,35 @@ export function measurePassoLayoutsFromDocument(doc, passos = []) {
     const pageContent = page.querySelector('.page-content');
     const available = pageContent?.clientHeight || getPassoContentAreaHeight(page);
     const descEl = page.querySelector('.passo-descricao-body');
-    const inner = descEl?.innerHTML?.trim()
+    const innerRaw = descEl?.innerHTML?.trim()
       ? descEl.innerHTML
       : getPassoDescricaoInnerHtml(passo);
-    const textChunkHtmls = splitRichHtmlByMaxHeight(inner, available, doc);
+    const labelEl = page.querySelector('.passo-descricao-body .report-info-label');
+    const labelReserve = (labelEl?.offsetHeight || 0) + 10;
+    const contentHtml = extractPassoDescricaoContentHtml(innerRaw) || getPassoDescricaoInnerHtml(passo);
+    let textChunkHtmls = splitRichHtmlByMaxHeight(contentHtml, available, doc, {
+      firstPageExtraPx: labelReserve
+    });
+
+    if (hasImagePage && textChunkHtmls.length > 1) {
+      const probe = createPassoDescMeasureProbe(doc);
+      const imageReserve = measurePassoImageAppendHeight(passo, i + 1, doc);
+      const continLabelReserve = 24;
+      const lastChunk = textChunkHtmls[textChunkHtmls.length - 1];
+      const lastTextH = measurePassoDescHtmlHeight(lastChunk, probe);
+
+      if (lastTextH + imageReserve > available + 8) {
+        const lastBudget = Math.max(100, available - imageReserve - continLabelReserve);
+        const reSplit = splitRichHtmlByMaxHeight(lastChunk, lastBudget, doc, {
+          firstPageExtraPx: continLabelReserve
+        });
+        textChunkHtmls = [...textChunkHtmls.slice(0, -1), ...reSplit];
+      }
+      probe.remove();
+    }
 
     return {
-      textChunkHtmls: textChunkHtmls.length ? textChunkHtmls : [inner],
+      textChunkHtmls: textChunkHtmls.length ? textChunkHtmls : [contentHtml],
       hasImagePage
     };
   });
@@ -305,9 +519,13 @@ export function getPassoLayoutWarnings(passos, passoLayouts) {
     }
 
     if (layout.hasImagePage) {
+      const msg =
+        textPages > 1
+          ? `Passo ${n}°: a imagem ficará na mesma página da continuação do texto, abaixo do trecho que passou do limite.`
+          : `Passo ${n}°: a imagem ficará na página seguinte, após o texto.`;
       warnings.push({
         passoIndex: i,
-        message: `Passo ${n}°: a imagem ficará na página seguinte, após o texto.`
+        message: msg
       });
     }
   });
@@ -1022,6 +1240,15 @@ export const FORMULARIO_PDF_STYLES = `
     page-break-inside: avoid;
     break-inside: avoid-page;
   }
+  .passo-imagem-apos-texto {
+    margin-top: 10px;
+    flex-shrink: 0;
+  }
+  .passo-imagem-apos-texto .passo1-imagem {
+    max-width: 100%;
+    max-height: 120mm;
+    object-fit: contain;
+  }
 
   /* —— Capa —— */
   .pdf-page-capa {
@@ -1386,7 +1613,8 @@ function buildPagePassoTextChunk(
   pageNum,
   chunkHtml,
   chunkIndex,
-  options
+  options,
+  chunkOptions = {}
 ) {
   const tituloPasso = passo.tituloPasso?.trim() || 'XXXXX';
   const suffix = chunkIndex > 0 ? ' (continuação)' : '';
@@ -1394,6 +1622,10 @@ function buildPagePassoTextChunk(
   const labelHtml = showLabel
     ? '<span class="report-info-label">Descrição</span>'
     : '<span class="report-info-label passo-continuacao-label">Continuação</span>';
+  const appendImage = chunkOptions.appendImage === true;
+  const imageHtml = appendImage
+    ? `<div class="passo-imagem-apos-texto">${buildPassoImageBlock(passo, `Imagem do passo ${passoNumero}`, { showLabel: true })}</div>`
+    : '';
 
   const bodyHtml = `
             <div class="report-info passo-conteudo-bloco passo-texto-bloco">
@@ -1401,6 +1633,7 @@ function buildPagePassoTextChunk(
               <div class="passo-descricao-body">
                 <div class="${PASSO_DESC_MEASURE_CLASS}">${chunkHtml}</div>
               </div>
+              ${imageHtml}
             </div>`;
 
   return buildPassoPageShell({
@@ -1449,8 +1682,11 @@ function buildPassoPagesHtml(passo, passoNumero, passoIndex, startPageNum, optio
   let html = '';
   let pageNum = startPageNum;
 
+  const imageOnContinuation = layout.hasImagePage && chunks.length > 1;
+
   chunks.forEach((chunkHtml, chunkIndex) => {
     pageNum += 1;
+    const isLastChunk = chunkIndex === chunks.length - 1;
     html += buildPagePassoTextChunk(
       passo,
       passoNumero,
@@ -1458,11 +1694,12 @@ function buildPassoPagesHtml(passo, passoNumero, passoIndex, startPageNum, optio
       pageNum,
       chunkHtml,
       chunkIndex,
-      options
+      options,
+      { appendImage: imageOnContinuation && isLastChunk }
     );
   });
 
-  if (layout.hasImagePage) {
+  if (layout.hasImagePage && !imageOnContinuation) {
     pageNum += 1;
     html += buildPagePassoImageOnly(passo, passoNumero, passoIndex, pageNum, options);
   }
