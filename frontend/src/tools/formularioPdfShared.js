@@ -233,6 +233,17 @@ function getClientLabel(formData) {
   );
 }
 
+/** Nome do cliente no box Cabeçalho (página 2) */
+function getCabecalhoClienteLabel(formData) {
+  return formData.cabecalho?.cliente?.trim() || '';
+}
+
+function buildCabecalhoPageTitleHtml(formData) {
+  const cliente = getCabecalhoClienteLabel(formData);
+  if (!cliente) return 'Informações do projeto';
+  return `Informações do projeto <span class="page-title-cliente">- ${escapeHtml(cliente)}</span>`;
+}
+
 function buildBrandLayers(logoUrl, variant = 'inner') {
   const capaClass = variant === 'capa' ? ' brand-layer-capa' : '';
   const logoBg = logoUrl
@@ -550,6 +561,12 @@ export const FORMULARIO_PDF_STYLES = `
     border-bottom: 2px solid ${BRAND.cores.accent};
     line-height: 1.3;
   }
+  .page-title-cliente {
+    font-weight: 700;
+    color: ${BRAND.cores.primaria};
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
   .page-content { flex: 1; }
   .report-info {
     display: grid;
@@ -621,10 +638,6 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-cabecalho .capa-logo {
     height: 48px;
   }
-  .pdf-page-cabecalho .page-top-client {
-    margin-bottom: 4mm;
-    font-size: 9pt;
-  }
   .pdf-page-cabecalho .page-body-artwork {
     padding: 0;
   }
@@ -636,43 +649,45 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-cabecalho .report-info {
     gap: 0;
   }
-  .pdf-page-cabecalho .report-info-item-inline {
-    display: flex;
-    flex-direction: row;
-    align-items: flex-start;
-    gap: 6px;
-    padding: 2.5px 0;
+  .pdf-page-cabecalho .report-info-line {
+    display: block;
+    margin: 0;
+    padding: 3px 0;
     border-bottom: 1px solid #f0f0f0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #111;
   }
-  .pdf-page-cabecalho .report-info-item-inline:last-child {
+  .pdf-page-cabecalho .report-info-line:last-child {
     border-bottom: none;
   }
-  .pdf-page-cabecalho .report-info-item-inline .report-info-label {
-    flex: 0 0 40%;
-    max-width: 40%;
-    min-width: 0;
-    font-size: 9px;
-    line-height: 1.25;
-    padding-top: 1px;
+  .pdf-page-cabecalho .report-info-line .report-info-label {
+    display: inline;
+    font-weight: 700;
+    color: #111;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: 0;
   }
-  .pdf-page-cabecalho .report-info-item-inline .report-info-label::after {
-    content: ':';
+  .pdf-page-cabecalho .report-info-line .report-info-colon {
+    display: inline;
+    font-weight: 700;
+    color: #111;
   }
-  .pdf-page-cabecalho .report-info-item-inline .report-info-value {
-    flex: 1 1 60%;
-    min-width: 0;
-    font-size: 10px;
-    line-height: 1.3;
+  .pdf-page-cabecalho .report-info-line .report-info-value {
+    display: inline;
+    font-weight: 400;
+    font-size: 11px;
+    color: #111;
+    word-break: break-word;
   }
-  .pdf-page-cabecalho .report-info-item-block {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    padding: 4px 0 2px;
-    border-bottom: 1px solid #f0f0f0;
+  .pdf-page-cabecalho .report-info-line .empty-value {
+    color: #aaa;
+    font-style: italic;
   }
-  .pdf-page-cabecalho .report-info-item-block .report-info-label::after {
-    content: ':';
+  .pdf-page-cabecalho .report-info-line-multiline .report-info-value-multiline {
+    display: inline;
+    white-space: pre-wrap;
   }
   .pdf-page-cabecalho .artwork-page-footer {
     padding-top: 4mm;
@@ -814,25 +829,45 @@ export const FORMULARIO_PDF_STYLES = `
       page-break-inside: avoid !important;
       break-inside: avoid-page !important;
     }
-    .pdf-page-cabecalho .report-info-item-inline {
+    .pdf-page-cabecalho .report-info-line {
       padding: 2px 0 !important;
+      font-size: 10.5px !important;
     }
-    .pdf-page-cabecalho .report-info-item-inline .report-info-label {
-      font-size: 8.5px !important;
-    }
-    .pdf-page-cabecalho .report-info-item-inline .report-info-value {
-      font-size: 9.5px !important;
+    .pdf-page-cabecalho .report-info-line .report-info-label,
+    .pdf-page-cabecalho .report-info-line .report-info-colon,
+    .pdf-page-cabecalho .report-info-line .report-info-value {
+      font-size: 10.5px !important;
     }
     .pdf-watermark-text span { opacity: 0.04; }
     .pdf-watermark-logo { opacity: 0.05; }
   }
 `;
 
+function buildCabecalhoInfoLine(label, valueHtml, { multiline = false } = {}) {
+  const lineClass = multiline ? 'report-info-line report-info-line-multiline' : 'report-info-line';
+  const valueClass = multiline
+    ? 'report-info-value report-info-value-multiline'
+    : 'report-info-value';
+  return `
+      <p class="${lineClass}">
+        <span class="report-info-label">${escapeHtml(label)}</span><span class="report-info-colon">: </span><span class="${valueClass}">${valueHtml}</span>
+      </p>`;
+}
+
 function buildSectionFields(items, options = {}) {
   const inline = options.inline === true;
 
   return items
     .map(({ label, value, multiline, rich }) => {
+      if (inline) {
+        if (rich) {
+          const valueHtml = displayDescricaoValue(value);
+          return buildCabecalhoInfoLine(label, valueHtml, { multiline: true });
+        }
+        const valueHtml = multiline ? displayMultilineValue(value) : displayValue(value);
+        return buildCabecalhoInfoLine(label, valueHtml, { multiline });
+      }
+
       if (rich) {
         const valueHtml = displayDescricaoValue(value);
         const isEmpty = valueHtml.includes('empty-value');
@@ -840,9 +875,8 @@ function buildSectionFields(items, options = {}) {
           ? 'report-info-value report-info-value-multiline'
           : 'report-info-value report-info-value-multiline report-info-rich';
         const tag = isEmpty ? 'span' : 'div';
-        const itemClass = inline ? 'report-info-item report-info-item-block' : 'report-info-item';
         return `
-      <div class="${itemClass}">
+      <div class="report-info-item">
         <span class="report-info-label">${escapeHtml(label)}</span>
         <${tag} class="${valueClass}">${valueHtml}</${tag}>
       </div>`;
@@ -852,15 +886,9 @@ function buildSectionFields(items, options = {}) {
         ? 'report-info-value report-info-value-multiline'
         : 'report-info-value';
       const valueHtml = multiline ? displayMultilineValue(value) : displayValue(value);
-      const itemClass =
-        inline && !multiline
-          ? 'report-info-item report-info-item-inline'
-          : inline && multiline
-            ? 'report-info-item report-info-item-block'
-            : 'report-info-item';
       const valueTag = multiline ? 'div' : 'span';
       return `
-      <div class="${itemClass}">
+      <div class="report-info-item">
         <span class="report-info-label">${escapeHtml(label)}</span>
         <${valueTag} class="${valueClass}">${valueHtml}</${valueTag}>
       </div>`;
@@ -901,12 +929,8 @@ function buildPageCapa(formData, options = {}) {
 function buildPageCabecalho(formData, options = {}) {
   const logoUrl = getLogoUrl(options);
   const ondasUrl = getCapaOndasUrl(options);
-  const clientLabel = getClientLabel(formData);
   const ondasImg = ondasUrl
     ? `<img class="capa-ondas-svg" src="${attrUrl(ondasUrl)}" alt="" aria-hidden="true" />`
-    : '';
-  const clientBlock = clientLabel
-    ? `<p class="page-top-client">${escapeHtml(clientLabel)}</p>`
     : '';
 
   return `
@@ -916,9 +940,8 @@ function buildPageCabecalho(formData, options = {}) {
         <div class="capa-logo-wrap">
           ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
         </div>
-        ${clientBlock}
         <div class="page-body-inner page-body-artwork">
-          <h2 class="page-title">Informações do projeto</h2>
+          <h2 class="page-title">${buildCabecalhoPageTitleHtml(formData)}</h2>
           <div class="page-content">
             <div class="report-info report-info-cabecalho">
               ${buildSectionFields(
