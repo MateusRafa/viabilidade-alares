@@ -110,8 +110,6 @@
       const patch = { imagemDataUrl: dataUrl, imagemNome: nome };
       if (uploadTarget.type === 'passo') {
         updatePasso(uploadTarget.index, patch);
-      } else {
-        updateListaMaterial(patch);
       }
     };
     reader.onerror = () => {
@@ -151,8 +149,7 @@
 
   function uploadTargetsMatch(a, b) {
     if (!a || !b) return false;
-    if (a.type !== b.type) return false;
-    if (a.type === 'material') return true;
+    if (a.type !== 'passo' || b.type !== 'passo') return false;
     return a.index === b.index;
   }
 
@@ -316,10 +313,6 @@
 
   function clearPassoImage(passoIndex) {
     updatePasso(passoIndex, { imagemDataUrl: '', imagemNome: '' });
-  }
-
-  function clearMaterialImage() {
-    updateListaMaterial({ imagemDataUrl: '', imagemNome: '' });
   }
 
   function registerDescricaoEditor(node, params) {
@@ -626,50 +619,6 @@
                   on:blur={(e) => syncMaterialDescricaoEditor(e.currentTarget)}
                 ></div>
               </label>
-              <div class="field field-upload">
-                <span>Imagem</span>
-                <div
-                  class="upload-box"
-                  class:armed={uploadTargetsMatch(armedUploadTarget, { type: 'material' })}
-                  tabindex="0"
-                  role="group"
-                  aria-label="Imagem da lista de material. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
-                  on:click={() => armImagePaste({ type: 'material' })}
-                  on:focus={() => armImagePaste({ type: 'material' })}
-                  on:blur={disarmImagePaste}
-                  on:paste={handleImagePaste}
-                  on:dblclick={(e) => {
-                    setUploadTarget({ type: 'material' });
-                    handleUploadBoxDblClick(e);
-                  }}
-                >
-                  <div class="upload-trigger">
-                    <span class="upload-trigger-text">1 clique: selecionar o box e colar (Ctrl+V)</span>
-                    <span class="upload-trigger-hint"
-                      >2 cliques seguidos: escolher imagem — até {MAX_PASSO_IMAGE_MB} MB</span
-                    >
-                  </div>
-                  {#if formData.listaMaterial.imagemDataUrl}
-                    <div class="upload-preview-wrap">
-                      <img
-                        class="upload-preview"
-                        src={formData.listaMaterial.imagemDataUrl}
-                        alt="Prévia da imagem da lista de material"
-                      />
-                      {#if formData.listaMaterial.imagemNome}
-                        <p class="upload-filename">{formData.listaMaterial.imagemNome}</p>
-                      {/if}
-                      <button
-                        type="button"
-                        class="btn-remove-image"
-                        on:click|stopPropagation={clearMaterialImage}
-                      >
-                        Remover imagem
-                      </button>
-                    </div>
-                  {/if}
-                </div>
-              </div>
             </div>
           {/if}
         </section>
