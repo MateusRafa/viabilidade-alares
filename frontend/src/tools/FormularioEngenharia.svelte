@@ -2,6 +2,9 @@
   import { onMount, tick } from 'svelte';
   import {
     defaultFormData,
+    normalizeFormData,
+    emptyPasso,
+    getPdfPageCount,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
     printEngineeringPdf,
@@ -16,23 +19,26 @@
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
 
-  let formData = defaultFormData();
+  let formData = normalizeFormData(defaultFormData());
   let generatingPDF = false;
   let pdfError = '';
   let expandedSections = {
     capa: true,
     cabecalho: true,
-    passo1: true
+    'passo-0': true,
+    listaMaterial: true
   };
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
   let assetsReady = false;
-  let passo1ImageInput;
+  let passoImageInput;
   let previewIframeEl;
-  /** Box de imagem selecionado (1 clique) — Ctrl+V é capturado na janela */
-  let passo1ImagePasteArmed = false;
-  let descricaoEditorEl;
-  let descricaoEditorReady = false;
+  /** { type: 'passo', index: number } | { type: 'material' } */
+  let uploadTarget = null;
+  let armedUploadTarget = null;
+  const descricaoEditorEls = {};
+  const descricaoEditorReady = {};
+  const MAX_PASSO_IMAGE_MB = 8;
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: previewHtml = buildFullPdfHtml(formData, {}, {
@@ -48,18 +54,50 @@
     };
   }
 
-  const MAX_PASSO1_IMAGE_MB = 8;
+  $: pdfPageCount = getPdfPageCount(formData);
+  $: previewPagesHint = `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material)`;
 
-  function applyPasso1ImageFile(file) {
+  function passoSectionId(index) {
+    return `passo-${index}`;
+  }
+
+  function updatePasso(index, patch) {
+    formData = {
+      ...formData,
+      passos: formData.passos.map((p, i) => (i === index ? { ...p, ...patch } : p))
+    };
+  }
+
+  function updateListaMaterial(patch) {
+    formData = {
+      ...formData,
+      listaMaterial: { ...formData.listaMaterial, ...patch }
+    };
+  }
+
+  function addPasso() {
+    const newIndex = formData.passos.length;
+    formData = {
+      ...formData,
+      passos: [...formData.passos, emptyPasso()]
+    };
+    expandedSections = {
+      ...expandedSections,
+      [passoSectionId(newIndex)]: true
+    };
+  }
+
+  function applyImageToTarget(file) {
     if (!file) return false;
+    if (!uploadTarget) return false;
 
     if (!file.type.startsWith('image/')) {
       pdfError = 'Use um arquivo de imagem (PNG, JPG, WEBP ou SVG).';
       return false;
     }
 
-    if (file.size > MAX_PASSO1_IMAGE_MB * 1024 * 1024) {
-      pdfError = `A imagem deve ter no máximo ${MAX_PASSO1_IMAGE_MB} MB.`;
+    if (file.size > MAX_PASSO_IMAGE_MB * 1024 * 1024) {
+      pdfError = `A imagem deve ter no máximo ${MAX_PASSO_IMAGE_MB} MB.`;
       return false;
     }
 
@@ -69,14 +107,12 @@
       const nome =
         file.name?.trim() ||
         `imagem-colada.${(file.type.split('/')[1] || 'png').replace('svg+xml', 'svg')}`;
-      formData = {
-        ...formData,
-        passo1: {
-          ...formData.passo1,
-          imagemDataUrl: dataUrl,
-          imagemNome: nome
-        }
-      };
+      const patch = { imagemDataUrl: dataUrl, imagemNome: nome };
+      if (uploadTarget.type === 'passo') {
+        updatePasso(uploadTarget.index, patch);
+      } else {
+        updateListaMaterial(patch);
+      }
     };
     reader.onerror = () => {
       pdfError = 'Não foi possível ler a imagem. Tente outro arquivo.';
@@ -85,11 +121,11 @@
     return true;
   }
 
-  function handlePasso1ImageChange(event) {
+  function handlePassoImageChange(event) {
     pdfError = '';
     const file = event.currentTarget?.files?.[0];
     if (!file) return;
-    applyPasso1ImageFile(file);
+    applyImageToTarget(file);
     event.currentTarget.value = '';
   }
 
@@ -97,7 +133,27 @@
     event.preventDefault();
     event.stopPropagation();
     pdfError = '';
-    passo1ImageInput?.click();
+    passoImageInput?.click();
+  }
+
+  function setUploadTarget(target) {
+    uploadTarget = target;
+  }
+
+  function armImagePaste(target) {
+    uploadTarget = target;
+    armedUploadTarget = target;
+  }
+
+  function disarmImagePaste() {
+    armedUploadTarget = null;
+  }
+
+  function uploadTargetsMatch(a, b) {
+    if (!a || !b) return false;
+    if (a.type !== b.type) return false;
+    if (a.type === 'material') return true;
+    return a.index === b.index;
   }
 
   function fileFromClipboardItem(item) {
@@ -131,14 +187,14 @@
     return null;
   }
 
-  async function processPasso1Paste(event) {
+  async function processImagePaste(event) {
     pdfError = '';
     const dt = event?.clipboardData;
 
     if (dt?.files?.length) {
       for (let i = 0; i < dt.files.length; i++) {
         const file = dt.files[i];
-        if (file?.type?.startsWith('image/') && applyPasso1ImageFile(file)) {
+        if (file?.type?.startsWith('image/') && applyImageToTarget(file)) {
           return true;
         }
       }
@@ -147,7 +203,7 @@
     if (dt?.items?.length) {
       for (const item of dt.items) {
         const file = fileFromClipboardItem(item);
-        if (file && applyPasso1ImageFile(file)) {
+        if (file && applyImageToTarget(file)) {
           return true;
         }
       }
@@ -155,7 +211,7 @@
 
     try {
       const file = await readImageFromClipboardApi();
-      if (file && applyPasso1ImageFile(file)) {
+      if (file && applyImageToTarget(file)) {
         return true;
       }
     } catch (err) {
@@ -167,30 +223,32 @@
     return false;
   }
 
-  async function handlePasso1ImagePaste(event) {
-    if (!passo1ImagePasteArmed) return;
+  async function handleImagePaste(event) {
+    if (!armedUploadTarget) return;
 
     event.preventDefault();
     event.stopPropagation();
-    await processPasso1Paste(event);
+    uploadTarget = armedUploadTarget;
+    await processImagePaste(event);
   }
 
-  function armPasso1ImagePaste() {
-    passo1ImagePasteArmed = true;
+  function descricaoEditorKey(passoIndex) {
+    return `passo-${passoIndex}`;
   }
 
-  function disarmPasso1ImagePaste() {
-    passo1ImagePasteArmed = false;
+  function syncDescricaoEditor(passoIndex, el) {
+    if (!el) return;
+    const html = sanitizeRichHtml(el.innerHTML);
+    if (html !== formData.passos[passoIndex].descricao) {
+      updatePasso(passoIndex, { descricao: html });
+    }
   }
 
-  function syncDescricaoEditor() {
-    if (!descricaoEditorEl) return;
-    const html = sanitizeRichHtml(descricaoEditorEl.innerHTML);
-    if (html !== formData.passo1.descricao) {
-      formData = {
-        ...formData,
-        passo1: { ...formData.passo1, descricao: html }
-      };
+  function syncMaterialDescricaoEditor(el) {
+    if (!el) return;
+    const html = sanitizeRichHtml(el.innerHTML);
+    if (html !== formData.listaMaterial.descricao) {
+      updateListaMaterial({ descricao: html });
     }
   }
 
@@ -207,29 +265,69 @@
     } else if (plain != null) {
       document.execCommand('insertText', false, plain);
     }
-    syncDescricaoEditor();
-  }
-
-  async function initDescricaoEditor() {
-    if (!descricaoEditorEl) return;
-    const html = formData.passo1.descricao || '';
-    if (!descricaoEditorReady || descricaoEditorEl.innerHTML !== html) {
-      descricaoEditorEl.innerHTML = html;
-      descricaoEditorReady = true;
+    const target = event.currentTarget;
+    if (target?.dataset?.editor === 'material') {
+      syncMaterialDescricaoEditor(target);
+    } else if (target?.dataset?.passoIndex != null) {
+      syncDescricaoEditor(Number(target.dataset.passoIndex), target);
     }
   }
 
-  $: if (expandedSections.passo1) {
-    tick().then(initDescricaoEditor);
+  function handlePassoDescricaoInput(passoIndex, event) {
+    syncDescricaoEditor(passoIndex, event.currentTarget);
   }
 
-  function clearPasso1Image() {
-    formData = {
-      ...formData,
-      passo1: {
-        ...formData.passo1,
-        imagemDataUrl: '',
-        imagemNome: ''
+  function handleMaterialDescricaoInput(event) {
+    syncMaterialDescricaoEditor(event.currentTarget);
+  }
+
+  async function initDescricaoEditor(passoIndex) {
+    const key = descricaoEditorKey(passoIndex);
+    const el = descricaoEditorEls[key];
+    if (!el) return;
+    const html = formData.passos[passoIndex]?.descricao || '';
+    if (!descricaoEditorReady[key] || el.innerHTML !== html) {
+      el.innerHTML = html;
+      descricaoEditorReady[key] = true;
+    }
+  }
+
+  async function initMaterialDescricaoEditor() {
+    const el = descricaoEditorEls.material;
+    if (!el) return;
+    const html = formData.listaMaterial.descricao || '';
+    if (!descricaoEditorReady.material || el.innerHTML !== html) {
+      el.innerHTML = html;
+      descricaoEditorReady.material = true;
+    }
+  }
+
+  $: {
+    formData.passos.forEach((_, passoIndex) => {
+      if (expandedSections[passoSectionId(passoIndex)]) {
+        tick().then(() => initDescricaoEditor(passoIndex));
+      }
+    });
+  }
+
+  $: if (expandedSections.listaMaterial) {
+    tick().then(initMaterialDescricaoEditor);
+  }
+
+  function clearPassoImage(passoIndex) {
+    updatePasso(passoIndex, { imagemDataUrl: '', imagemNome: '' });
+  }
+
+  function clearMaterialImage() {
+    updateListaMaterial({ imagemDataUrl: '', imagemNome: '' });
+  }
+
+  function registerDescricaoEditor(node, params) {
+    const key = params?.key;
+    if (key) descricaoEditorEls[key] = node;
+    return {
+      destroy() {
+        if (descricaoEditorEls[key] === node) delete descricaoEditorEls[key];
       }
     };
   }
@@ -279,10 +377,11 @@
       assetsReady = true;
 
       const onWindowPaste = (e) => {
-        if (!passo1ImagePasteArmed) return;
+        if (!armedUploadTarget) return;
         e.preventDefault();
         e.stopPropagation();
-        processPasso1Paste(e);
+        uploadTarget = armedUploadTarget;
+        processImagePaste(e);
       };
       window.addEventListener('paste', onWindowPaste, true);
       removeWindowPaste = () => window.removeEventListener('paste', onWindowPaste, true);
@@ -290,7 +389,7 @@
 
     return () => {
       removeWindowPaste?.();
-      disarmPasso1ImagePaste();
+      disarmImagePaste();
     };
   });
 </script>
@@ -384,78 +483,186 @@
           {/if}
         </section>
 
-        <!-- Box: Passo 1 -->
-        <section class="form-box" class:expanded={expandedSections.passo1}>
+        <input
+          bind:this={passoImageInput}
+          type="file"
+          class="file-input-hidden"
+          accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
+          on:change={handlePassoImageChange}
+          tabindex="-1"
+          aria-hidden="true"
+        />
+
+        {#each formData.passos as passo, passoIndex (passoIndex)}
+          {@const sectionId = passoSectionId(passoIndex)}
+          {@const editorKey = descricaoEditorKey(passoIndex)}
+          {@const uploadCtx = { type: 'passo', index: passoIndex }}
+          {@const isLastPasso = passoIndex === formData.passos.length - 1}
+          <section class="form-box" class:expanded={expandedSections[sectionId]}>
+            <div class="form-box-header-row">
+              <button
+                type="button"
+                class="form-box-header"
+                on:click={() => toggleSection(sectionId)}
+                aria-expanded={expandedSections[sectionId]}
+              >
+                <span class="form-box-title"
+                  >Passo {passoIndex + 1}° — {passo.tituloPasso || 'XXXXX'}</span
+                >
+                <span class="chevron" class:open={expandedSections[sectionId]}>▼</span>
+              </button>
+              {#if isLastPasso}
+                <button
+                  type="button"
+                  class="btn-add-passo"
+                  title="Adicionar Passo {passoIndex + 2}°"
+                  aria-label="Adicionar próximo passo"
+                  on:click|stopPropagation={addPasso}
+                >
+                  +
+                </button>
+              {/if}
+            </div>
+            {#if expandedSections[sectionId]}
+              <div class="form-box-body">
+                <label class="field">
+                  <span>Nome do passo (substitui XXXXX)</span>
+                  <input
+                    type="text"
+                    value={passo.tituloPasso}
+                    on:input={(e) => updatePasso(passoIndex, { tituloPasso: e.currentTarget.value })}
+                    placeholder="XXXXX"
+                  />
+                </label>
+                <label class="field">
+                  <span>Descrição</span>
+                  <div
+                    use:registerDescricaoEditor={{ key: editorKey }}
+                    class="rich-editor"
+                    contenteditable="true"
+                    role="textbox"
+                    aria-multiline="true"
+                    data-passo-index={passoIndex}
+                    data-placeholder="Descrição do passo (suporta negrito e formatação ao colar)"
+                    on:input={(e) => handlePassoDescricaoInput(passoIndex, e)}
+                    on:paste={handleDescricaoPaste}
+                    on:blur={(e) => syncDescricaoEditor(passoIndex, e.currentTarget)}
+                  ></div>
+                </label>
+                <div class="field field-upload">
+                  <span>Imagem</span>
+                  <div
+                    class="upload-box"
+                    class:armed={uploadTargetsMatch(armedUploadTarget, uploadCtx)}
+                    tabindex="0"
+                    role="group"
+                    aria-label="Imagem do passo {passoIndex + 1}. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
+                    on:click={() => armImagePaste(uploadCtx)}
+                    on:focus={() => armImagePaste(uploadCtx)}
+                    on:blur={disarmImagePaste}
+                    on:paste={handleImagePaste}
+                    on:dblclick={(e) => {
+                      setUploadTarget(uploadCtx);
+                      handleUploadBoxDblClick(e);
+                    }}
+                  >
+                    <div class="upload-trigger">
+                      <span class="upload-trigger-text">1 clique: selecionar o box e colar (Ctrl+V)</span>
+                      <span class="upload-trigger-hint"
+                        >2 cliques seguidos: escolher imagem no computador — até {MAX_PASSO_IMAGE_MB} MB</span
+                      >
+                    </div>
+                    {#if passo.imagemDataUrl}
+                      <div class="upload-preview-wrap">
+                        <img
+                          class="upload-preview"
+                          src={passo.imagemDataUrl}
+                          alt="Prévia da imagem do passo {passoIndex + 1}"
+                        />
+                        {#if passo.imagemNome}
+                          <p class="upload-filename">{passo.imagemNome}</p>
+                        {/if}
+                        <button
+                          type="button"
+                          class="btn-remove-image"
+                          on:click|stopPropagation={() => clearPassoImage(passoIndex)}
+                        >
+                          Remover imagem
+                        </button>
+                      </div>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+            {/if}
+          </section>
+        {/each}
+
+        <!-- Box: Lista de Material -->
+        <section class="form-box" class:expanded={expandedSections.listaMaterial}>
           <button
             type="button"
             class="form-box-header"
-            on:click={() => toggleSection('passo1')}
-            aria-expanded={expandedSections.passo1}
+            on:click={() => toggleSection('listaMaterial')}
+            aria-expanded={expandedSections.listaMaterial}
           >
-            <span class="form-box-title">Passo 1° — {formData.passo1.tituloPasso || 'XXXXX'}</span>
-            <span class="chevron" class:open={expandedSections.passo1}>▼</span>
+            <span class="form-box-title">Lista de Material</span>
+            <span class="chevron" class:open={expandedSections.listaMaterial}>▼</span>
           </button>
-          {#if expandedSections.passo1}
+          {#if expandedSections.listaMaterial}
             <div class="form-box-body">
-              <label class="field">
-                <span>Nome do passo (substitui XXXXX)</span>
-                <input type="text" bind:value={formData.passo1.tituloPasso} placeholder="XXXXX" />
-              </label>
               <label class="field">
                 <span>Descrição</span>
                 <div
-                  bind:this={descricaoEditorEl}
+                  use:registerDescricaoEditor={{ key: 'material' }}
                   class="rich-editor"
                   contenteditable="true"
                   role="textbox"
                   aria-multiline="true"
-                  data-placeholder="Descrição do passo (suporta negrito e formatação ao colar)"
-                  on:input={syncDescricaoEditor}
+                  data-editor="material"
+                  data-placeholder="Descrição da lista de material"
+                  on:input={handleMaterialDescricaoInput}
                   on:paste={handleDescricaoPaste}
-                  on:blur={syncDescricaoEditor}
+                  on:blur={(e) => syncMaterialDescricaoEditor(e.currentTarget)}
                 ></div>
               </label>
               <div class="field field-upload">
                 <span>Imagem</span>
-                <input
-                  bind:this={passo1ImageInput}
-                  type="file"
-                  class="file-input-hidden"
-                  accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
-                  on:change={handlePasso1ImageChange}
-                  tabindex="-1"
-                  aria-hidden="true"
-                />
                 <div
                   class="upload-box"
-                  class:armed={passo1ImagePasteArmed}
+                  class:armed={uploadTargetsMatch(armedUploadTarget, { type: 'material' })}
                   tabindex="0"
                   role="group"
-                  aria-label="Imagem do passo 1. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
-                  on:click={armPasso1ImagePaste}
-                  on:focus={armPasso1ImagePaste}
-                  on:blur={disarmPasso1ImagePaste}
-                  on:paste={handlePasso1ImagePaste}
-                  on:dblclick={handleUploadBoxDblClick}
+                  aria-label="Imagem da lista de material. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
+                  on:click={() => armImagePaste({ type: 'material' })}
+                  on:focus={() => armImagePaste({ type: 'material' })}
+                  on:blur={disarmImagePaste}
+                  on:paste={handleImagePaste}
+                  on:dblclick={(e) => {
+                    setUploadTarget({ type: 'material' });
+                    handleUploadBoxDblClick(e);
+                  }}
                 >
                   <div class="upload-trigger">
                     <span class="upload-trigger-text">1 clique: selecionar o box e colar (Ctrl+V)</span>
-                    <span class="upload-trigger-hint">2 cliques seguidos: escolher imagem no computador — até {MAX_PASSO1_IMAGE_MB} MB</span>
+                    <span class="upload-trigger-hint"
+                      >2 cliques seguidos: escolher imagem — até {MAX_PASSO_IMAGE_MB} MB</span
+                    >
                   </div>
-                  {#if formData.passo1.imagemDataUrl}
+                  {#if formData.listaMaterial.imagemDataUrl}
                     <div class="upload-preview-wrap">
                       <img
                         class="upload-preview"
-                        src={formData.passo1.imagemDataUrl}
-                        alt="Prévia da imagem do passo 1"
+                        src={formData.listaMaterial.imagemDataUrl}
+                        alt="Prévia da imagem da lista de material"
                       />
-                      {#if formData.passo1.imagemNome}
-                        <p class="upload-filename">{formData.passo1.imagemNome}</p>
+                      {#if formData.listaMaterial.imagemNome}
+                        <p class="upload-filename">{formData.listaMaterial.imagemNome}</p>
                       {/if}
                       <button
                         type="button"
                         class="btn-remove-image"
-                        on:click|stopPropagation={clearPasso1Image}
+                        on:click|stopPropagation={clearMaterialImage}
                       >
                         Remover imagem
                       </button>
@@ -488,7 +695,7 @@
     <main class="preview-column">
       <div class="preview-header">
         <h2>Prévia do PDF</h2>
-        <span class="preview-hint">3 páginas (Capa · Informações do projeto · Passo 1) — atualiza em tempo real</span>
+        <span class="preview-hint">{previewPagesHint} — atualiza em tempo real</span>
       </div>
       <div class="preview-frame-wrapper">
         {#if !assetsReady}
@@ -570,6 +777,36 @@
 
   .form-box.expanded {
     max-height: min(58vh, 540px);
+  }
+
+  .form-box-header-row {
+    display: flex;
+    align-items: stretch;
+    flex-shrink: 0;
+    width: 100%;
+  }
+
+  .form-box-header-row .form-box-header {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .btn-add-passo {
+    flex-shrink: 0;
+    width: 2.75rem;
+    border: none;
+    border-left: 1px solid rgba(255, 255, 255, 0.35);
+    background: linear-gradient(135deg, #5a4fd4 0%, #7b68ee 100%);
+    color: white;
+    font-size: 1.35rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  .btn-add-passo:hover {
+    filter: brightness(1.1);
   }
 
   .form-box-header {
