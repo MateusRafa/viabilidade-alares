@@ -305,14 +305,17 @@
 
   function addPasso() {
     const newIndex = formData.passos.length;
+    const novoPasso = emptyPasso();
     formData = {
       ...formData,
-      passos: [...formData.passos, emptyPasso()]
+      passos: [...formData.passos, novoPasso]
     };
+    passoLayouts = [...passoLayouts, defaultPassoLayout(novoPasso)];
     expandedSections = {
       ...expandedSections,
       [passoSectionId(newIndex)]: true
     };
+    schedulePassoLayoutMeasure(true);
   }
 
   function removePasso(passoIndex) {
@@ -346,6 +349,9 @@
       ...formData,
       passos: formData.passos.filter((_, i) => i !== passoIndex)
     };
+
+    passoLayouts = passoLayouts.filter((_, i) => i !== passoIndex);
+    schedulePassoLayoutMeasure(true);
 
     if (uploadTarget?.type === 'passo' && uploadTarget.index === passoIndex) {
       uploadTarget = null;
