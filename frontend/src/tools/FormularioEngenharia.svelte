@@ -14,7 +14,10 @@
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
     waitForPrintImages,
-    sanitizeRichHtml
+    sanitizeRichHtml,
+    MAX_ANEXO_PDF_MB,
+    createAnexoId,
+    renderPdfFileToPageImages
   } from './formularioPdfShared.js';
 
   export let currentUser = '';
@@ -30,12 +33,15 @@
     capa: true,
     cabecalho: true,
     'passo-0': true,
-    listaMaterial: true
+    listaMaterial: true,
+    anexosPdf: true
   };
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
   let assetsReady = false;
   let passoImageInput;
+  let anexoPdfInput;
+  let processingAnexoPdf = false;
   let previewIframeEl;
   let measureIframeEl;
   let previewFrameWrapperEl;
@@ -79,7 +85,8 @@
         capa: formData.capa,
         cabecalho: formData.cabecalho,
         passos: formData.passos,
-        listaMaterial: formData.listaMaterial
+        listaMaterial: formData.listaMaterial,
+        anexosPdf: (formData.anexosPdf || []).map((a) => [a.id, a.pageImages?.length || 0])
       })
     : '';
 
@@ -138,6 +145,15 @@
         doc.querySelector('[data-pdf-section="lista-material"]') ||
         doc.querySelector('.pdf-page-lista-material')
       );
+    }
+    if (previewFocusAnchor === 'anexosPdf' || previewFocusAnchor.startsWith('anexo:')) {
+      const anexoId = previewFocusAnchor.startsWith('anexo:')
+        ? previewFocusAnchor.split(':')[1]
+        : formData.anexosPdf?.[0]?.id;
+      if (anexoId) {
+        return doc.querySelector(`[data-pdf-section="anexo-${anexoId}"]`);
+      }
+      return doc.querySelector('.pdf-page-anexo');
     }
     if (previewFocusAnchor.startsWith('passo:')) {
       const passoIndex = previewFocusAnchor.split(':')[1];
@@ -213,7 +229,14 @@
   }
 
   $: pdfPageCount = getPdfPageCount(formData, { passoLayouts: layoutsForPreview });
-  $: previewPagesHint = `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material)`;
+  $: anexoPageCount = (formData.anexosPdf || []).reduce(
+    (n, a) => n + (a.pageImages?.length || 0),
+    0
+  );
+  $: previewPagesHint =
+    `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material` +
+    (anexoPageCount > 0 ? ` · ${anexoPageCount} anexo(s)` : '') +
+    ')';
 
   async function runPassoLayoutMeasure() {
     if (!measureIframeEl?.contentDocument?.body || !assetsReady) return;
@@ -301,6 +324,46 @@
       ...formData,
       listaMaterial: { ...formData.listaMaterial, ...patch }
     };
+  }
+
+  function removeAnexoPdf(anexoIndex) {
+    formData = {
+      ...formData,
+      anexosPdf: formData.anexosPdf.filter((_, i) => i !== anexoIndex)
+    };
+    schedulePreviewRefresh(true);
+  }
+
+  async function handleAnexoPdfSelected(event) {
+    const file = event.currentTarget?.files?.[0];
+    if (event.currentTarget) event.currentTarget.value = '';
+    if (!file) return;
+
+    pdfError = '';
+    processingAnexoPdf = true;
+    try {
+      const { nome, pageImages } = await renderPdfFileToPageImages(file);
+      if (!pageImages.length) {
+        pdfError = 'O PDF selecionado não possui páginas.';
+        return;
+      }
+      const novo = { id: createAnexoId(), nome, pageImages };
+      formData = {
+        ...formData,
+        anexosPdf: [...(formData.anexosPdf || []), novo]
+      };
+      previewFocusAnchor = `anexo:${novo.id}`;
+      schedulePreviewRefresh(true);
+    } catch (err) {
+      pdfError = err?.message || 'Não foi possível processar o PDF anexado.';
+    } finally {
+      processingAnexoPdf = false;
+    }
+  }
+
+  function triggerAnexoPdfPicker() {
+    pdfError = '';
+    anexoPdfInput?.click();
   }
 
   function addPasso() {
@@ -946,6 +1009,64 @@
             </div>
           {/if}
         </section>
+
+        <!-- Box: Anexos PDF -->
+        <section class="form-box" class:expanded={expandedSections.anexosPdf} data-preview-anchor="anexosPdf">
+          <button
+            type="button"
+            class="form-box-header"
+            on:click={() => toggleSection('anexosPdf')}
+            aria-expanded={expandedSections.anexosPdf}
+          >
+            <span class="form-box-title">Anexos PDF</span>
+            <span class="chevron" class:open={expandedSections.anexosPdf}>▼</span>
+          </button>
+          {#if expandedSections.anexosPdf}
+            <div class="form-box-body form-box-body-anexos">
+              <p class="anexos-pdf-hint">
+                Cada PDF anexado vira páginas na prévia e no PDF final, após a Lista de Material. Máximo
+                {MAX_ANEXO_PDF_MB} MB por arquivo. Não é possível editar o conteúdo dos anexos.
+              </p>
+
+              {#each formData.anexosPdf as anexo, anexoIndex (anexo.id)}
+                <div class="anexo-pdf-item">
+                  <div class="anexo-pdf-item-header">
+                    <span class="anexo-pdf-item-nome" title={anexo.nome}>{anexo.nome}</span>
+                    <span class="anexo-pdf-item-meta"
+                      >{anexo.pageImages.length} página{anexo.pageImages.length === 1 ? '' : 's'}</span
+                    >
+                  </div>
+                  <button
+                    type="button"
+                    class="btn-remove-anexo"
+                    on:click={() => removeAnexoPdf(anexoIndex)}
+                  >
+                    Remover anexo
+                  </button>
+                </div>
+              {/each}
+
+              <input
+                bind:this={anexoPdfInput}
+                type="file"
+                class="file-input-hidden"
+                accept="application/pdf,.pdf"
+                on:change={handleAnexoPdfSelected}
+                tabindex="-1"
+                aria-hidden="true"
+              />
+
+              <button
+                type="button"
+                class="btn-add-anexo-pdf"
+                on:click={triggerAnexoPdfPicker}
+                disabled={processingAnexoPdf}
+              >
+                {processingAnexoPdf ? 'Processando PDF…' : '+ Adicionar PDF anexo'}
+              </button>
+            </div>
+          {/if}
+        </section>
       </div>
 
       <footer class="form-actions">
@@ -1148,6 +1269,83 @@
 
   .form-box-body-cabecalho {
     max-height: min(50vh, 480px);
+  }
+
+  .form-box-body-anexos {
+    max-height: min(40vh, 380px);
+  }
+
+  .anexos-pdf-hint {
+    margin: 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: #6b7280;
+  }
+
+  .anexo-pdf-item {
+    padding: 0.75rem;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    background: #f9fafb;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .anexo-pdf-item-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+
+  .anexo-pdf-item-nome {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #374151;
+    word-break: break-word;
+  }
+
+  .anexo-pdf-item-meta {
+    font-size: 0.75rem;
+    color: #6b7280;
+  }
+
+  .btn-remove-anexo {
+    align-self: flex-start;
+    border: 1px solid #fca5a5;
+    background: #fff;
+    color: #b91c1c;
+    font-size: 0.8rem;
+    font-weight: 600;
+    padding: 0.35rem 0.65rem;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .btn-remove-anexo:hover {
+    background: #fef2f2;
+  }
+
+  .btn-add-anexo-pdf {
+    width: 100%;
+    border: 2px dashed #7b68ee;
+    background: #f5f3ff;
+    color: #5b21b6;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .btn-add-anexo-pdf:hover:not(:disabled) {
+    background: #ede9fe;
+  }
+
+  .btn-add-anexo-pdf:disabled {
+    opacity: 0.65;
+    cursor: wait;
   }
 
   .field {
