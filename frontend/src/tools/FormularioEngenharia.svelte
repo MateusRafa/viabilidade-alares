@@ -25,7 +25,37 @@
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
 
-  let formData = normalizeFormData(defaultFormData());
+  let projetistaUserDefaultApplied = false;
+
+  function createInitialFormData(user = '') {
+    const data = normalizeFormData(defaultFormData());
+    const name = (user ?? '').trim();
+    if (!name) return data;
+    projetistaUserDefaultApplied = true;
+    return {
+      ...data,
+      cabecalho: { ...data.cabecalho, projetista: name }
+    };
+  }
+
+  function applyProjetistaDefault(user = '') {
+    if (projetistaUserDefaultApplied) return;
+    const name = (user ?? '').trim();
+    if (!name) return;
+    if (formData.cabecalho.projetista?.trim()) {
+      projetistaUserDefaultApplied = true;
+      return;
+    }
+    formData = {
+      ...formData,
+      cabecalho: { ...formData.cabecalho, projetista: name }
+    };
+    projetistaUserDefaultApplied = true;
+  }
+
+  let formData = createInitialFormData(currentUser);
+
+  $: applyProjetistaDefault(currentUser);
   let generatingPDF = false;
   let pdfError = '';
   let expandedSections = {
