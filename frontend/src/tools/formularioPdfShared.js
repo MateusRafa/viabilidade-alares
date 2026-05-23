@@ -1172,10 +1172,10 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-cabecalho .report-info-line {
     display: block;
     margin: 0;
-    padding: 4px 0 5px;
+    padding: 5px 0 6px;
     border-bottom: 1px solid #f0f0f0;
-    font-size: 11px;
-    line-height: 1.55;
+    font-size: 13px;
+    line-height: 1.5;
     color: #111;
   }
   .pdf-page-cabecalho .report-info-line:last-child {
@@ -1185,19 +1185,20 @@ export const FORMULARIO_PDF_STYLES = `
     display: inline;
     font-weight: 700;
     color: #111;
-    font-size: 11px;
+    font-size: 13px;
     text-transform: none;
     letter-spacing: 0;
   }
   .pdf-page-cabecalho .report-info-line .report-info-colon {
     display: inline;
     font-weight: 700;
+    font-size: 13px;
     color: #111;
   }
   .pdf-page-cabecalho .report-info-line .report-info-value {
     display: inline;
     font-weight: 400;
-    font-size: 11px;
+    font-size: 13px;
     color: #111;
     word-break: break-word;
   }
@@ -1420,14 +1421,14 @@ export const FORMULARIO_PDF_STYLES = `
       gap: 4px !important;
     }
     .pdf-page-cabecalho .report-info-line {
-      padding: 3px 0 4px !important;
-      font-size: 10.5px !important;
+      padding: 4px 0 5px !important;
+      font-size: 12px !important;
       line-height: 1.5 !important;
     }
     .pdf-page-cabecalho .report-info-line .report-info-label,
     .pdf-page-cabecalho .report-info-line .report-info-colon,
     .pdf-page-cabecalho .report-info-line .report-info-value {
-      font-size: 10.5px !important;
+      font-size: 12px !important;
     }
     .passo-conteudo-bloco,
     .passo-descricao-body,
