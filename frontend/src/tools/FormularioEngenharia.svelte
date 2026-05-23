@@ -754,6 +754,19 @@
                       bind:value={formData.cabecalho[field.key]}
                       placeholder={field.placeholder}
                     ></textarea>
+                  {:else if field.options?.length}
+                    <input
+                      type="text"
+                      class="field-combobox"
+                      list="cabecalho-{field.key}-opcoes"
+                      bind:value={formData.cabecalho[field.key]}
+                      placeholder={field.placeholder}
+                    />
+                    <datalist id="cabecalho-{field.key}-opcoes">
+                      {#each field.options as opcao (opcao)}
+                        <option value={opcao}></option>
+                      {/each}
+                    </datalist>
                   {:else}
                     <input
                       type="text"
