@@ -1323,12 +1323,12 @@ export const FORMULARIO_PDF_STYLES = `
     margin: 0 0 10px;
   }
   .capa-cliente {
-    font-size: 12pt;
-    font-weight: 400;
+    font-size: 13pt;
+    font-weight: 700;
     color: #111;
     text-transform: uppercase;
     letter-spacing: 0.02em;
-    line-height: 1.4;
+    line-height: 1.35;
     max-width: 95%;
   }
   .capa-meta-block {
