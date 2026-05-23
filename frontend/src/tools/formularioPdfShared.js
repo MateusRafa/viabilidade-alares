@@ -4,10 +4,23 @@ import { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
 
 export { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
 
+/** Sugestões do campo Objetivo (lista suspensa editável no formulário) */
+export const OBJETIVO_OPCOES = ['Gpon', 'Ponto a Ponto', 'Fibra Apagada'];
+
 /** Campos da página 2 — ordem fixa do documento */
 export const CABECALHO_FIELDS = [
   { key: 'operacao', label: 'Operação', placeholder: 'Ex: Alares' },
-  { key: 'objetivo', label: 'Objetivo', placeholder: 'Ex: 200MBS PTP' },
+  {
+    key: 'objetivo',
+    label: 'Objetivo',
+    placeholder: 'Selecione ou digite',
+    options: OBJETIVO_OPCOES
+  },
+  {
+    key: 'velocidadeContratada',
+    label: 'Velocidade contratada',
+    placeholder: 'Ex: 200MBS PTP'
+  },
   { key: 'cliente', label: 'Cliente', placeholder: 'Ex: Sicred Cambará' },
   { key: 'endereco', label: 'Endereço', placeholder: 'Rua, número, bairro, cidade - UF, CEP' },
   {
