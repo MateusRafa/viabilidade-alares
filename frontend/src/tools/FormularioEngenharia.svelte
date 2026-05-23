@@ -30,11 +30,11 @@
   let generatingPDF = false;
   let pdfError = '';
   let expandedSections = {
-    capa: true,
-    cabecalho: true,
-    'passo-0': true,
-    listaMaterial: true,
-    anexosPdf: true
+    capa: false,
+    cabecalho: false,
+    'passo-0': false,
+    listaMaterial: false,
+    anexosPdf: false
   };
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
@@ -376,7 +376,7 @@
     passoLayouts = [...passoLayouts, defaultPassoLayout(novoPasso)];
     expandedSections = {
       ...expandedSections,
-      [passoSectionId(newIndex)]: true
+      [passoSectionId(newIndex)]: false
     };
     schedulePassoLayoutMeasure(true);
   }
@@ -398,6 +398,7 @@
       capa: expandedSections.capa,
       cabecalho: expandedSections.cabecalho,
       listaMaterial: expandedSections.listaMaterial,
+      anexosPdf: expandedSections.anexosPdf,
       ...passoExpanded
     };
 
