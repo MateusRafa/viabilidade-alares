@@ -53,6 +53,17 @@
 
   const PREVIEW_DEBOUNCE_MS = 50;
   const MEASURE_DEBOUNCE_MS = 50;
+  const FORM_COLUMN_WIDTH_KEY = 'formularioEngenharia_formColumnWidth';
+  const FORM_COLUMN_MIN_PX = 320;
+  const FORM_COLUMN_MAX_PX = 720;
+  const FORM_COLUMN_DEFAULT_PX = 440;
+
+  let formColumnWidth = FORM_COLUMN_DEFAULT_PX;
+  let isResizingFormColumn = false;
+  let resizeStartX = 0;
+  let resizeStartFormWidth = FORM_COLUMN_DEFAULT_PX;
+
+  $: formColumnWidthStyle = `${formColumnWidth}px`;
 
   let passoLayouts = [];
   let passoLayoutWarnings = [];
@@ -660,6 +671,61 @@
     };
   }
 
+  function loadFormColumnWidthPreference() {
+    if (typeof window === 'undefined') return;
+    try {
+      const saved = localStorage.getItem(FORM_COLUMN_WIDTH_KEY);
+      if (!saved) return;
+      const parsed = parseInt(saved, 10);
+      if (!Number.isNaN(parsed)) {
+        formColumnWidth = Math.max(FORM_COLUMN_MIN_PX, Math.min(FORM_COLUMN_MAX_PX, parsed));
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function startResizeFormColumn(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    isResizingFormColumn = true;
+    resizeStartX = e.clientX ?? e.touches?.[0]?.clientX ?? 0;
+    resizeStartFormWidth = formColumnWidth;
+    document.addEventListener('mousemove', handleResizeFormColumn, { passive: false, capture: true });
+    document.addEventListener('mouseup', stopResizeFormColumn, { passive: false, capture: true });
+    document.addEventListener('touchmove', handleResizeFormColumn, { passive: false, capture: true });
+    document.addEventListener('touchend', stopResizeFormColumn, { passive: false, capture: true });
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }
+
+  function handleResizeFormColumn(e) {
+    if (!isResizingFormColumn) return;
+    e.preventDefault();
+    const clientX = e.clientX ?? e.touches?.[0]?.clientX ?? resizeStartX;
+    const deltaX = clientX - resizeStartX;
+    formColumnWidth = Math.max(
+      FORM_COLUMN_MIN_PX,
+      Math.min(FORM_COLUMN_MAX_PX, resizeStartFormWidth + deltaX)
+    );
+  }
+
+  function stopResizeFormColumn() {
+    if (!isResizingFormColumn) return;
+    isResizingFormColumn = false;
+    document.removeEventListener('mousemove', handleResizeFormColumn, { capture: true });
+    document.removeEventListener('mouseup', stopResizeFormColumn, { capture: true });
+    document.removeEventListener('touchmove', handleResizeFormColumn, { capture: true });
+    document.removeEventListener('touchend', stopResizeFormColumn, { capture: true });
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    try {
+      localStorage.setItem(FORM_COLUMN_WIDTH_KEY, String(formColumnWidth));
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function handleGeneratePdf() {
     if (!assetsReady) {
       pdfError = 'Aguarde o carregamento das imagens da capa antes de gerar o PDF.';
@@ -693,6 +759,7 @@
     let removeWindowPaste = null;
 
     if (typeof window !== 'undefined') {
+      loadFormColumnWidthPreference();
       const origin = window.location.origin;
       const [logo, ondas] = await Promise.all([
         loadLogoDataUrl(origin),
@@ -718,6 +785,7 @@
     return () => {
       removeWindowPaste?.();
       disarmImagePaste();
+      stopResizeFormColumn();
       clearTimeout(previewDebounceTimer);
       clearTimeout(measureDebounceTimer);
     };
@@ -727,7 +795,7 @@
 <div class="formulario-engenharia">
   <div class="workspace">
     <!-- Coluna esquerda: formulário -->
-    <aside class="form-column">
+    <aside class="form-column" style="width: {formColumnWidthStyle}; flex: 0 0 auto;">
       <div
         class="form-scroll"
         on:focusin|capture={handleFormPreviewActivity}
@@ -1071,6 +1139,16 @@
       </footer>
     </aside>
 
+    <div
+      class="resize-handle resize-handle-vertical"
+      class:resizing={isResizingFormColumn}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Ajustar largura do formulário e da prévia"
+      on:mousedown|stopPropagation={startResizeFormColumn}
+      on:touchstart|stopPropagation={startResizeFormColumn}
+    ></div>
+
     <!-- Coluna direita: prévia em tempo real -->
     <main class="preview-column">
       <div class="preview-header">
@@ -1123,16 +1201,55 @@
   }
 
   .form-column {
-    flex: 0 0 42%;
-    max-width: 520px;
     min-width: 0;
-    width: 100%;
+    max-width: none;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     background: #fff;
-    border-right: 1px solid #e2e8f0;
     box-shadow: 2px 0 12px rgba(0, 0, 0, 0.04);
+  }
+
+  .resize-handle {
+    flex-shrink: 0;
+    align-self: stretch;
+    position: relative;
+    z-index: 20;
+    touch-action: none;
+    user-select: none;
+    background: transparent;
+    transition: background 0.2s;
+  }
+
+  .resize-handle-vertical {
+    width: 10px;
+    margin: 0 -3px;
+    cursor: col-resize;
+  }
+
+  .resize-handle-vertical::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 3px;
+    transform: translateX(-50%);
+    background: #e2e8f0;
+    border-radius: 2px;
+    transition: background 0.2s, width 0.2s;
+    pointer-events: none;
+  }
+
+  .resize-handle-vertical:hover,
+  .resize-handle-vertical.resizing {
+    background: rgba(123, 104, 238, 0.08);
+  }
+
+  .resize-handle-vertical:hover::before,
+  .resize-handle-vertical.resizing::before {
+    background: #7b68ee;
+    width: 4px;
   }
 
   /* Rolagem entre os boxes (Capa, Informações, Passo 1) */
@@ -1643,9 +1760,13 @@
       flex-direction: column;
     }
 
+    .resize-handle-vertical {
+      display: none;
+    }
+
     .form-column {
-      flex: none;
-      max-width: none;
+      width: 100% !important;
+      flex: none !important;
       max-height: 45vh;
     }
 
