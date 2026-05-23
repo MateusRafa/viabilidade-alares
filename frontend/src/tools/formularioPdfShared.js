@@ -1,8 +1,17 @@
 // PDF multipágina B2B — capa, cabeçalho, passos + identidade Alares
 
 import { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
+import { countAnexoPdfPages } from './formularioPdfAnexos.js';
 
 export { BRAND, TOTAL_PDF_PAGES } from './formularioPdfBranding.js';
+export {
+  MAX_ANEXO_PDF_MB,
+  MAX_ANEXO_PDF_BYTES,
+  emptyAnexoPdf,
+  createAnexoId,
+  countAnexoPdfPages,
+  renderPdfFileToPageImages
+} from './formularioPdfAnexos.js';
 
 /** Sugestões do campo Objetivo (lista suspensa editável no formulário) */
 export const OBJETIVO_OPCOES = ['Gpon', 'Ponto a Ponto', 'Fibra Apagada'];
@@ -106,7 +115,7 @@ export function getPdfPageCount(formData, options = {}) {
   passos.forEach((passo, i) => {
     passoPages += countPassoPages(layouts[i] || defaultPassoLayout(passo));
   });
-  return 2 + passoPages + 1;
+  return 2 + passoPages + 1 + countAnexoPdfPages(formData);
 }
 
 export function normalizeFormData(data) {
@@ -126,8 +135,20 @@ export function normalizeFormData(data) {
     capa: { ...base.capa, ...data.capa },
     cabecalho: { ...base.cabecalho, ...data.cabecalho },
     passos,
-    listaMaterial: { ...emptyListaMaterial(), ...data.listaMaterial }
+    listaMaterial: { ...emptyListaMaterial(), ...data.listaMaterial },
+    anexosPdf: normalizeAnexosPdf(data.anexosPdf)
   };
+}
+
+function normalizeAnexosPdf(anexos) {
+  if (!Array.isArray(anexos)) return [];
+  return anexos.map((a) => ({
+    id: a?.id || `anexo-${Date.now()}`,
+    nome: a?.nome || '',
+    pageImages: Array.isArray(a?.pageImages)
+      ? a.pageImages.filter((img) => typeof img === 'string' && img.startsWith('data:'))
+      : []
+  }));
 }
 
 /** Estado inicial do formulário */
@@ -141,7 +162,8 @@ export function defaultFormData() {
     },
     cabecalho: emptyCabecalho(),
     passos: [emptyPasso()],
-    listaMaterial: emptyListaMaterial()
+    listaMaterial: emptyListaMaterial(),
+    anexosPdf: []
   };
 }
 
@@ -177,6 +199,16 @@ export function getPdfPagesMeta(formData, options = {}) {
     id: 'listaMaterial',
     number: pages.length + 1,
     title: 'Lista de Material'
+  });
+  (formData.anexosPdf || []).forEach((anexo, ai) => {
+    const nome = anexo.nome?.trim() || `Anexo ${ai + 1}`;
+    (anexo.pageImages || []).forEach((_, pi) => {
+      pages.push({
+        id: `anexo-${anexo.id || ai}-p${pi + 1}`,
+        number: pages.length + 1,
+        title: `${nome} — pág. ${pi + 1}`
+      });
+    });
   });
   return pages;
 }
@@ -813,11 +845,11 @@ function buildInnerPageFooter(pageNum) {
 }
 
 /** Rodapé páginas 2 e 3 — texto como na capa + só "Página N" */
-function buildArtworkPageFooter(pageNum) {
+function buildArtworkPageFooter(pageNum, totalPages = TOTAL_PDF_PAGES) {
   return `
     <footer class="artwork-page-footer">
       <p class="capa-rodape">${escapeHtml(BRAND.rodape)}</p>
-      <span class="artwork-page-num">Página ${pageNum}</span>
+      <span class="artwork-page-num">Página ${pageNum} de ${totalPages}</span>
     </footer>
   `;
 }
@@ -945,7 +977,8 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-cabecalho,
   .pdf-page-passo1,
   .pdf-page-passo,
-  .pdf-page-lista-material {
+  .pdf-page-lista-material,
+  .pdf-page-anexo {
     padding: 18mm 16mm 14mm;
   }
   .page-shell-artwork {
@@ -968,7 +1001,8 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-cabecalho .page-content,
   .pdf-page-passo .page-content,
   .pdf-page-passo-imagem .page-content,
-  .pdf-page-lista-material .page-content {
+  .pdf-page-lista-material .page-content,
+  .pdf-page-anexo .page-content {
     flex: 1;
     min-height: 0;
     overflow: hidden;
@@ -1220,6 +1254,52 @@ export const FORMULARIO_PDF_STYLES = `
     color: #333;
   }
 
+  .pdf-page-anexo .page-content-anexo {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-height: 0;
+    flex: 1;
+  }
+  .anexo-pdf-cabecalho {
+    flex-shrink: 0;
+    margin-bottom: 4mm;
+    padding-bottom: 3mm;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .anexo-pdf-titulo {
+    font-size: 11px;
+    font-weight: 600;
+    color: ${BRAND.cores.secundaria};
+    margin: 0 0 2px;
+    word-break: break-word;
+  }
+  .anexo-pdf-subtitulo {
+    font-size: 9px;
+    color: #6b7280;
+    margin: 0;
+  }
+  .anexo-pdf-pagina-wrap {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .anexo-pdf-pagina {
+    display: block;
+    max-width: 100%;
+    max-height: 230mm;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+    object-position: center center;
+    border: 1px solid #e5e7eb;
+    border-radius: 2px;
+    background: #fff;
+  }
+
   .passo-conteudo-bloco {
     page-break-inside: avoid;
     break-inside: avoid-page;
@@ -1413,9 +1493,13 @@ export const FORMULARIO_PDF_STYLES = `
     }
     .pdf-page-cabecalho,
     .pdf-page-passo,
-    .pdf-page-passo-imagem {
+    .pdf-page-passo-imagem,
+    .pdf-page-anexo {
       page-break-inside: avoid !important;
       break-inside: avoid-page !important;
+    }
+    .anexo-pdf-pagina {
+      max-height: 230mm !important;
     }
     .pdf-page-cabecalho .report-info-cabecalho {
       gap: 4px !important;
@@ -1559,7 +1643,7 @@ function buildPageCabecalho(formData, options = {}) {
             </div>
           </div>
         </div>
-        ${buildArtworkPageFooter(2)}
+        ${buildArtworkPageFooter(2, options.totalPages)}
       </div>
     </div>
   `;
@@ -1616,7 +1700,49 @@ function buildPassoPageShell({
             ${bodyHtml}
           </div>
         </div>
-        ${buildArtworkPageFooter(pageNum)}
+        ${buildArtworkPageFooter(pageNum, options.totalPages)}
+      </div>
+    </div>
+  `;
+}
+
+/** Página rasterizada de um PDF anexado (somente leitura na prévia/impressão) */
+function buildPageAnexoPdf({
+  pageNum,
+  totalPages,
+  anexoId,
+  anexoNome,
+  pageIndex,
+  pageTotal,
+  imageDataUrl,
+  options = {}
+}) {
+  const logoUrl = getLogoUrl(options);
+  const ondasUrl = getCapaOndasUrl(options);
+  const ondasImg = ondasUrl
+    ? `<img class="capa-ondas-svg" src="${attrUrl(ondasUrl)}" alt="" aria-hidden="true" />`
+    : '';
+  const nome = anexoNome?.trim() || 'Anexo PDF';
+
+  return `
+    <div class="pdf-page pdf-page-anexo" data-pdf-page="${pageNum}" data-pdf-section="anexo-${escapeHtml(anexoId)}" data-anexo-page="${pageIndex + 1}">
+      ${ondasImg}
+      <div class="page-shell-artwork">
+        <div class="capa-logo-wrap">
+          ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
+        </div>
+        <div class="page-body-inner page-body-artwork">
+          <div class="page-content page-content-anexo">
+            <div class="anexo-pdf-cabecalho">
+              <p class="anexo-pdf-titulo">Anexo: ${escapeHtml(nome)}</p>
+              <p class="anexo-pdf-subtitulo">Página ${pageIndex + 1} de ${pageTotal} do anexo · documento somente leitura</p>
+            </div>
+            <div class="anexo-pdf-pagina-wrap">
+              <img class="anexo-pdf-pagina" src="${attrUrl(imageDataUrl)}" alt="${escapeHtml(nome)} — página ${pageIndex + 1}" />
+            </div>
+          </div>
+        </div>
+        ${buildArtworkPageFooter(pageNum, totalPages)}
       </div>
     </div>
   `;
@@ -1787,29 +1913,52 @@ function buildPageListaMaterial(formData, pageNum, options = {}) {
             </div>
           </div>
         </div>
-        ${buildArtworkPageFooter(pageNum)}
+        ${buildArtworkPageFooter(pageNum, options.totalPages)}
       </div>
     </div>
   `;
 }
 
 export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
+  const totalPages = options.totalPages ?? getPdfPageCount(formData, options);
+  const buildOpts = { ...options, totalPages };
   const passos = formData.passos?.length ? formData.passos : [emptyPasso()];
   let pageNum = 2;
   let passosHtml = '';
   passos.forEach((passo, index) => {
-    const built = buildPassoPagesHtml(passo, index + 1, index, pageNum + 1, options);
+    const built = buildPassoPagesHtml(passo, index + 1, index, pageNum + 1, buildOpts);
     passosHtml += built.html;
     pageNum = built.nextPageNum;
   });
-  const listaMaterialHtml = buildPageListaMaterial(formData, pageNum + 1, options);
+  const listaMaterialHtml = buildPageListaMaterial(formData, pageNum + 1, buildOpts);
+  pageNum += 1;
+
+  let anexosHtml = '';
+  (formData.anexosPdf || []).forEach((anexo) => {
+    const images = anexo.pageImages || [];
+    const pageTotal = images.length;
+    images.forEach((imageDataUrl, pageIndex) => {
+      pageNum += 1;
+      anexosHtml += buildPageAnexoPdf({
+        pageNum,
+        totalPages,
+        anexoId: anexo.id,
+        anexoNome: anexo.nome,
+        pageIndex,
+        pageTotal,
+        imageDataUrl,
+        options: buildOpts
+      });
+    });
+  });
 
   return `
     <div class="pdf-document">
-      ${buildPageCapa(formData, options)}
-      ${buildPageCabecalho(formData, options)}
+      ${buildPageCapa(formData, buildOpts)}
+      ${buildPageCabecalho(formData, buildOpts)}
       ${passosHtml}
       ${listaMaterialHtml}
+      ${anexosHtml}
     </div>
   `;
 }
