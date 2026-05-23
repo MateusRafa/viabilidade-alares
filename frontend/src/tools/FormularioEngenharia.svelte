@@ -4,7 +4,6 @@
     defaultFormData,
     normalizeFormData,
     emptyPasso,
-    getPdfPageCount,
     defaultPassoLayout,
     measurePassoLayoutsFromDocument,
     getPassoLayoutWarnings,
@@ -227,16 +226,6 @@
       [sectionId]: !expandedSections[sectionId]
     };
   }
-
-  $: pdfPageCount = getPdfPageCount(formData, { passoLayouts: layoutsForPreview });
-  $: anexoPageCount = (formData.anexosPdf || []).reduce(
-    (n, a) => n + (a.pageImages?.length || 0),
-    0
-  );
-  $: previewPagesHint =
-    `${pdfPageCount} páginas (Capa · Informações · ${formData.passos.length} passo(s) · Lista de Material` +
-    (anexoPageCount > 0 ? ` · ${anexoPageCount} anexo(s)` : '') +
-    ')';
 
   async function runPassoLayoutMeasure() {
     if (!measureIframeEl?.contentDocument?.body || !assetsReady) return;
@@ -671,9 +660,6 @@
     };
   }
 
-  const PDF_PRINT_HINT =
-    'Na impressão: destino "Salvar como PDF", margens "Padrão" (ou "Nenhuma") e desmarque "Cabeçalhos e rodapés" do navegador.';
-
   async function handleGeneratePdf() {
     if (!assetsReady) {
       pdfError = 'Aguarde o carregamento das imagens da capa antes de gerar o PDF.';
@@ -1074,7 +1060,6 @@
         {#if pdfError}
           <p class="pdf-error" role="alert">{pdfError}</p>
         {/if}
-        <p class="pdf-print-hint">{PDF_PRINT_HINT}</p>
         <button
           type="button"
           class="btn-generate-pdf"
@@ -1090,7 +1075,6 @@
     <main class="preview-column">
       <div class="preview-header">
         <h2>Prévia do PDF</h2>
-        <span class="preview-hint">{previewPagesHint} — atualiza após você pausar a edição (~50 ms)</span>
       </div>
       <div class="preview-frame-wrapper" bind:this={previewFrameWrapperEl}>
         {#if !assetsReady}
@@ -1569,13 +1553,6 @@
     color: #b91c1c;
   }
 
-  .pdf-print-hint {
-    margin: 0 0 0.65rem;
-    font-size: 0.75rem;
-    line-height: 1.4;
-    color: #64748b;
-  }
-
   .passo-layout-warning {
     margin: 0.65rem 1rem 0;
     padding: 0.5rem 0.65rem;
@@ -1610,11 +1587,6 @@
     font-size: 1rem;
     font-weight: 600;
     color: #4c1d95;
-  }
-
-  .preview-hint {
-    font-size: 0.8rem;
-    color: #6b7280;
   }
 
   .preview-frame-wrapper {
