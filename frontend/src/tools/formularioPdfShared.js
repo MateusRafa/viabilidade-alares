@@ -839,17 +839,17 @@ function buildInnerPageFooter(pageNum) {
   return `
     <footer class="page-footer-bar">
       <span class="page-footer-brand">${escapeHtml(BRAND.rodape)}</span>
-      <span class="page-footer-pagina">Página ${pageNum} de ${TOTAL_PDF_PAGES}</span>
+      <span class="page-footer-pagina">${pageNum}</span>
     </footer>
   `;
 }
 
-/** Rodapé páginas 2 e 3 — texto como na capa + só "Página N" */
-function buildArtworkPageFooter(pageNum, totalPages = TOTAL_PDF_PAGES) {
+/** Rodapé páginas internas — texto da capa + número da página */
+function buildArtworkPageFooter(pageNum) {
   return `
     <footer class="artwork-page-footer">
       <p class="capa-rodape">${escapeHtml(BRAND.rodape)}</p>
-      <span class="artwork-page-num">Página ${pageNum} de ${totalPages}</span>
+      <span class="artwork-page-num">${pageNum}</span>
     </footer>
   `;
 }
