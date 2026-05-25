@@ -1,29 +1,83 @@
 // ============================================
 // Registry de Ferramentas do Portal
 // ============================================
-// Metadados centralizados em /shared/portal-tools.json
+// Metadados: manter em sync com backend/portal-tools.json
 // ============================================
 
-import portalToolsMeta from '../data/portal-tools.json';
-import ViabilidadeAlares from './ViabilidadeAlares.svelte';
-import AnaliseCobertura from './AnaliseCobertura.svelte';
-import CalculadoraOrcamento from './CalculadoraOrcamento.svelte';
-import MapaConsulta from './MapaConsulta.svelte';
-import DashboardCensup from './DashboardCensup.svelte';
-import FormularioEngenharia from './FormularioEngenharia.svelte';
+/** Metadados das ferramentas (embutidos para o build não depender de JSON externo). */
+const portalToolsMeta = [
+  {
+    id: 'viabilidade-alares',
+    title: 'Viabilidade Alares - Engenharia',
+    description:
+      'Análise de viabilidade técnica para identificação de CTOs próximas a endereços de clientes',
+    icon: '🔍',
+    color: '#7B68EE',
+    available: true
+  },
+  {
+    id: 'analise-cobertura',
+    title: 'Consulta de Alívio de Rede',
+    description: 'Consulta de CTOs para análise de alívio de rede e infraestrutura',
+    icon: '📡',
+    color: '#6495ED',
+    available: true
+  },
+  {
+    id: 'calculadora-orcamento',
+    title: 'Calculadora de Orçamento',
+    description: 'Cálculo de orçamentos para projetos de engenharia',
+    icon: '🧮',
+    color: '#10B981',
+    available: true
+  },
+  {
+    id: 'mapa-consulta',
+    title: 'Mapa de Consulta',
+    description: 'Visualização e consulta de informações em mapa interativo',
+    icon: '🗺️',
+    color: '#F59E0B',
+    available: true
+  },
+  {
+    id: 'dashboard-censup',
+    title: 'Dashboard CENSUP',
+    description: 'Dashboard para visualização e análise de dados CENSUP',
+    icon: '📊',
+    color: '#6366F1',
+    available: true
+  },
+  {
+    id: 'formulario-engenharia',
+    title: 'Relatório Técnico de Projeto B2B',
+    description: 'Relatório técnico B2B com prévia em tempo real e geração de PDF no padrão Alares',
+    icon: '📋',
+    color: '#7B68EE',
+    available: true
+  }
+];
 
-const TOOL_COMPONENTS = {
-  'viabilidade-alares': ViabilidadeAlares,
-  'analise-cobertura': AnaliseCobertura,
-  'calculadora-orcamento': CalculadoraOrcamento,
-  'mapa-consulta': MapaConsulta,
-  'dashboard-censup': DashboardCensup,
-  'formulario-engenharia': FormularioEngenharia
+/** Carrega apenas arquivos .svelte presentes no build (evita falha se um componente não foi enviado). */
+const toolSvelteModules = import.meta.glob('./*.svelte', { eager: true });
+
+const TOOL_COMPONENT_FILES = {
+  'viabilidade-alares': './ViabilidadeAlares.svelte',
+  'analise-cobertura': './AnaliseCobertura.svelte',
+  'calculadora-orcamento': './CalculadoraOrcamento.svelte',
+  'mapa-consulta': './MapaConsulta.svelte',
+  'dashboard-censup': './DashboardCensup.svelte',
+  'formulario-engenharia': './FormularioEngenharia.svelte'
 };
 
 const FAVICON_BY_TOOL = {
   'viabilidade-alares': '/favicons/alares.png'
 };
+
+function resolveToolComponent(toolId) {
+  const file = TOOL_COMPONENT_FILES[toolId];
+  if (!file) return null;
+  return toolSvelteModules[file]?.default ?? null;
+}
 
 /**
  * Registry completo (metadados + componente Svelte)
@@ -31,7 +85,7 @@ const FAVICON_BY_TOOL = {
 export const toolsRegistry = portalToolsMeta.map((meta) => ({
   ...meta,
   faviconImage: FAVICON_BY_TOOL[meta.id],
-  component: TOOL_COMPONENTS[meta.id] || null
+  component: resolveToolComponent(meta.id)
 }));
 
 /**
