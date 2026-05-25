@@ -10,8 +10,7 @@
     CABECALHO_FIELDS,
     buildFullPdfHtml,
     getEngineeringPdfDocumentTitle,
-    printEngineeringPdf,
-    printPdfHtml,
+    printPdfHtmlNamed,
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
     loadAssinaturaSupervisorDataUrl,
@@ -771,16 +770,12 @@
     await flushPreviewRefresh();
     const docTitle = getEngineeringPdfDocumentTitle(formData);
     const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
-    const printOpts = { title: docTitle };
-    let result = await printPdfHtml(printHtml, printOpts);
-    if (!result.success) {
-      result = await printEngineeringPdf(previewIframeEl, printHtml, printOpts);
-    }
+    const result = await printPdfHtmlNamed(printHtml, { title: docTitle });
     generatingPDF = false;
     if (!result.success) {
       pdfError =
         result.error === 'popup_blocked'
-          ? 'Não foi possível abrir a impressão. Verifique se o bloqueador de pop-ups está desativado.'
+          ? 'Não foi possível abrir a impressão. Permita pop-ups para este site e tente de novo.'
           : 'Não foi possível abrir a impressão. Tente novamente.';
     }
   }
