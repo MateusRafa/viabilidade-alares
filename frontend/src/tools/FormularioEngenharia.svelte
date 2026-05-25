@@ -9,8 +9,9 @@
     getPassoLayoutWarnings,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
-    getEngineeringPdfFileName,
+    getEngineeringPdfDocumentTitle,
     printEngineeringPdf,
+    printPdfHtml,
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
     loadAssinaturaSupervisorDataUrl,
@@ -768,11 +769,13 @@
     generatingPDF = true;
     pdfError = '';
     await flushPreviewRefresh();
-    const fileName = getEngineeringPdfFileName(formData);
+    const docTitle = getEngineeringPdfDocumentTitle(formData);
     const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
-    const result = await printEngineeringPdf(previewIframeEl, printHtml, {
-      title: fileName.replace(/\.pdf$/i, '')
-    });
+    const printOpts = { title: docTitle };
+    let result = await printPdfHtml(printHtml, printOpts);
+    if (!result.success) {
+      result = await printEngineeringPdf(previewIframeEl, printHtml, printOpts);
+    }
     generatingPDF = false;
     if (!result.success) {
       pdfError =
