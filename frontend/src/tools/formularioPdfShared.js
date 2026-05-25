@@ -927,6 +927,40 @@ function applyPrintDocumentTitle(doc, title) {
   if (titleEl) titleEl.textContent = title;
 }
 
+/** Enquanto impressão ativa, App.svelte não sobrescreve document.title da aba. */
+let lockedBrowserTabTitle = null;
+
+export function getLockedBrowserTabTitle() {
+  return lockedBrowserTabTitle;
+}
+
+function setLockedBrowserTabTitle(title) {
+  lockedBrowserTabTitle = (title || '').trim() || null;
+}
+
+function clearLockedBrowserTabTitle() {
+  lockedBrowserTabTitle = null;
+}
+
+/** Chrome/Edge no Windows usam o título da aba principal, não do iframe. */
+function applyParentTabPrintTitle(title) {
+  if (typeof document === 'undefined' || !title) return () => {};
+  const parentDoc = window.top?.document || document;
+  const saved = parentDoc.title;
+  setLockedBrowserTabTitle(title);
+  parentDoc.title = title;
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    clearLockedBrowserTabTitle();
+    parentDoc.title = saved;
+  };
+  window.addEventListener('afterprint', restore, { once: true });
+  setTimeout(restore, 120000);
+  return restore;
+}
+
 function buildBrandLayers(logoUrl, variant = 'inner') {
   const capaClass = variant === 'capa' ? ' brand-layer-capa' : '';
   const logoBg = logoUrl
@@ -2262,8 +2296,10 @@ export function printPdfHtml(html, options = {}) {
         }
         applyPrintDocumentTitle(doc, options.title);
         await waitForPrintImages(doc);
+        const restoreParent = applyParentTabPrintTitle(options.title);
         win.focus();
         win.print();
+        doc.defaultView?.addEventListener('afterprint', restoreParent, { once: true });
         finish({ success: true, printHint: PDF_PRINT_HINT });
       } catch (err) {
         console.error('Erro ao imprimir PDF:', err);
@@ -2277,6 +2313,71 @@ export function printPdfHtml(html, options = {}) {
   });
 }
 
+/**
+ * Imprime com nome de arquivo correto no "Salvar como PDF".
+ * Abre janela dedicada (título = Cliente/Projeto) — necessário no Chrome/Windows.
+ */
+export async function printPdfHtmlNamed(html, options = {}) {
+  const title = (options.title || '').trim() || 'Formulario';
+
+  const printWindow = typeof window !== 'undefined' ? window.open('about:blank', '_blank') : null;
+  if (!printWindow) {
+    const fallback = await printPdfHtml(html, options);
+    return fallback.success ? fallback : { success: false, error: 'popup_blocked' };
+  }
+  if (printWindow.document) {
+    try {
+      printWindow.document.open();
+      printWindow.document.write(html);
+      printWindow.document.close();
+      applyPrintDocumentTitle(printWindow.document, title);
+      printWindow.document.title = title;
+
+      await new Promise((resolve) => {
+        const run = async () => {
+          try {
+            await waitForPrintImages(printWindow.document);
+            printWindow.document.title = title;
+            printWindow.focus();
+            const closeLater = () => {
+              setTimeout(() => {
+                try {
+                  if (!printWindow.closed) printWindow.close();
+                } catch {
+                  /* ignore */
+                }
+              }, 400);
+            };
+            printWindow.onafterprint = closeLater;
+            printWindow.print();
+            setTimeout(closeLater, 90000);
+            resolve();
+          } catch (err) {
+            console.error('Erro ao imprimir na janela dedicada:', err);
+            resolve();
+          }
+        };
+        if (printWindow.document.readyState === 'complete') {
+          setTimeout(run, 350);
+        } else {
+          printWindow.onload = () => setTimeout(run, 350);
+        }
+      });
+
+      return { success: true, printHint: PDF_PRINT_HINT };
+    } catch (err) {
+      console.warn('Janela de impressão falhou, tentando iframe:', err);
+      try {
+        if (!printWindow.closed) printWindow.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  return printPdfHtml(html, options);
+}
+
 /** Imprime a partir do iframe de prévia (WYSIWYG) ou replica o HTML em iframe oculto. */
 export async function printEngineeringPdf(previewIframe, html, options = {}) {
   if (previewIframe?.contentWindow?.document?.body) {
@@ -2284,8 +2385,10 @@ export async function printEngineeringPdf(previewIframe, html, options = {}) {
       const doc = previewIframe.contentDocument;
       applyPrintDocumentTitle(doc, options.title);
       await waitForPrintImages(doc);
+      const restoreParent = applyParentTabPrintTitle(options.title);
       previewIframe.contentWindow.focus();
       previewIframe.contentWindow.print();
+      doc.defaultView?.addEventListener('afterprint', restoreParent, { once: true });
       return { success: true, printHint: PDF_PRINT_HINT };
     } catch (err) {
       console.warn('Impressão pela prévia falhou, usando cópia do HTML:', err);
@@ -2293,7 +2396,7 @@ export async function printEngineeringPdf(previewIframe, html, options = {}) {
   }
 
   if (html) {
-    return printPdfHtml(html, options);
+    return printPdfHtmlNamed(html, options);
   }
 
   return { success: false, error: 'no_html' };
