@@ -9,6 +9,7 @@
     getPassoLayoutWarnings,
     CABECALHO_FIELDS,
     buildFullPdfHtml,
+    getEngineeringPdfFileName,
     printEngineeringPdf,
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
@@ -767,10 +768,10 @@
     generatingPDF = true;
     pdfError = '';
     await flushPreviewRefresh();
-    const fileName = `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
+    const fileName = getEngineeringPdfFileName(formData);
     const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
     const result = await printEngineeringPdf(previewIframeEl, printHtml, {
-      title: fileName.replace('.pdf', '')
+      title: fileName.replace(/\.pdf$/i, '')
     });
     generatingPDF = false;
     if (!result.success) {
