@@ -10,10 +10,13 @@ export const BRAND = {
   logoPathPngFallback: '/images/alares-logo.png',
   capaOndasPath: '/images/Imagem2.svg',
   /**
-   * Assinatura digitalizada (PNG com fundo transparente é o ideal).
-   * SVG com foto/scan embutido também funciona — o app remove fundo claro automaticamente.
+   * Assinatura na Lista de Material — tenta PNG (fundo transparente) e depois SVG.
+   * Coloque o arquivo em: frontend/public/images/assinatura-supervisor.png
    */
-  assinaturaSupervisorPath: '/images/assinatura-supervisor.svg',
+  assinaturaSupervisorPaths: [
+    '/images/assinatura-supervisor.png',
+    '/images/assinatura-supervisor.svg'
+  ],
   /** Pixels RGB acima deste valor viram transparentes (0–255; maior = remove mais cinza) */
   assinaturaFundoClaroLimite: 238,
   /** Texto exibido abaixo da linha de assinatura na Lista de Material */
