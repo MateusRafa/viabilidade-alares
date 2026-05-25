@@ -886,6 +886,39 @@ function getClientLabel(formData) {
   );
 }
 
+/** Remove caracteres inválidos em nomes de arquivo. */
+export function sanitizePdfFileNameBase(name) {
+  const cleaned = (name ?? '')
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/[\u0000-\u001f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\.+$/, '')
+    .slice(0, 180);
+  return cleaned || 'Formulario';
+}
+
+/** Nome do PDF ao gerar — usa o texto de Cliente / Projeto (capa) quando preenchido. */
+export function getEngineeringPdfFileName(formData) {
+  const capaCliente = formData?.capa?.clienteProjeto?.trim();
+  if (capaCliente) {
+    return `${sanitizePdfFileNameBase(capaCliente)}.pdf`;
+  }
+  const fallback =
+    formData?.cabecalho?.ordemJira?.trim() ||
+    formData?.cabecalho?.contrato?.trim() ||
+    formData?.cabecalho?.cliente?.trim();
+  if (fallback) {
+    return `${sanitizePdfFileNameBase(fallback)} - Engenharia.pdf`;
+  }
+  return 'Formulario.pdf';
+}
+
+/** Título do HTML / diálogo de impressão (sem .pdf). */
+export function getEngineeringPdfDocumentTitle(formData) {
+  return getEngineeringPdfFileName(formData).replace(/\.pdf$/i, '');
+}
+
 function buildBrandLayers(logoUrl, variant = 'inner') {
   const capaClass = variant === 'capa' ? ' brand-layer-capa' : '';
   const logoBg = logoUrl
@@ -2137,12 +2170,7 @@ export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
 
 export function buildFullPdfHtml(formData, meta = {}, options = {}) {
   const measureNonce = options.measureNonce ?? '';
-  const fileBase =
-    formData.cabecalho.ordemJira?.trim() ||
-    formData.cabecalho.contrato?.trim() ||
-    formData.cabecalho.cliente?.trim() ||
-    'Formulario-Engenharia';
-  const title = `${fileBase} - Engenharia`;
+  const title = getEngineeringPdfDocumentTitle(formData);
   const baseUrl = options.baseUrl || '';
   const baseTag = baseUrl
     ? `<base href="${escapeHtml(baseUrl.replace(/\/$/, '') + '/')}">`
@@ -2273,17 +2301,16 @@ export async function openPdfPrintWindow(formData, options = {}) {
       capaOndasDataUrl: options.capaOndasDataUrl,
       assinaturaSupervisorDataUrl: options.assinaturaSupervisorDataUrl
     });
-  const fileName =
-    options.fileName ||
-    `${formData.cabecalho.ordemJira?.trim() || formData.cabecalho.contrato?.trim() || formData.cabecalho.cliente?.trim() || 'Formulario'} - Engenharia.pdf`;
+  const fileName = options.fileName || getEngineeringPdfFileName(formData);
+  const docTitle = fileName.replace(/\.pdf$/i, '');
 
   const previewResult = await printEngineeringPdf(options.previewIframe, html, {
-    title: fileName.replace('.pdf', '')
+    title: docTitle
   });
   if (previewResult.success) return previewResult;
 
   const iframeResult = await printPdfHtml(html, {
-    title: fileName.replace('.pdf', '')
+    title: docTitle
   });
   if (iframeResult.success) return iframeResult;
 
@@ -2295,7 +2322,7 @@ export async function openPdfPrintWindow(formData, options = {}) {
   printWindow.document.open();
   printWindow.document.write(html);
   printWindow.document.close();
-  printWindow.document.title = fileName.replace('.pdf', '');
+  printWindow.document.title = docTitle;
 
   const runPrint = async () => {
     if (printWindow.closed) return;
