@@ -812,6 +812,17 @@ export function stripSignatureLightBackground(dataUrl, options = {}) {
         ctx.drawImage(img, 0, 0, w, h);
         const imageData = ctx.getImageData(0, 0, w, h);
         const px = imageData.data;
+        let hasTransparency = false;
+        for (let a = 3; a < px.length; a += 4) {
+          if (px[a] < 252) {
+            hasTransparency = true;
+            break;
+          }
+        }
+        if (hasTransparency) {
+          resolve(dataUrl);
+          return;
+        }
         for (let i = 0; i < px.length; i += 4) {
           const r = px[i];
           const g = px[i + 1];
@@ -837,7 +848,11 @@ export function stripSignatureLightBackground(dataUrl, options = {}) {
 
 /** Assinatura na Lista de Material — carrega e remove fundo claro para integrar ao PDF */
 export async function loadAssinaturaSupervisorDataUrl(baseUrl = '') {
-  const raw = await loadAssetDataUrl([BRAND.assinaturaSupervisorPath], baseUrl);
+  const paths = BRAND.assinaturaSupervisorPaths || [
+    '/images/assinatura-supervisor.png',
+    '/images/assinatura-supervisor.svg'
+  ];
+  const raw = await loadAssetDataUrl(paths, baseUrl);
   if (!raw) return '';
   return stripSignatureLightBackground(raw);
 }
@@ -854,7 +869,13 @@ function getCapaOndasUrl(options = {}) {
 
 function getAssinaturaSupervisorUrl(options = {}) {
   if (options.assinaturaSupervisorDataUrl) return options.assinaturaSupervisorDataUrl;
-  return resolveAssetUrl(BRAND.assinaturaSupervisorPath, options.baseUrl || '');
+  const paths = BRAND.assinaturaSupervisorPaths || ['/images/assinatura-supervisor.png'];
+  const baseUrl = options.baseUrl || '';
+  for (const path of paths) {
+    const url = resolveAssetUrl(path, baseUrl);
+    if (url) return url;
+  }
+  return '';
 }
 
 function getClientLabel(formData) {
