@@ -919,6 +919,14 @@ export function getEngineeringPdfDocumentTitle(formData) {
   return getEngineeringPdfFileName(formData).replace(/\.pdf$/i, '');
 }
 
+/** Define título do documento impresso (Chrome/Edge usam isso em "Salvar como PDF"). */
+function applyPrintDocumentTitle(doc, title) {
+  if (!doc || !title) return;
+  doc.title = title;
+  const titleEl = doc.querySelector('title');
+  if (titleEl) titleEl.textContent = title;
+}
+
 function buildBrandLayers(logoUrl, variant = 'inner') {
   const capaClass = variant === 'capa' ? ' brand-layer-capa' : '';
   const logoBg = logoUrl
@@ -2252,7 +2260,7 @@ export function printPdfHtml(html, options = {}) {
           finish({ success: false, error: 'iframe_failed' });
           return;
         }
-        if (options.title) doc.title = options.title;
+        applyPrintDocumentTitle(doc, options.title);
         await waitForPrintImages(doc);
         win.focus();
         win.print();
@@ -2273,7 +2281,9 @@ export function printPdfHtml(html, options = {}) {
 export async function printEngineeringPdf(previewIframe, html, options = {}) {
   if (previewIframe?.contentWindow?.document?.body) {
     try {
-      await waitForPrintImages(previewIframe.contentDocument);
+      const doc = previewIframe.contentDocument;
+      applyPrintDocumentTitle(doc, options.title);
+      await waitForPrintImages(doc);
       previewIframe.contentWindow.focus();
       previewIframe.contentWindow.print();
       return { success: true, printHint: PDF_PRINT_HINT };
