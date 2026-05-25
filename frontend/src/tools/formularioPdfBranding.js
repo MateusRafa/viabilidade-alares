@@ -9,8 +9,13 @@ export const BRAND = {
   logoPath: '/images/Imagem1.svg',
   logoPathPngFallback: '/images/alares-logo.png',
   capaOndasPath: '/images/Imagem2.svg',
-  /** SVG da assinatura digitalizada — substitua o arquivo em public/images/ */
+  /**
+   * Assinatura digitalizada (PNG com fundo transparente é o ideal).
+   * SVG com foto/scan embutido também funciona — o app remove fundo claro automaticamente.
+   */
   assinaturaSupervisorPath: '/images/assinatura-supervisor.svg',
+  /** Pixels RGB acima deste valor viram transparentes (0–255; maior = remove mais cinza) */
+  assinaturaFundoClaroLimite: 238,
   /** Texto exibido abaixo da linha de assinatura na Lista de Material */
   supervisorCargo: 'Coordenador de Projetos',
   /** Nome padrão do campo Coordenador de Projetos (Informações do projeto) */
