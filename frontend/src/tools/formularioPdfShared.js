@@ -781,9 +781,65 @@ export async function loadCapaOndasDataUrl(baseUrl = '') {
   return loadAssetDataUrl([BRAND.capaOndasPath, '/images/capa-ondas.svg'], baseUrl);
 }
 
-/** Assinatura do supervisor na Lista de Material */
+/**
+ * Remove fundo branco/cinza de scans de assinatura (deixa só o traço na página).
+ * Funciona no navegador ao carregar o asset; em ambiente sem DOM devolve o original.
+ */
+export function stripSignatureLightBackground(dataUrl, options = {}) {
+  if (!dataUrl || typeof document === 'undefined') return Promise.resolve(dataUrl || '');
+
+  const threshold = options.threshold ?? BRAND.assinaturaFundoClaroLimite ?? 238;
+  const featherStart = Math.max(0, threshold - 42);
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (!w || !h) {
+          resolve(dataUrl);
+          return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const px = imageData.data;
+        for (let i = 0; i < px.length; i += 4) {
+          const r = px[i];
+          const g = px[i + 1];
+          const b = px[i + 2];
+          const min = Math.min(r, g, b);
+          if (min >= threshold) {
+            px[i + 3] = 0;
+          } else if (min >= featherStart) {
+            const t = (min - featherStart) / (threshold - featherStart);
+            px[i + 3] = Math.round(255 * (1 - t));
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+        resolve(canvas.toDataURL('image/png'));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+/** Assinatura na Lista de Material — carrega e remove fundo claro para integrar ao PDF */
 export async function loadAssinaturaSupervisorDataUrl(baseUrl = '') {
-  return loadAssetDataUrl([BRAND.assinaturaSupervisorPath], baseUrl);
+  const raw = await loadAssetDataUrl([BRAND.assinaturaSupervisorPath], baseUrl);
+  if (!raw) return '';
+  return stripSignatureLightBackground(raw);
 }
 
 function getLogoUrl(options = {}) {
@@ -1284,15 +1340,34 @@ export const FORMULARIO_PDF_STYLES = `
     text-align: center;
     width: 100%;
   }
+  .lista-material-assinatura-graphic {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    min-height: 18mm;
+    margin: 0 auto 0.5mm;
+    padding: 0;
+    line-height: 0;
+    background: transparent;
+  }
   .lista-material-assinatura-img {
     display: block;
-    max-width: 60mm;
-    max-height: 24mm;
+    max-width: 52mm;
+    max-height: 20mm;
     width: auto;
     height: auto;
     object-fit: contain;
     object-position: center bottom;
-    margin: 0 auto 2mm;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+    /* Fallback se o PNG processado não carregar: “some” com fundo branco do papel */
+    mix-blend-mode: multiply;
+  }
+  .lista-material-assinatura-img--processed {
+    mix-blend-mode: normal;
   }
   .lista-material-assinatura-linha {
     width: 72mm;
@@ -1939,12 +2014,15 @@ function buildPassoPagesHtml(passo, passoNumero, passoIndex, startPageNum, optio
 function buildSupervisorAssinaturaHtml(options = {}) {
   const assinaturaUrl = getAssinaturaSupervisorUrl(options);
   const cargo = (BRAND.supervisorCargo || '').trim();
+  const processed = !!options.assinaturaSupervisorDataUrl;
   const imgHtml = assinaturaUrl
-    ? `<img class="lista-material-assinatura-img" src="${attrUrl(assinaturaUrl)}" alt="" aria-hidden="true" />`
+    ? `<div class="lista-material-assinatura-graphic">
+        <img class="lista-material-assinatura-img${processed ? ' lista-material-assinatura-img--processed' : ''}" src="${attrUrl(assinaturaUrl)}" alt="" aria-hidden="true" />
+      </div>`
     : '';
   if (!imgHtml && !cargo) return '';
   return `
-    <div class="lista-material-assinatura" role="group" aria-label="Assinatura do supervisor">
+    <div class="lista-material-assinatura" role="group" aria-label="Assinatura do coordenador">
       ${imgHtml}
       <div class="lista-material-assinatura-linha" aria-hidden="true"></div>
       ${cargo ? `<p class="lista-material-assinatura-cargo">${escapeHtml(cargo)}</p>` : ''}
