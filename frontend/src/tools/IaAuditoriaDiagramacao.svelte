@@ -126,7 +126,13 @@
       'nivel_diagramacao_label',
       'submotivos',
       'confianca',
-      'projeto'
+      'projeto',
+      'pathOps',
+      'paintOps',
+      'strokeOps',
+      'hasSplitter',
+      'entrada_splitter_ok',
+      'razao_pintura'
     ];
     const rows = jobStatus.resultados.map((r) =>
       [
@@ -137,7 +143,13 @@
         r.nivel_diagramacao_label || '',
         (r.submotivos || []).join(';'),
         r.confianca || '',
-        r.projeto || ''
+        r.projeto || '',
+        r.metricas?.pathOps ?? '',
+        r.metricas?.paintOps ?? '',
+        r.metricas?.strokeOps ?? '',
+        r.metricas?.hasSplitter ?? '',
+        r.metricas?.entrada_splitter_ok ?? '',
+        r.metricas?.razao_pintura ?? ''
       ]
         .map((c) => `"${String(c).replace(/"/g, '""')}"`)
         .join(',')
@@ -242,6 +254,8 @@
                 <th>Tipo</th>
                 <th>Nível</th>
                 <th>Submotivos</th>
+                <th>Entrada Splitter OK</th>
+                <th>paint/path</th>
                 <th>Confiança</th>
               </tr>
             </thead>
@@ -261,6 +275,16 @@
                     {/if}
                   </td>
                   <td class="col-sub">{(row.submotivos || []).join(', ') || '—'}</td>
+                  <td>
+                    {#if row.metricas?.entrada_splitter_ok === true}
+                      <span class="tag-ok">sim</span>
+                    {:else if row.metricas?.entrada_splitter_ok === false}
+                      <span class="tag-no">não</span>
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                  <td class="col-sub">{row.metricas?.razao_pintura ?? '—'}</td>
                   <td>{row.confianca || '—'}</td>
                 </tr>
               {/each}
@@ -477,6 +501,28 @@
   .badge-erro {
     background: #f3f4f6;
     color: #374151;
+  }
+
+  .tag-ok {
+    display: inline-block;
+    padding: 0.15rem 0.4rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: #dcfce7;
+    color: #065f46;
+    white-space: nowrap;
+  }
+
+  .tag-no {
+    display: inline-block;
+    padding: 0.15rem 0.4rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: #fee2e2;
+    color: #991b1b;
+    white-space: nowrap;
   }
 
   @media (max-width: 768px) {
