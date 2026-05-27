@@ -91,6 +91,20 @@ export async function analyzePdfFile(filePath) {
     return inDiagram && inMiddleBand;
   });
 
+  // Indício de saída de splitter preenchida: rótulo de fibra no quadrante superior direito,
+  // onde normalmente aparecem as derivações do splitter para outros blocos.
+  const hasUpperRightFiberLabel = textItems.some((it) => {
+    if (!it?.transform) return false;
+    const txt = (it.str || '').trim();
+    if (!/^L\d+\s*-\s*F\d+$/i.test(txt)) return false;
+    const x = it.transform[4];
+    const y = it.transform[5];
+    const inDiagram = y > diagramThreshold;
+    const inUpperBand = y > pageH * 0.80;
+    const inRightBand = x > viewport.width * 0.56;
+    return inDiagram && inUpperBand && inRightBand;
+  });
+
   const fullText = textItems.map((it) => it.str).join(' ');
 
   let pathOps = 0;
@@ -119,6 +133,7 @@ export async function analyzePdfFile(filePath) {
     textoDiagrama: diagramTexts.slice(0, 500),
     hasSplitter,
     hasMidFiberLabel,
+    hasUpperRightFiberLabel,
     nivelTipo: footer.nivelTipo,
     caixa: footer.caixa,
     projeto: footer.projeto,
