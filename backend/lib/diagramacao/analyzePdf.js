@@ -80,6 +80,17 @@ export async function analyzePdfFile(filePath) {
     .map((it) => it.str)
     .join(' ');
 
+  const hasMidFiberLabel = textItems.some((it) => {
+    if (!it?.transform) return false;
+    const txt = (it.str || '').trim();
+    if (!/^L\d+\s*-\s*F\d+$/i.test(txt)) return false;
+    const x = it.transform[4];
+    const y = it.transform[5];
+    const inDiagram = y > diagramThreshold;
+    const inMiddleBand = x > viewport.width * 0.32 && x < viewport.width * 0.78;
+    return inDiagram && inMiddleBand;
+  });
+
   const fullText = textItems.map((it) => it.str).join(' ');
 
   let pathOps = 0;
@@ -107,6 +118,7 @@ export async function analyzePdfFile(filePath) {
     textItems: textItems.length,
     textoDiagrama: diagramTexts.slice(0, 500),
     hasSplitter,
+    hasMidFiberLabel,
     nivelTipo: footer.nivelTipo,
     caixa: footer.caixa,
     projeto: footer.projeto,
