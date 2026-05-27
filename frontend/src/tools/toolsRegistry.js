@@ -54,6 +54,15 @@ const portalToolsMeta = [
     icon: '📋',
     color: '#7B68EE',
     available: true
+  },
+  {
+    id: 'ia-auditoria-diagramacao',
+    title: 'IA de Auditoria de Diagramação',
+    description:
+      'Auditoria em lote de PDFs CEO/CTO: classifica sem diagramação, incompleta ou diagramada',
+    icon: '📐',
+    color: '#0D9488',
+    available: true
   }
 ];
 
@@ -66,7 +75,8 @@ const TOOL_COMPONENT_FILES = {
   'calculadora-orcamento': './CalculadoraOrcamento.svelte',
   'mapa-consulta': './MapaConsulta.svelte',
   'dashboard-censup': './DashboardCensup.svelte',
-  'formulario-engenharia': './FormularioEngenharia.svelte'
+  'formulario-engenharia': './FormularioEngenharia.svelte',
+  'ia-auditoria-diagramacao': './IaAuditoriaDiagramacao.svelte'
 };
 
 const FAVICON_BY_TOOL = {
