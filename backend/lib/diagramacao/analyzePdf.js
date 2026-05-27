@@ -26,9 +26,16 @@ function extractFooterFields(textItems, pageHeight) {
   else if (/\bCTO\b/i.test(footerText)) nivelTipo = 'CTO';
 
   let caixa = null;
-  const caixaMatch = footerText.match(/Caixa[^:]*:?\s*(.+?)(?=Lat\/Lng|Status|Nível|$)/i);
-  if (caixaMatch) {
-    caixa = caixaMatch[1].replace(/atualizada em.*$/i, '').trim();
+  const atualizadaMatch = footerText.match(
+    /Caixa\s+atualizada\s+em\s+[\d/:.\s]+\s*:?\s*(.+?)(?=Lat\/Lng|Status|Nível|Poste|Observação|$)/i
+  );
+  if (atualizadaMatch) {
+    caixa = atualizadaMatch[1].trim();
+  } else {
+    const caixaMatch = footerText.match(/Caixa[^:]*:\s*(.+?)(?=Lat\/Lng|Status|Nível|$)/i);
+    if (caixaMatch) {
+      caixa = caixaMatch[1].replace(/atualizada em.*$/i, '').trim();
+    }
   }
 
   let projeto = null;
