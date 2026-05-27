@@ -128,6 +128,7 @@ async function processJob(job, files, diagDir) {
         job.resultados.push({
           arquivo: nomeOriginal,
           ...classified,
+          rule_version: classified.rule_version,
           projeto: metrics.projeto || null
         });
       }
