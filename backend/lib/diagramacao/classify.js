@@ -2,8 +2,8 @@
  * Classifica nível de diagramação (1–3) com base em métricas do PDF.
  *
  * Regras de splitter:
- * - CTO: só importa fusão na ENTRADA do splitter; saídas (1–8) são ignoradas.
- * - CEO: entrada fusionada + pelo menos indício de fusão nas saídas (heurística por paintOps/pathOps).
+ * - CEO/CTO: se NÃO houver fusão na ENTRADA do splitter => nível 1 (sem diagramação).
+ * - CEO/CTO: com entrada fusionada, saídas podem estar sem fusão (portas disponíveis).
  */
 
 const LABELS = {
@@ -37,13 +37,6 @@ function resolveNivelTipo(nivelTipo, fileName) {
 /** Heurística: existe linha de fusão até a entrada do splitter */
 function entradaSplitterFusionada(paintOps, pathOps) {
   return paintOps >= 30 && pathOps >= 40;
-}
-
-/**
- * CEO: splitter com entrada ok, mas saídas (1–8) sem nenhuma fusão documentada
- */
-function ceoSplitterSaidasSemFusao(paintOps, pathOps) {
-  return pathOps >= 90 && paintOps >= 30 && paintOps < 52;
 }
 
 /**
@@ -83,30 +76,17 @@ export function classifyDiagramacao(metrics, fileName = '') {
     const entradaOk = entradaSplitterFusionada(paintOps, pathOps);
 
     if (!entradaOk) {
-      // CTO e CEO: sem fusão na entrada → não diagramado
+      // CEO e CTO: sem fusão na entrada do splitter => sem diagramação
       nivel = 1;
       submotivos.push('splitter_sem_fusao_entrada');
       confianca = paintOps < 22 ? 'alta' : 'media';
-    } else if (tipo === 'CTO') {
-      // CTO: saídas do splitter não entram na avaliação
-      nivel = 3;
-      confianca = 'media';
-    } else if (tipo === 'CEO' && ceoSplitterSaidasSemFusao(paintOps, pathOps)) {
-      // CEO: entrada ok, mas nenhuma saída do SP8 com fusão (ex.: TUL01-CE017)
-      nivel = 2;
-      submotivos.push('splitter_saidas_sem_fusao');
-      confianca = 'media';
-    } else if (tipo === 'CEO') {
+    } else if (tipo === 'CEO' || tipo === 'CTO') {
+      // Com entrada fusionada, saídas podem estar disponíveis (sem fusão) em CEO/CTO.
       nivel = 3;
       confianca = paintOps >= 52 ? 'alta' : 'media';
     } else {
-      // Tipo desconhecido: conservador — exige mais pintura (como CEO)
-      if (ceoSplitterSaidasSemFusao(paintOps, pathOps)) {
-        nivel = 2;
-        submotivos.push('splitter_saidas_sem_fusao');
-      } else {
-        nivel = 3;
-      }
+      // Tipo desconhecido: mantém regra principal de entrada.
+      nivel = 3;
       confianca = 'baixa';
     }
   }
