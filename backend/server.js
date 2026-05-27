@@ -10,6 +10,7 @@ import multer from 'multer';
 import * as turf from '@turf/turf';
 import { union as martinezUnion } from 'martinez-polygon-clipping';
 import supabase, { testSupabaseConnection, checkTables, isSupabaseAvailable } from './supabase.js';
+import { registerDiagramacaoRoutes } from './diagramacaoRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9053,6 +9054,8 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ [Fatal] Promise rejeitada não tratada:', reason);
   // Não encerrar o processo, apenas logar
 });
+
+registerDiagramacaoRoutes(app, { DATA_DIR });
 
 // Iniciar servidor - escutar em 0.0.0.0 para aceitar conexões externas (Railway)
 try {
