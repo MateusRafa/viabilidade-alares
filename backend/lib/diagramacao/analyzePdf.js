@@ -92,7 +92,9 @@ export async function analyzePdfFile(filePath) {
   }
 
   const footer = extractFooterFields(textItems, pageH);
-  const hasSplitter = /splitter|01x08|01X08|SP8/i.test(fullText + diagramTexts);
+  const splitterRegex =
+    /splitter|sp\s*[-_]?\s*(2|4|6|8|10|16)|0?1\s*x\s*(2|4|6|8|10|16)/i;
+  const hasSplitter = splitterRegex.test(fullText + ' ' + diagramTexts);
 
   return {
     ok: true,
