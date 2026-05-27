@@ -34,19 +34,35 @@ function resolveNivelTipo(nivelTipo, fileName) {
   return null;
 }
 
-/** Heurística: existe linha de fusão até a entrada do splitter */
-function entradaSplitterFusionada(paintOps, pathOps, tipo) {
-  // CTO com splitter sem entrada costuma ter desenho simples.
-  // Exigimos sinal mais forte para considerar entrada realmente fusionada.
+/**
+ * Heurística: fusão na ENTRADA do splitter.
+ * CTO desconectado (img.1): muitos paths (cabos + SP8), pouca pintura de ligação entre blocos.
+ * CTO com fusão (img.2): aparece traço ligando cabo → entrada do splitter (sobe paint/stroke).
+ */
+function entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo) {
+  const razaoPintura = pathOps > 0 ? paintOps / pathOps : 0;
+
   if (tipo === 'CTO') {
-    return paintOps >= 50 && pathOps >= 90;
+    if (pathOps < 55 || paintOps < 26) return false;
+
+    // Padrão típico: cabo + splitter sem ponte (espaço vazio entre blocos)
+    const desconectado =
+      pathOps >= 78 && paintOps < 44 && razaoPintura < 0.39 && strokeOps < 28;
+
+    if (desconectado) return false;
+
+    // Entrada fusionada: ligação visível (mesmo com uma única fibra no SP8)
+    return paintOps >= 34 && pathOps >= 58 && strokeOps >= 12 && razaoPintura >= 0.32;
   }
-  // CEO tende a ter mais variação; threshold um pouco menor.
+
   if (tipo === 'CEO') {
-    return paintOps >= 40 && pathOps >= 55;
+    if (pathOps < 50 || paintOps < 28) return false;
+    const desconectado = pathOps >= 70 && paintOps < 38 && razaoPintura < 0.34;
+    if (desconectado) return false;
+    return paintOps >= 36 && pathOps >= 52 && strokeOps >= 10;
   }
-  // Tipo desconhecido: conservador.
-  return paintOps >= 45 && pathOps >= 70;
+
+  return paintOps >= 40 && pathOps >= 65 && strokeOps >= 10;
 }
 
 /**
@@ -83,7 +99,7 @@ export function classifyDiagramacao(metrics, fileName = '') {
   }
   // —— Com splitter ——
   else if (hasSplitter) {
-    const entradaOk = entradaSplitterFusionada(paintOps, pathOps, tipo);
+    const entradaOk = entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo);
 
     if (!entradaOk) {
       // CEO e CTO: sem fusão na entrada do splitter => sem diagramação
@@ -128,7 +144,10 @@ export function classifyDiagramacao(metrics, fileName = '') {
       paintOps,
       strokeOps,
       hasSplitter,
-      entrada_splitter_ok: hasSplitter ? entradaSplitterFusionada(paintOps, pathOps, tipo) : null
+      entrada_splitter_ok: hasSplitter
+        ? entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo)
+        : null,
+      razao_pintura: pathOps > 0 ? Math.round((paintOps / pathOps) * 100) / 100 : 0
     }
   };
 }
