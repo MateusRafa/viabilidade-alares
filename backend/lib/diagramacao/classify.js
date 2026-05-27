@@ -65,6 +65,15 @@ function entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo) {
   return paintOps >= 40 && pathOps >= 65 && strokeOps >= 10;
 }
 
+function entradaSplitterFusionadaComContexto(metrics, tipo) {
+  const { paintOps = 0, pathOps = 0, strokeOps = 0, hasMidFiberLabel = false } = metrics || {};
+  const base = entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo);
+  // Em vários PDFs corrigidos, a ligação até a entrada do splitter é acompanhada
+  // por rótulo de fibra no "meio" do diagrama (ex.: L1-F1).
+  if (tipo === 'CTO' && hasMidFiberLabel) return true;
+  return base;
+}
+
 /**
  * @param {object} metrics - saída de analyzePdfFile (ok: true)
  * @param {string} [fileName]
@@ -75,6 +84,7 @@ export function classifyDiagramacao(metrics, fileName = '') {
     paintOps = 0,
     strokeOps = 0,
     hasSplitter = false,
+    hasMidFiberLabel = false,
     caixa,
     nivelTipo: nivelTipoRaw
   } = metrics;
@@ -99,7 +109,10 @@ export function classifyDiagramacao(metrics, fileName = '') {
   }
   // —— Com splitter ——
   else if (hasSplitter) {
-    const entradaOk = entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo);
+    const entradaOk = entradaSplitterFusionadaComContexto(
+      { paintOps, pathOps, strokeOps, hasMidFiberLabel },
+      tipo
+    );
 
     if (!entradaOk) {
       // CEO e CTO: sem fusão na entrada do splitter => sem diagramação
@@ -144,8 +157,9 @@ export function classifyDiagramacao(metrics, fileName = '') {
       paintOps,
       strokeOps,
       hasSplitter,
+      hasMidFiberLabel,
       entrada_splitter_ok: hasSplitter
-        ? entradaSplitterFusionada(paintOps, pathOps, strokeOps, tipo)
+        ? entradaSplitterFusionadaComContexto({ paintOps, pathOps, strokeOps, hasMidFiberLabel }, tipo)
         : null,
       razao_pintura: pathOps > 0 ? Math.round((paintOps / pathOps) * 100) / 100 : 0
     }
