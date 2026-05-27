@@ -35,8 +35,18 @@ function resolveNivelTipo(nivelTipo, fileName) {
 }
 
 /** Heurística: existe linha de fusão até a entrada do splitter */
-function entradaSplitterFusionada(paintOps, pathOps) {
-  return paintOps >= 30 && pathOps >= 40;
+function entradaSplitterFusionada(paintOps, pathOps, tipo) {
+  // CTO com splitter sem entrada costuma ter desenho simples.
+  // Exigimos sinal mais forte para considerar entrada realmente fusionada.
+  if (tipo === 'CTO') {
+    return paintOps >= 50 && pathOps >= 90;
+  }
+  // CEO tende a ter mais variação; threshold um pouco menor.
+  if (tipo === 'CEO') {
+    return paintOps >= 40 && pathOps >= 55;
+  }
+  // Tipo desconhecido: conservador.
+  return paintOps >= 45 && pathOps >= 70;
 }
 
 /**
@@ -73,7 +83,7 @@ export function classifyDiagramacao(metrics, fileName = '') {
   }
   // —— Com splitter ——
   else if (hasSplitter) {
-    const entradaOk = entradaSplitterFusionada(paintOps, pathOps);
+    const entradaOk = entradaSplitterFusionada(paintOps, pathOps, tipo);
 
     if (!entradaOk) {
       // CEO e CTO: sem fusão na entrada do splitter => sem diagramação
@@ -118,7 +128,7 @@ export function classifyDiagramacao(metrics, fileName = '') {
       paintOps,
       strokeOps,
       hasSplitter,
-      entrada_splitter_ok: hasSplitter ? entradaSplitterFusionada(paintOps, pathOps) : null
+      entrada_splitter_ok: hasSplitter ? entradaSplitterFusionada(paintOps, pathOps, tipo) : null
     }
   };
 }
