@@ -9010,6 +9010,8 @@ app.post('/api/vi-ala/upload-base', upload.single('file'), async (req, res) => {
   }
 });
 
+registerDiagramacaoRoutes(app, { DATA_DIR });
+
 // Rota catch-all para rotas não encontradas (sempre retorna JSON)
 app.use((req, res) => {
   console.log(`⚠️ [404] Rota não encontrada: ${req.method} ${req.path}`);
@@ -9054,8 +9056,6 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ [Fatal] Promise rejeitada não tratada:', reason);
   // Não encerrar o processo, apenas logar
 });
-
-registerDiagramacaoRoutes(app, { DATA_DIR });
 
 // Iniciar servidor - escutar em 0.0.0.0 para aceitar conexões externas (Railway)
 try {
