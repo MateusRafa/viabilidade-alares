@@ -1,0 +1,7 @@
+arquivo,nivel_esperado,nivel_predito,acerto,submotivo_esperado,submotivos_predito,entrada_splitter_ok,saida_splitter_ok,labels_passagem_direita,erro
+"SP - Passagem __ Rompimento-25_05_2026-21_51_48.pdf","1","","nao","","","","","","Cannot find package 'pdfjs-dist' imported from C:\Users\USER\Mateus\projeto original\backend\lib\diagramacao\analyzePdf.js"
+"CEO - PASSAGEM 12FO-25_05_2026-21_43_08.pdf","1","","nao","","","","","","Cannot find package 'pdfjs-dist' imported from C:\Users\USER\Mateus\projeto original\backend\lib\diagramacao\analyzePdf.js"
+"CTO SPLITTER - 803-25_05_2026-21_54_54.pdf","1","","nao","","","","","","Cannot find package 'pdfjs-dist' imported from C:\Users\USER\Mateus\projeto original\backend\lib\diagramacao\analyzePdf.js"
+"CTO SPLITTER - 803-27_05_2026-14_44_54.pdf","3","","nao","","","","","","PDF não encontrado"
+"TUL01-CE017 - Rede Nova-25_05_2026-21_58_04.pdf","2","","nao","","","","","","Cannot find package 'pdfjs-dist' imported from C:\Users\USER\Mateus\projeto original\backend\lib\diagramacao\analyzePdf.js"
+"Caixas-25_05_2026.pdf","3","","nao","","","","","","Cannot find package 'pdfjs-dist' imported from C:\Users\USER\Mateus\projeto original\backend\lib\diagramacao\analyzePdf.js"
