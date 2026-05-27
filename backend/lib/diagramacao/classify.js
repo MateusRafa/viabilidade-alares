@@ -13,6 +13,20 @@ const LABELS = {
  * @param {object} metrics - saída de analyzePdfFile (ok: true)
  * @param {string} [fileName]
  */
+function idFromFileName(fileName) {
+  return fileName
+    .replace(/\.pdf$/i, '')
+    .replace(/-\d{2}_\d{2}_\d{4}(?:-\d{2}_\d{2}_\d{2})?.*$/i, '')
+    .trim();
+}
+
+function isCaixaFooterRuim(caixa) {
+  if (!caixa || caixa.length < 3) return true;
+  if (/^\d+\s/.test(caixa)) return true;
+  if (/^[\d.:;\s]+$/.test(caixa)) return true;
+  return false;
+}
+
 export function classifyDiagramacao(metrics, fileName = '') {
   const { pathOps = 0, paintOps = 0, strokeOps = 0, hasSplitter = false, caixa, nivelTipo } = metrics;
 
@@ -20,43 +34,53 @@ export function classifyDiagramacao(metrics, fileName = '') {
   let nivel = 3;
   let confianca = 'media';
 
-  // Nível 1 — sem diagramação
+  // Ordem alinhada às regras de negócio (situações 1–5)
+
+  // 1 — diagrama vazio
   if (pathOps < 35 && paintOps < 12) {
     nivel = 1;
     submotivos.push('diagrama_vazio');
     confianca = 'alta';
-  } else if (!hasSplitter && pathOps >= 35 && pathOps < 120 && paintOps < 28) {
+  }
+  // 2 — cabo/portas sem fusão (sem splitter no desenho)
+  else if (!hasSplitter && pathOps >= 35 && paintOps < 32) {
     nivel = 1;
     submotivos.push('cabos_sem_fusao');
     confianca = 'media';
-  } else if (hasSplitter && pathOps < 100 && paintOps < 35) {
+  }
+  // 3 — cabo + splitter sem fusão na entrada (ex.: CTO SPLITTER 803)
+  // Poucas operações de pintura = quase nenhuma linha ligando blocos
+  else if (hasSplitter && paintOps < 32) {
     nivel = 1;
     submotivos.push('splitter_sem_fusao_entrada');
-    confianca = 'media';
-  } else if (hasSplitter && pathOps >= 100 && paintOps < 55) {
-    // Muito desenho + splitter, pouca pintura nas saídas → incompleta (ex.: SP8 sem saídas)
+    confianca = paintOps < 22 ? 'alta' : 'media';
+  }
+  // 5 — splitter alimentado, saídas sem fusão (ex.: CEO TUL01, muita passagem)
+  else if (hasSplitter && pathOps >= 100 && paintOps >= 32 && paintOps < 58) {
     nivel = 2;
     submotivos.push('splitter_saidas_sem_fusao');
     confianca = 'media';
-  } else if (pathOps >= 120 && paintOps >= 55) {
-    nivel = 3;
-    confianca = pathOps >= 180 ? 'alta' : 'media';
-  } else if (pathOps >= 80) {
+  }
+  // 4 — incompleta genérica
+  else if (pathOps >= 80 && paintOps < 55) {
     nivel = 2;
     submotivos.push('diagramacao_incompleta');
     confianca = 'baixa';
+  }
+  // 3 — diagramada
+  else if (pathOps >= 120 && paintOps >= 55) {
+    nivel = 3;
+    confianca = pathOps >= 180 ? 'alta' : 'media';
+  } else if (pathOps >= 60 && paintOps >= 40) {
+    nivel = 3;
+    confianca = 'media';
   } else {
     nivel = 1;
     submotivos.push('diagrama_vazio');
     confianca = 'baixa';
   }
 
-  const idCaixa =
-    caixa ||
-    fileName
-      .replace(/\.pdf$/i, '')
-      .replace(/-\d{2}_\d{2}_\d{4}.*$/i, '')
-      .trim();
+  const idCaixa = !isCaixaFooterRuim(caixa) ? caixa : idFromFileName(fileName);
 
   return {
     nivel_diagramacao: nivel,
