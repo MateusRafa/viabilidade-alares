@@ -189,7 +189,7 @@
         <p>
           Envie PDFs de CEO/CTO em lote. Classificação: sem diagramação (1), incompleta (2) ou
           diagramada (3). <strong>Splitter (SP2–SP16):</strong> CEO e CTO precisam de fusão na
-          <strong>entrada</strong>; saídas podem ficar disponíveis sem fusão.
+          <strong>entrada</strong>; em <strong>CEO</strong> é necessário pelo menos 1 saída preenchida.
         </p>
       </header>
 
