@@ -85,6 +85,7 @@ export function classifyDiagramacao(metrics, fileName = '') {
     strokeOps = 0,
     hasSplitter = false,
     hasMidFiberLabel = false,
+    hasUpperRightFiberLabel = false,
     caixa,
     nivelTipo: nivelTipoRaw
   } = metrics;
@@ -119,10 +120,20 @@ export function classifyDiagramacao(metrics, fileName = '') {
       nivel = 1;
       submotivos.push('splitter_sem_fusao_entrada');
       confianca = paintOps < 22 ? 'alta' : 'media';
-    } else if (tipo === 'CEO' || tipo === 'CTO') {
-      // Com entrada fusionada, saídas podem estar disponíveis (sem fusão) em CEO/CTO.
+    } else if (tipo === 'CTO') {
+      // CTO: com entrada fusionada, pode considerar diagramada.
       nivel = 3;
       confianca = paintOps >= 52 ? 'alta' : 'media';
+    } else if (tipo === 'CEO') {
+      // CEO: precisa ter ao menos 1 saída de splitter preenchida.
+      if (!hasUpperRightFiberLabel) {
+        nivel = 2;
+        submotivos.push('splitter_sem_saida_preenchida');
+        confianca = 'media';
+      } else {
+        nivel = 3;
+        confianca = paintOps >= 52 ? 'alta' : 'media';
+      }
     } else {
       // Tipo desconhecido: mantém regra principal de entrada.
       nivel = 3;
@@ -158,6 +169,7 @@ export function classifyDiagramacao(metrics, fileName = '') {
       strokeOps,
       hasSplitter,
       hasMidFiberLabel,
+      hasUpperRightFiberLabel,
       entrada_splitter_ok: hasSplitter
         ? entradaSplitterFusionadaComContexto({ paintOps, pathOps, strokeOps, hasMidFiberLabel }, tipo)
         : null,
