@@ -1,0 +1,7 @@
+arquivo,nivel_esperado,submotivo_esperado,tipo,notas
+SP - Passagem __ Rompimento-25_05_2026-21_51_48.pdf,1,diagrama_vazio,CEO,Area do diagrama vazia
+CEO - PASSAGEM 12FO-25_05_2026-21_43_08.pdf,1,cabos_sem_fusao,CEO,Cabo/portas sem fusao
+CTO SPLITTER - 803-25_05_2026-21_54_54.pdf,1,splitter_sem_fusao_entrada,CTO,Cabo + splitter sem fusao na entrada
+CTO SPLITTER - 803-27_05_2026-14_44_54.pdf,3,,CTO,Entrada do splitter fusionada (L1-F1)
+TUL01-CE017 - Rede Nova-25_05_2026-21_58_04.pdf,2,splitter_sem_saida_preenchida,CEO,2x SP8 com entrada e saidas abertas
+Caixas-25_05_2026.pdf,3,,CTO,CTO diagramado com fusoes e SP8
