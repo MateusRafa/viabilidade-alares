@@ -176,8 +176,8 @@
         <h2>IA de Auditoria de Diagramação</h2>
         <p>
           Envie PDFs de CEO/CTO em lote. Classificação: sem diagramação (1), incompleta (2) ou
-          diagramada (3). Em <strong>CTO</strong>, só a fusão na entrada do splitter conta; em
-          <strong>CEO</strong>, as saídas do splitter precisam de ao menos uma fusão.
+          diagramada (3). <strong>Splitter (SP2–SP16):</strong> CEO e CTO precisam de fusão na
+          <strong>entrada</strong>; saídas podem ficar disponíveis sem fusão.
         </p>
       </header>
 
