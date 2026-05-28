@@ -56,6 +56,22 @@ const portalToolsMeta = [
     available: true
   },
   {
+    id: 'dashboard-projetos',
+    title: 'Dashboard Projetos',
+    description: 'Gerenciar relatórios técnicos B2B do setor de Projetos',
+    icon: '📁',
+    color: '#7B68EE',
+    available: true
+  },
+  {
+    id: 'dashboard-implantacao',
+    title: 'Dashboard Implantação',
+    description: 'Gerenciar relatórios enviados por Projetos e Relatório de Construção',
+    icon: '🏗️',
+    color: '#0D9488',
+    available: true
+  },
+  {
     id: 'ia-auditoria-diagramacao',
     title: 'IA de Auditoria de Diagramação',
     description:
@@ -76,6 +92,8 @@ const TOOL_COMPONENT_FILES = {
   'mapa-consulta': './MapaConsulta.svelte',
   'dashboard-censup': './DashboardCensup.svelte',
   'formulario-engenharia': './FormularioEngenharia.svelte',
+  'dashboard-projetos': './DashboardProjetos.svelte',
+  'dashboard-implantacao': './DashboardImplantacao.svelte',
   'ia-auditoria-diagramacao': './IaAuditoriaDiagramacao.svelte'
 };
 
