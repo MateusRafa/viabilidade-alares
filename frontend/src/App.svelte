@@ -86,6 +86,8 @@
   let heartbeatInterval = null;
   let currentView = null; // 'dashboard', 'tool', 'login' ou null (será definido pelo processUrl)
   let currentTool = null; // ID da ferramenta atual
+  /** Ao voltar da ferramenta filha, reabre esta ferramenta em vez do portal (ex.: dashboard-implantacao). */
+  let toolReturnTo = null;
   let toolSettingsHandler = null; // Função de configurações da ferramenta atual
   let toolSettingsHoverHandler = null; // Função de pré-carregamento no hover da engrenagem
   let broadcastChannel = null; // Canal de comunicação entre abas
@@ -520,10 +522,45 @@
     
     // Definir ferramenta atual
     currentTool = toolId;
+    toolReturnTo = null;
     currentView = 'tool';
     
     // Cada ferramenta gerencia sua própria inicialização através do onMount do componente
     // Não precisamos inicializar aqui - o componente fará isso quando for montado
+  }
+
+  /**
+   * Abre outra ferramenta a partir de uma ferramenta já aberta (ex.: Dashboard → Formulário).
+   * @param {string} toolId
+   * @param {{ returnTo?: string }} [options] — returnTo: id da ferramenta ao usar "voltar"
+   */
+  function handleOpenTool(toolId, options = {}) {
+    const tool = getToolById(toolId);
+
+    if (!tool || !tool.available) {
+      console.error(`Ferramenta ${toolId} não encontrada ou não disponível`);
+      alert('Esta ferramenta não está disponível.');
+      return;
+    }
+
+    if (!hasToolPermission(toolId)) {
+      alert(
+        'Você não tem permissão para acessar o formulário de relatório. Entre em contato com o administrador.'
+      );
+      return;
+    }
+
+    const returnTo = options.returnTo;
+    if (returnTo && !hasToolPermission(returnTo)) {
+      toolReturnTo = null;
+    } else {
+      toolReturnTo = returnTo || null;
+    }
+
+    currentTool = toolId;
+    currentView = 'tool';
+    toolSettingsHandler = null;
+    toolSettingsHoverHandler = null;
   }
 
   // Função para voltar ao Dashboard
@@ -581,6 +618,19 @@
         }, 100);
       }
     } else {
+      // Voltar à ferramenta de origem (ex.: Dashboard Implantação → Formulário → voltar)
+      if (toolReturnTo && hasToolPermission(toolReturnTo)) {
+        const returnTool = getToolById(toolReturnTo);
+        if (returnTool?.available && returnTool.component) {
+          currentTool = toolReturnTo;
+          toolReturnTo = null;
+          currentView = 'tool';
+          toolSettingsHandler = null;
+          toolSettingsHoverHandler = null;
+          return;
+        }
+      }
+      toolReturnTo = null;
       // Comportamento normal: voltar ao Dashboard na mesma aba
       currentView = 'dashboard';
       currentTool = null;
@@ -914,6 +964,7 @@
           currentUser={currentUser}
           userTipo={userTipo}
           onBackToDashboard={handleBackToDashboard}
+          onOpenTool={handleOpenTool}
           onSettingsRequest={registerToolSettings}
           onSettingsHover={registerToolSettingsHover}
         />
