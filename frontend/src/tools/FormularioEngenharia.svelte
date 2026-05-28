@@ -8,6 +8,7 @@
     measurePassoLayoutsFromDocument,
     getPassoLayoutWarnings,
     CABECALHO_FIELDS,
+    getCabecalhoFieldsForDisplay,
     buildFullPdfHtml,
     getEngineeringPdfDocumentTitle,
     printPdfHtmlNamed,
@@ -18,6 +19,12 @@
     sanitizeRichHtml,
     MAX_ANEXO_PDF_MB,
     createAnexoId,
+    createPassoImagemId,
+    createPassoDescricaoAposId,
+    emptyPassoBlocoApos,
+    getPassoImagens,
+    getPassoBlocoImagens,
+    getPassoDescricoesAposImagem,
     renderPdfFileToPageImages
   } from './formularioPdfShared.js';
 
@@ -80,8 +87,11 @@
   /** { type: 'passo', index: number } | { type: 'material' } */
   let uploadTarget = null;
   let armedUploadTarget = null;
+  let imagePasteInFlight = false;
   const descricaoEditorEls = {};
   const descricaoEditorReady = {};
+  /** Evita resetar innerHTML enquanto o usuário digita (cursor não pula para o início). */
+  let focusedDescricaoEditorKey = null;
   const MAX_PASSO_IMAGE_MB = 8;
 
   const PREVIEW_DEBOUNCE_MS = 50;
@@ -106,10 +116,16 @@
   let previewHtmlDisplayed = '';
   /** HTML do iframe oculto só para medição de quebra de página */
   let measureHtml = '';
-  /** Seção do formulário em edição — prévia volta sempre para a página correspondente */
+  /** Seção do formulário em edição — prévia volta para a página correspondente */
   let previewFocusAnchor = 'capa';
+  /** Restaura rolagem da prévia após atualização automática (mesma seção em edição) */
+  let previewScrollRestore = null;
+  /** Ao digitar descrição longa, rolar para a última folha de texto do passo */
+  let previewPreferTailScroll = false;
   /** Ignora eventos load antigos do iframe quando várias atualizações seguidas */
   let previewApplyGeneration = 0;
+
+  $: cabecalhoFieldsVisible = getCabecalhoFieldsForDisplay(formData.cabecalho);
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: layoutsForPreview =
@@ -119,7 +135,18 @@
 
   $: measurePassoKey = assetsReady
     ? JSON.stringify(
-        formData.passos.map((p) => [p.tituloPasso, p.descricao, p.imagemDataUrl?.length || 0])
+        formData.passos.map((p) => [
+          p.tituloPasso,
+          p.descricao,
+          p.tituloImagem,
+          (p.imagens || []).map((img) => [img.id, img.dataUrl?.length || 0]),
+          (p.descricoesAposImagem || []).map((b) => [
+            b.id,
+            b.descricao,
+            b.tituloImagem,
+            (b.imagens || []).map((img) => [img.id, img.dataUrl?.length || 0])
+          ])
+        ])
       )
     : '';
 
@@ -153,6 +180,11 @@
       previewFocusAnchor = `passo:${editor.dataset.passoIndex ?? '0'}`;
       return true;
     }
+    const editorApos = target.closest('.rich-editor[data-desc-apos-id]');
+    if (editorApos) {
+      previewFocusAnchor = `passo:${editorApos.dataset.passoIndex ?? '0'}`;
+      return true;
+    }
 
     if (target.closest('[data-editor="material"]')) {
       previewFocusAnchor = 'listaMaterial';
@@ -175,7 +207,17 @@
     syncPreviewFocusFromTarget(event.target);
   }
 
-  function findPreviewAnchorPageElement(doc) {
+  function capturePreviewScroll() {
+    const win = previewIframeEl?.contentWindow;
+    if (!win) return;
+    previewScrollRestore = {
+      top: win.scrollY,
+      left: win.scrollX,
+      anchor: previewFocusAnchor
+    };
+  }
+
+  function findPreviewAnchorPageElement(doc, { preferTail = false } = {}) {
     if (!doc || !previewFocusAnchor) return null;
 
     if (previewFocusAnchor === 'capa') {
@@ -202,10 +244,17 @@
     if (previewFocusAnchor.startsWith('passo:')) {
       const passoIndex = previewFocusAnchor.split(':')[1];
       const passoNumero = Number(passoIndex) + 1;
-      return (
-        doc.querySelector(`.pdf-page-passo[data-passo-index="${passoIndex}"]`) ||
-        doc.querySelector(`[data-pdf-section="passo-${passoNumero}"]`)
+      const textPages = doc.querySelectorAll(
+        `[data-pdf-section="passo-${passoNumero}"].pdf-page-passo-texto`
       );
+      if (textPages.length) {
+        return preferTail ? textPages[textPages.length - 1] : textPages[0];
+      }
+      const passoPages = doc.querySelectorAll(`[data-pdf-section="passo-${passoNumero}"]`);
+      if (passoPages.length) {
+        return preferTail ? passoPages[passoPages.length - 1] : passoPages[0];
+      }
+      return doc.querySelector(`.pdf-page-passo[data-passo-index="${passoIndex}"]`);
     }
     return null;
   }
@@ -217,7 +266,25 @@
     const win = previewIframeEl?.contentWindow;
     if (!doc || !win) return;
 
-    const pageEl = findPreviewAnchorPageElement(doc);
+    if (
+      previewScrollRestore &&
+      previewScrollRestore.anchor === previewFocusAnchor &&
+      !previewPreferTailScroll
+    ) {
+      win.scrollTo({
+        top: previewScrollRestore.top,
+        left: previewScrollRestore.left,
+        behavior: 'auto'
+      });
+      previewScrollRestore = null;
+      previewPreferTailScroll = false;
+      return;
+    }
+
+    const pageEl = findPreviewAnchorPageElement(doc, { preferTail: previewPreferTailScroll });
+    previewPreferTailScroll = false;
+    previewScrollRestore = null;
+
     if (pageEl) {
       pageEl.scrollIntoView({ block: 'start', behavior: 'auto' });
       return;
@@ -229,6 +296,7 @@
 
   function applyPreviewHtml() {
     if (!assetsReady) return;
+    capturePreviewScroll();
     previewApplyGeneration += 1;
     previewHtmlDisplayed = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
   }
@@ -463,44 +531,104 @@
     }
   }
 
-  function applyImageToTarget(file) {
-    if (!file) return false;
-    if (!uploadTarget) return false;
-
-    if (!file.type.startsWith('image/')) {
-      pdfError = 'Use um arquivo de imagem (PNG, JPG, WEBP ou SVG).';
-      return false;
-    }
-
-    if (file.size > MAX_PASSO_IMAGE_MB * 1024 * 1024) {
-      pdfError = `A imagem deve ter no máximo ${MAX_PASSO_IMAGE_MB} MB.`;
-      return false;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      const nome =
-        file.name?.trim() ||
-        `imagem-colada.${(file.type.split('/')[1] || 'png').replace('svg+xml', 'svg')}`;
-      const patch = { imagemDataUrl: dataUrl, imagemNome: nome };
-      if (uploadTarget.type === 'passo') {
-        updatePasso(uploadTarget.index, patch);
-        schedulePassoLayoutMeasure(true);
+  function readImageFileAsDataUrl(file) {
+    return new Promise((resolve) => {
+      if (!file?.type?.startsWith('image/')) {
+        resolve(null);
+        return;
       }
-    };
-    reader.onerror = () => {
-      pdfError = 'Não foi possível ler a imagem. Tente outro arquivo.';
-    };
-    reader.readAsDataURL(file);
+      if (file.size > MAX_PASSO_IMAGE_MB * 1024 * 1024) {
+        pdfError = `Cada imagem deve ter no máximo ${MAX_PASSO_IMAGE_MB} MB.`;
+        resolve(null);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : '';
+        const nome =
+          file.name?.trim() ||
+          `imagem-colada.${(file.type.split('/')[1] || 'png').replace('svg+xml', 'svg')}`;
+        resolve(dataUrl ? { dataUrl, nome } : null);
+      };
+      reader.onerror = () => {
+        pdfError = 'Não foi possível ler a imagem. Tente outro arquivo.';
+        resolve(null);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function dedupeImageFiles(files) {
+    const out = [];
+    const seen = new Set();
+    for (const file of files || []) {
+      if (!file?.type?.startsWith('image/')) continue;
+      const key = `${file.size}:${file.type}:${file.name || ''}:${file.lastModified || 0}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(file);
+    }
+    return out;
+  }
+
+  /** Clipboard costuma expor a mesma imagem em items e em files — usar só uma fonte. */
+  function collectClipboardImageFiles(dt) {
+    if (!dt) return [];
+
+    const fromItems = [];
+    if (dt.items?.length) {
+      for (const item of dt.items) {
+        if (!item.type?.startsWith('image/')) continue;
+        const file = fileFromClipboardItem(item);
+        if (file?.type?.startsWith('image/')) fromItems.push(file);
+      }
+    }
+    if (fromItems.length) return dedupeImageFiles(fromItems);
+
+    const fromFiles = [];
+    if (dt.files?.length) {
+      for (let i = 0; i < dt.files.length; i++) {
+        const file = dt.files[i];
+        if (file?.type?.startsWith('image/')) fromFiles.push(file);
+      }
+    }
+    return dedupeImageFiles(fromFiles);
+  }
+
+  async function appendImagesToPasso(passoIndex, files, blockId = null) {
+    const list = dedupeImageFiles(Array.from(files || []));
+    if (!list.length) return false;
+
+    const results = await Promise.all(list.map(readImageFileAsDataUrl));
+    const valid = results.filter(Boolean);
+    if (!valid.length) return false;
+
+    const novas = valid.map(({ dataUrl, nome }) => ({
+      id: createPassoImagemId(),
+      dataUrl,
+      nome
+    }));
+
+    if (blockId) {
+      const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
+      updatePasso(passoIndex, {
+        descricoesAposImagem: blocks.map((b) =>
+          b.id === blockId ? { ...b, imagens: [...(b.imagens || []), ...novas] } : b
+        )
+      });
+    } else {
+      const passo = formData.passos[passoIndex];
+      updatePasso(passoIndex, { imagens: [...(passo.imagens || []), ...novas] });
+    }
+    schedulePassoLayoutMeasure(true);
     return true;
   }
 
   function handlePassoImageChange(event) {
     pdfError = '';
-    const file = event.currentTarget?.files?.[0];
-    if (!file) return;
-    applyImageToTarget(file);
+    const files = event.currentTarget?.files;
+    if (!files?.length || uploadTarget?.type !== 'passo') return;
+    appendImagesToPasso(uploadTarget.index, files, uploadTarget.blockId ?? null);
     event.currentTarget.value = '';
   }
 
@@ -527,7 +655,7 @@
   function uploadTargetsMatch(a, b) {
     if (!a || !b) return false;
     if (a.type !== 'passo' || b.type !== 'passo') return false;
-    return a.index === b.index;
+    return a.index === b.index && (a.blockId ?? null) === (b.blockId ?? null);
   }
 
   function fileFromClipboardItem(item) {
@@ -563,30 +691,19 @@
 
   async function processImagePaste(event) {
     pdfError = '';
-    const dt = event?.clipboardData;
+    if (uploadTarget?.type !== 'passo') return false;
+    const passoIndex = uploadTarget.index;
+    const files = collectClipboardImageFiles(event?.clipboardData);
 
-    if (dt?.files?.length) {
-      for (let i = 0; i < dt.files.length; i++) {
-        const file = dt.files[i];
-        if (file?.type?.startsWith('image/') && applyImageToTarget(file)) {
-          return true;
-        }
-      }
-    }
-
-    if (dt?.items?.length) {
-      for (const item of dt.items) {
-        const file = fileFromClipboardItem(item);
-        if (file && applyImageToTarget(file)) {
-          return true;
-        }
-      }
+    const blockId = uploadTarget.blockId ?? null;
+    if (files.length) {
+      return appendImagesToPasso(passoIndex, files, blockId);
     }
 
     try {
       const file = await readImageFromClipboardApi();
-      if (file && applyImageToTarget(file)) {
-        return true;
+      if (file) {
+        return appendImagesToPasso(passoIndex, [file], blockId);
       }
     } catch (err) {
       console.warn('Leitura da área de transferência:', err);
@@ -597,17 +714,22 @@
     return false;
   }
 
-  async function handleImagePaste(event) {
-    if (!armedUploadTarget) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    uploadTarget = armedUploadTarget;
-    await processImagePaste(event);
-  }
-
   function descricaoEditorKey(passoIndex) {
     return `passo-${passoIndex}`;
+  }
+
+  function descricaoAposEditorKey(passoIndex, blockId) {
+    return `passo-${passoIndex}-apos-${blockId}`;
+  }
+
+  function richHtmlEquivalent(a, b) {
+    return sanitizeRichHtml(a || '') === sanitizeRichHtml(b || '');
+  }
+
+  function isDescricaoEditorFocused(key) {
+    if (focusedDescricaoEditorKey === key) return true;
+    const el = descricaoEditorEls[key];
+    return !!(el && typeof document !== 'undefined' && el.contains(document.activeElement));
   }
 
   function syncDescricaoEditor(passoIndex, el) {
@@ -616,6 +738,19 @@
     if (html !== formData.passos[passoIndex].descricao) {
       updatePasso(passoIndex, { descricao: html });
     }
+  }
+
+  function syncDescricaoAposEditor(passoIndex, blockId, el) {
+    if (!el) return;
+    const html = sanitizeRichHtml(el.innerHTML);
+    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
+    const current = blocks.find((b) => b.id === blockId);
+    if (!current || html === current.descricao) return;
+    updatePasso(passoIndex, {
+      descricoesAposImagem: blocks.map((b) =>
+        b.id === blockId ? { ...b, descricao: html } : b
+      )
+    });
   }
 
   function syncMaterialDescricaoEditor(el) {
@@ -642,6 +777,12 @@
     const target = event.currentTarget;
     if (target?.dataset?.editor === 'material') {
       syncMaterialDescricaoEditor(target);
+    } else if (target?.dataset?.descAposId) {
+      syncDescricaoAposEditor(
+        Number(target.dataset.passoIndex),
+        target.dataset.descAposId,
+        target
+      );
     } else if (target?.dataset?.passoIndex != null) {
       syncDescricaoEditor(Number(target.dataset.passoIndex), target);
     }
@@ -649,39 +790,139 @@
 
   function handlePassoDescricaoInput(passoIndex, event) {
     previewFocusAnchor = `passo:${passoIndex}`;
+    previewPreferTailScroll = true;
     syncDescricaoEditor(passoIndex, event.currentTarget);
     schedulePassoLayoutMeasure();
   }
 
+  function handlePassoDescricaoAposInput(passoIndex, blockId, event) {
+    previewFocusAnchor = `passo:${passoIndex}`;
+    previewPreferTailScroll = true;
+    syncDescricaoAposEditor(passoIndex, blockId, event.currentTarget);
+    schedulePassoLayoutMeasure();
+  }
+
+  function updatePassoBlocoTituloImagem(passoIndex, blockId, tituloImagem) {
+    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
+    updatePasso(passoIndex, {
+      descricoesAposImagem: blocks.map((b) =>
+        b.id === blockId ? { ...b, tituloImagem } : b
+      )
+    });
+    schedulePassoLayoutMeasure();
+  }
+
+  function addDescricaoAposImagem(passoIndex) {
+    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
+    const novo = emptyPassoBlocoApos();
+    updatePasso(passoIndex, {
+      descricoesAposImagem: [...blocks, novo]
+    });
+    schedulePassoLayoutMeasure(true);
+    tick().then(() => initDescricaoAposEditor(passoIndex, novo.id));
+  }
+
+  function removePassoBlocoImagem(passoIndex, blockId, imagemId) {
+    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
+    updatePasso(passoIndex, {
+      descricoesAposImagem: blocks.map((b) =>
+        b.id === blockId
+          ? { ...b, imagens: (b.imagens || []).filter((img) => img.id !== imagemId) }
+          : b
+      )
+    });
+    schedulePassoLayoutMeasure(true);
+  }
+
+  function clearPassoBlocoImages(passoIndex, blockId) {
+    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
+    updatePasso(passoIndex, {
+      descricoesAposImagem: blocks.map((b) => (b.id === blockId ? { ...b, imagens: [] } : b))
+    });
+    schedulePassoLayoutMeasure(true);
+  }
+
+  function removeDescricaoAposImagem(passoIndex, blockId) {
+    const key = descricaoAposEditorKey(passoIndex, blockId);
+    delete descricaoEditorEls[key];
+    delete descricaoEditorReady[key];
+    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]).filter(
+      (b) => b.id !== blockId
+    );
+    updatePasso(passoIndex, { descricoesAposImagem: blocks });
+    schedulePassoLayoutMeasure(true);
+  }
+
   function handleMaterialDescricaoInput(event) {
+    previewPreferTailScroll = true;
     syncMaterialDescricaoEditor(event.currentTarget);
   }
 
   async function initDescricaoEditor(passoIndex) {
     const key = descricaoEditorKey(passoIndex);
     const el = descricaoEditorEls[key];
-    if (!el) return;
+    if (!el || isDescricaoEditorFocused(key)) return;
+
     const html = formData.passos[passoIndex]?.descricao || '';
-    if (!descricaoEditorReady[key] || el.innerHTML !== html) {
+    if (!descricaoEditorReady[key]) {
       el.innerHTML = html;
       descricaoEditorReady[key] = true;
+      return;
+    }
+    if (!richHtmlEquivalent(el.innerHTML, html)) {
+      el.innerHTML = html;
+    }
+  }
+
+  async function initDescricaoAposEditor(passoIndex, blockId) {
+    const key = descricaoAposEditorKey(passoIndex, blockId);
+    const el = descricaoEditorEls[key];
+    if (!el || isDescricaoEditorFocused(key)) return;
+
+    const block = getPassoDescricoesAposImagem(formData.passos[passoIndex]).find(
+      (b) => b.id === blockId
+    );
+    const html = block?.descricao || '';
+    if (!descricaoEditorReady[key]) {
+      el.innerHTML = html;
+      descricaoEditorReady[key] = true;
+      return;
+    }
+    if (!richHtmlEquivalent(el.innerHTML, html)) {
+      el.innerHTML = html;
     }
   }
 
   async function initMaterialDescricaoEditor() {
     const el = descricaoEditorEls.material;
-    if (!el) return;
+    if (!el || isDescricaoEditorFocused('material')) return;
+
     const html = formData.listaMaterial.descricao || '';
-    if (!descricaoEditorReady.material || el.innerHTML !== html) {
+    if (!descricaoEditorReady.material) {
       el.innerHTML = html;
       descricaoEditorReady.material = true;
+      return;
+    }
+    if (!richHtmlEquivalent(el.innerHTML, html)) {
+      el.innerHTML = html;
     }
   }
 
-  $: {
-    formData.passos.forEach((_, passoIndex) => {
+  /** Só reidrata editores ao expandir passos ou mudar quantidade — não a cada tecla na descrição. */
+  $: passoEditorsHydrateKey = `${formData.passos.length}|${Object.entries(expandedSections)
+    .filter(([id, open]) => open && id.startsWith('passo-'))
+    .map(([id]) => id)
+    .join(',')}`;
+
+  $: if (passoEditorsHydrateKey) {
+    formData.passos.forEach((passo, passoIndex) => {
       if (expandedSections[passoSectionId(passoIndex)]) {
-        tick().then(() => initDescricaoEditor(passoIndex));
+        tick().then(() => {
+          initDescricaoEditor(passoIndex);
+          getPassoDescricoesAposImagem(passo).forEach((block) => {
+            initDescricaoAposEditor(passoIndex, block.id);
+          });
+        });
       }
     });
   }
@@ -690,8 +931,16 @@
     tick().then(initMaterialDescricaoEditor);
   }
 
-  function clearPassoImage(passoIndex) {
-    updatePasso(passoIndex, { imagemDataUrl: '', imagemNome: '' });
+  function removePassoImagem(passoIndex, imagemId) {
+    const passo = formData.passos[passoIndex];
+    updatePasso(passoIndex, {
+      imagens: (passo.imagens || []).filter((img) => img.id !== imagemId)
+    });
+    schedulePassoLayoutMeasure(true);
+  }
+
+  function clearPassoImages(passoIndex) {
+    updatePasso(passoIndex, { imagens: [] });
     schedulePassoLayoutMeasure(true);
   }
 
@@ -805,12 +1054,17 @@
       applyPreviewHtml();
       schedulePassoLayoutMeasure(true);
 
-      const onWindowPaste = (e) => {
-        if (!armedUploadTarget) return;
+      const onWindowPaste = async (e) => {
+        if (!armedUploadTarget || imagePasteInFlight) return;
         e.preventDefault();
         e.stopPropagation();
         uploadTarget = armedUploadTarget;
-        processImagePaste(e);
+        imagePasteInFlight = true;
+        try {
+          await processImagePaste(e);
+        } finally {
+          imagePasteInFlight = false;
+        }
       };
       window.addEventListener('paste', onWindowPaste, true);
       removeWindowPaste = () => window.removeEventListener('paste', onWindowPaste, true);
@@ -897,7 +1151,7 @@
           </button>
           {#if expandedSections.cabecalho}
             <div class="form-box-body form-box-body-cabecalho">
-              {#each CABECALHO_FIELDS as field (field.key)}
+              {#each cabecalhoFieldsVisible as field (field.key)}
                 <label class="field">
                   <span>{field.label}</span>
                   {#if field.multiline}
@@ -937,6 +1191,7 @@
           type="file"
           class="file-input-hidden"
           accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml,image/*"
+          multiple
           on:change={handlePassoImageChange}
           tabindex="-1"
           aria-hidden="true"
@@ -1010,23 +1265,36 @@
                     aria-multiline="true"
                     data-passo-index={passoIndex}
                     data-placeholder="Descrição do passo (suporta negrito e formatação ao colar)"
+                    on:focus={() => {
+                      focusedDescricaoEditorKey = editorKey;
+                    }}
                     on:input={(e) => handlePassoDescricaoInput(passoIndex, e)}
                     on:paste={handleDescricaoPaste}
-                    on:blur={(e) => syncDescricaoEditor(passoIndex, e.currentTarget)}
+                    on:blur={(e) => {
+                      focusedDescricaoEditorKey = null;
+                      syncDescricaoEditor(passoIndex, e.currentTarget);
+                    }}
                   ></div>
                 </label>
+                <label class="field">
+                  <span>Título da seção de Imagens</span>
+                  <input
+                    type="text"
+                    value={passo.tituloImagem || 'Imagem'}
+                    on:input={(e) => updatePasso(passoIndex, { tituloImagem: e.currentTarget.value })}
+                    placeholder="Imagem"
+                  />
+                </label>
                 <div class="field field-upload">
-                  <span>Imagem</span>
                   <div
                     class="upload-box"
                     class:armed={uploadTargetsMatch(armedUploadTarget, uploadCtx)}
                     tabindex="0"
                     role="group"
-                    aria-label="Imagem do passo {passoIndex + 1}. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivo."
+                    aria-label="Imagens do passo {passoIndex + 1}. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivos."
                     on:click={() => armImagePaste(uploadCtx)}
                     on:focus={() => armImagePaste(uploadCtx)}
                     on:blur={disarmImagePaste}
-                    on:paste={handleImagePaste}
                     on:dblclick={(e) => {
                       setUploadTarget(uploadCtx);
                       handleUploadBoxDblClick(e);
@@ -1035,30 +1303,149 @@
                     <div class="upload-trigger">
                       <span class="upload-trigger-text">1 clique: selecionar o box e colar (Ctrl+V)</span>
                       <span class="upload-trigger-hint"
-                        >2 cliques seguidos: escolher imagem no computador — até {MAX_PASSO_IMAGE_MB} MB</span
+                        >2 cliques: escolher imagens no computador — várias em sequência, até
+                        {MAX_PASSO_IMAGE_MB} MB cada</span
                       >
                     </div>
-                    {#if passo.imagemDataUrl}
-                      <div class="upload-preview-wrap">
-                        <img
-                          class="upload-preview"
-                          src={passo.imagemDataUrl}
-                          alt="Prévia da imagem do passo {passoIndex + 1}"
-                        />
-                        {#if passo.imagemNome}
-                          <p class="upload-filename">{passo.imagemNome}</p>
-                        {/if}
+                    {#if getPassoImagens(passo).length}
+                      <div class="upload-previews-stack">
+                        {#each getPassoImagens(passo) as img (img.id)}
+                          <div class="upload-preview-wrap">
+                            <img
+                              class="upload-preview"
+                              src={img.dataUrl}
+                              alt="Prévia — {passo.tituloImagem || 'Imagem'} ({img.nome || 'sem nome'})"
+                            />
+                            {#if img.nome}
+                              <p class="upload-filename">{img.nome}</p>
+                            {/if}
+                            <button
+                              type="button"
+                              class="btn-remove-image"
+                              on:click|stopPropagation={() => removePassoImagem(passoIndex, img.id)}
+                            >
+                              Remover
+                            </button>
+                          </div>
+                        {/each}
                         <button
                           type="button"
-                          class="btn-remove-image"
-                          on:click|stopPropagation={() => clearPassoImage(passoIndex)}
+                          class="btn-remove-all-images"
+                          on:click|stopPropagation={() => clearPassoImages(passoIndex)}
                         >
-                          Remover imagem
+                          Remover todas
                         </button>
                       </div>
                     {/if}
                   </div>
                 </div>
+                {#each getPassoDescricoesAposImagem(passo) as block, blockIndex (block.id)}
+                  {@const aposEditorKey = descricaoAposEditorKey(passoIndex, block.id)}
+                  {@const blockUploadCtx = { type: 'passo', index: passoIndex, blockId: block.id }}
+                  <div class="passo-bloco-apos">
+                    <label class="field">
+                      <span>Descrição</span>
+                      <div
+                        use:registerDescricaoEditor={{ key: aposEditorKey }}
+                        class="rich-editor"
+                        contenteditable="true"
+                        role="textbox"
+                        aria-multiline="true"
+                        data-passo-index={passoIndex}
+                        data-desc-apos-id={block.id}
+                        data-placeholder="Descrição (suporta negrito e formatação ao colar)"
+                        on:focus={() => {
+                          focusedDescricaoEditorKey = aposEditorKey;
+                        }}
+                        on:input={(e) => handlePassoDescricaoAposInput(passoIndex, block.id, e)}
+                        on:paste={handleDescricaoPaste}
+                        on:blur={(e) => {
+                          focusedDescricaoEditorKey = null;
+                          syncDescricaoAposEditor(passoIndex, block.id, e.currentTarget);
+                        }}
+                      ></div>
+                    </label>
+                    <label class="field">
+                      <span>Título da seção de Imagens</span>
+                      <input
+                        type="text"
+                        value={block.tituloImagem || 'Imagem'}
+                        on:input={(e) =>
+                          updatePassoBlocoTituloImagem(passoIndex, block.id, e.currentTarget.value)}
+                        placeholder="Imagem"
+                      />
+                    </label>
+                    <div class="field field-upload">
+                      <div
+                        class="upload-box"
+                        class:armed={uploadTargetsMatch(armedUploadTarget, blockUploadCtx)}
+                        tabindex="0"
+                        role="group"
+                        aria-label="Imagens — {block.tituloImagem || 'Imagem'} do bloco {blockIndex + 1} do passo {passoIndex + 1}. Um clique para selecionar e colar com Ctrl+V. Dois cliques para escolher arquivos."
+                        on:click={() => armImagePaste(blockUploadCtx)}
+                        on:focus={() => armImagePaste(blockUploadCtx)}
+                        on:blur={disarmImagePaste}
+                        on:dblclick={(e) => {
+                          setUploadTarget(blockUploadCtx);
+                          handleUploadBoxDblClick(e);
+                        }}
+                      >
+                        <div class="upload-trigger">
+                          <span class="upload-trigger-text">1 clique: selecionar o box e colar (Ctrl+V)</span>
+                          <span class="upload-trigger-hint"
+                            >2 cliques: escolher imagens no computador — várias em sequência, até
+                            {MAX_PASSO_IMAGE_MB} MB cada</span
+                          >
+                        </div>
+                        {#if getPassoBlocoImagens(block).length}
+                          <div class="upload-previews-stack">
+                            {#each getPassoBlocoImagens(block) as img (img.id)}
+                              <div class="upload-preview-wrap">
+                                <img
+                                  class="upload-preview"
+                                  src={img.dataUrl}
+                                  alt="Prévia — {block.tituloImagem || 'Imagem'} ({img.nome || 'sem nome'})"
+                                />
+                                {#if img.nome}
+                                  <p class="upload-filename">{img.nome}</p>
+                                {/if}
+                                <button
+                                  type="button"
+                                  class="btn-remove-image"
+                                  on:click|stopPropagation={() =>
+                                    removePassoBlocoImagem(passoIndex, block.id, img.id)}
+                                >
+                                  Remover
+                                </button>
+                              </div>
+                            {/each}
+                            <button
+                              type="button"
+                              class="btn-remove-all-images"
+                              on:click|stopPropagation={() => clearPassoBlocoImages(passoIndex, block.id)}
+                            >
+                              Remover todas
+                            </button>
+                          </div>
+                        {/if}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="btn-remove-desc-apos"
+                      on:click={() => removeDescricaoAposImagem(passoIndex, block.id)}
+                    >
+                      Remover bloco (descrição e imagens)
+                    </button>
+                  </div>
+                {/each}
+                <button
+                  type="button"
+                  class="btn-add-desc-apos"
+                  on:click={() => addDescricaoAposImagem(passoIndex)}
+                >
+                  + Adicionar descrição abaixo das imagens
+                </button>
               </div>
               {#each passoLayoutWarnings.filter((w) => w.passoIndex === passoIndex) as w (w.message)}
                 <p class="passo-layout-warning" role="status">{w.message}</p>
@@ -1090,9 +1477,15 @@
                   aria-multiline="true"
                   data-editor="material"
                   data-placeholder="Descrição da lista de material"
+                  on:focus={() => {
+                    focusedDescricaoEditorKey = 'material';
+                  }}
                   on:input={handleMaterialDescricaoInput}
                   on:paste={handleDescricaoPaste}
-                  on:blur={(e) => syncMaterialDescricaoEditor(e.currentTarget)}
+                  on:blur={(e) => {
+                    focusedDescricaoEditorKey = null;
+                    syncMaterialDescricaoEditor(e.currentTarget);
+                  }}
                 ></div>
               </label>
             </div>
@@ -1627,6 +2020,14 @@
     pointer-events: none;
   }
 
+  .upload-previews-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    width: 100%;
+    margin-top: 0.5rem;
+  }
+
   .upload-preview-wrap {
     display: flex;
     flex-direction: column;
@@ -1667,6 +2068,67 @@
   }
 
   .btn-remove-image:hover {
+    background: #fee2e2;
+  }
+
+  .btn-remove-all-images {
+    align-self: flex-start;
+    margin-top: 0.25rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+    font-family: inherit;
+    color: #7c2d12;
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .btn-remove-all-images:hover {
+    background: #ffedd5;
+  }
+
+  .passo-bloco-apos {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .btn-add-desc-apos {
+    display: block;
+    width: 100%;
+    padding: 0.65rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    font-family: inherit;
+    color: #5b21b6;
+    background: #f5f3ff;
+    border: 1px dashed rgba(123, 104, 238, 0.55);
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: center;
+  }
+
+  .btn-add-desc-apos:hover {
+    background: #ede9fe;
+    border-color: #7b68ee;
+  }
+
+  .btn-remove-desc-apos {
+    align-self: flex-start;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
+    font-family: inherit;
+    color: #b91c1c;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .btn-remove-desc-apos:hover {
     background: #fee2e2;
   }
 
@@ -1759,8 +2221,8 @@
 
   .pdf-measure-iframe {
     position: absolute;
-    width: 1px;
-    height: 1px;
+    width: 210mm;
+    height: 297mm;
     opacity: 0;
     pointer-events: none;
     visibility: hidden;
