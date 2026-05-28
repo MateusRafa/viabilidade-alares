@@ -4,8 +4,13 @@
   export let currentUser = '';
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
+  /** Abre outra ferramenta do portal (ex.: formulario-engenharia). */
+  export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
+
+  const FORMULARIO_TOOL_ID = 'formulario-engenharia';
+  const RETURN_TOOL_ID = 'dashboard-implantacao';
 
   let searchQuery = '';
   let recentRelatorios = [];
@@ -29,6 +34,14 @@
     });
   }
 
+  function abrirFormularioPdf() {
+    if (typeof onOpenTool === 'function') {
+      onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
+      return;
+    }
+    alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
+  }
+
   onMount(() => {
     if (onSettingsRequest && typeof onSettingsRequest === 'function') {
       onSettingsRequest(() => {});
@@ -47,6 +60,9 @@
         Setor de Implantação — relatórios enviados por Projetos aguardando Relatório de Construção
       </p>
     </div>
+    <button type="button" class="btn-primary" on:click={abrirFormularioPdf}>
+      Gerar PDF
+    </button>
   </header>
 
   <section class="search-section" aria-label="Pesquisar relatórios">
@@ -134,6 +150,23 @@
     justify-content: space-between;
     gap: 1rem;
     flex-shrink: 0;
+  }
+
+  .btn-primary {
+    padding: 0.65rem 1.1rem;
+    background: linear-gradient(135deg, #0d9488 0%, #14b8a6 100%);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(13, 148, 136, 0.3);
+    white-space: nowrap;
+  }
+
+  .btn-primary:hover {
+    filter: brightness(1.06);
   }
 
   .dashboard-header-text h1 {
