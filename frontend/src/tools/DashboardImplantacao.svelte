@@ -96,7 +96,7 @@
 
   .dashboard-header {
     display: flex;
-    justify-content: flex-end;
+    justify-content: flex-start;
     flex-shrink: 0;
   }
 
@@ -104,7 +104,7 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: flex-start;
     gap: 0.65rem;
   }
 
@@ -134,7 +134,7 @@
   .search-panel {
     flex-shrink: 0;
     display: flex;
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
 
   .search-input {
