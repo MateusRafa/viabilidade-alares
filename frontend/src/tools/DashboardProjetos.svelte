@@ -49,10 +49,6 @@
   </section>
 
   <RelatoriosStatusQuadros relatorios={recentRelatorios} {searchQuery} />
-
-  {#if currentUser}
-    <p class="session-hint">Sessão: {currentUser}</p>
-  {/if}
 </div>
 
 <style>
@@ -140,12 +136,5 @@
     outline: none;
     border-color: #7b68ee;
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
-  }
-
-  .session-hint {
-    margin: 0;
-    font-size: 0.75rem;
-    color: #9ca3af;
-    flex-shrink: 0;
   }
 </style>
