@@ -36,12 +36,6 @@
 
 <div class="relatorios-dashboard">
   <header class="dashboard-header">
-    <div class="dashboard-header-text">
-      <h1>Dashboard Implantação</h1>
-      <p>
-        Setor de Implantação — relatórios enviados por Projetos aguardando Relatório de Construção
-      </p>
-    </div>
     <button type="button" class="btn-primary" on:click={abrirFormularioPdf}>
       Gerar PDF
     </button>
@@ -81,26 +75,8 @@
 
   .dashboard-header {
     display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
+    justify-content: flex-end;
     flex-shrink: 0;
-  }
-
-  .dashboard-header-text h1 {
-    margin: 0 0 0.35rem;
-    font-size: 1.35rem;
-    font-weight: 700;
-    color: #4c1d95;
-  }
-
-  .dashboard-header-text p {
-    margin: 0;
-    font-size: 0.9rem;
-    color: #6b7280;
-    max-width: 40rem;
-    line-height: 1.45;
   }
 
   .btn-primary {
