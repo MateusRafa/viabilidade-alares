@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
 
   export let currentUser = '';
@@ -15,6 +15,8 @@
 
   let searchQuery = '';
   let recentRelatorios = [];
+  let showSearch = false;
+  let searchInputEl;
 
   function abrirFormularioPdf() {
     if (typeof onOpenTool === 'function') {
@@ -22,6 +24,16 @@
       return;
     }
     alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
+  }
+
+  async function toggleSearch() {
+    showSearch = !showSearch;
+    if (!showSearch) {
+      searchQuery = '';
+      return;
+    }
+    await tick();
+    searchInputEl?.focus();
   }
 
   onMount(() => {
@@ -36,22 +48,35 @@
 
 <div class="relatorios-dashboard">
   <header class="dashboard-header">
-    <button type="button" class="btn-primary" on:click={abrirFormularioPdf}>
-      Gerar PDF
-    </button>
+    <div class="dashboard-actions">
+      <button
+        type="button"
+        class="btn-primary"
+        class:btn-primary--active={showSearch}
+        on:click={toggleSearch}
+        aria-expanded={showSearch}
+      >
+        Pesquisar
+      </button>
+      <button type="button" class="btn-primary" on:click={abrirFormularioPdf}>
+        Gerar PDF
+      </button>
+    </div>
   </header>
 
-  <section class="search-section" aria-label="Pesquisar relatórios">
-    <label class="search-label" for="search-relatorios-implantacao">Pesquisar relatórios</label>
-    <input
-      id="search-relatorios-implantacao"
-      type="search"
-      class="search-input"
-      placeholder="Cliente, projeto, projetista…"
-      bind:value={searchQuery}
-      autocomplete="off"
-    />
-  </section>
+  {#if showSearch}
+    <section class="search-panel" aria-label="Pesquisar relatórios">
+      <input
+        bind:this={searchInputEl}
+        id="search-relatorios-implantacao"
+        type="search"
+        class="search-input"
+        placeholder="Cliente, projeto, projetista…"
+        bind:value={searchQuery}
+        autocomplete="off"
+      />
+    </section>
+  {/if}
 
   <RelatoriosStatusQuadros relatorios={recentRelatorios} {searchQuery} />
 
@@ -79,6 +104,14 @@
     flex-shrink: 0;
   }
 
+  .dashboard-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.65rem;
+  }
+
   .btn-primary {
     padding: 0.65rem 1.1rem;
     background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
@@ -96,24 +129,21 @@
     filter: brightness(1.06);
   }
 
-  .search-section {
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
+  .btn-primary--active {
+    box-shadow:
+      0 4px 12px rgba(123, 104, 238, 0.35),
+      inset 0 0 0 2px rgba(255, 255, 255, 0.45);
   }
 
-  .search-label {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #5b21b6;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+  .search-panel {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-end;
   }
 
   .search-input {
     width: 100%;
-    max-width: 32rem;
+    max-width: 24rem;
     box-sizing: border-box;
     padding: 0.6rem 0.85rem;
     border: 1px solid #d1d5db;
