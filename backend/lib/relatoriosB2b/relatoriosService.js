@@ -31,6 +31,7 @@ function rowToListItem(row) {
     statusLabel: statusLabel(row.status),
     titulo: row.titulo || '',
     clienteProjeto: row.cliente_projeto || '',
+    cidade: row.cidade || '',
     projetista: row.projetista || '',
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -49,7 +50,7 @@ export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}
   let query = supabase
     .from(RELATORIOS_B2B_TABLE)
     .select(
-      'id, status, titulo, cliente_projeto, projetista, setor_origem, created_at, updated_at'
+      'id, status, titulo, cliente_projeto, cidade, projetista, setor_origem, created_at, updated_at'
     )
     .order('updated_at', { ascending: false })
     .limit(Math.min(Math.max(limit, 1), 100));
@@ -67,7 +68,7 @@ export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}
     const safe = term.replace(/[%_,]/g, ' ').trim();
     if (safe) {
       query = query.or(
-        `titulo.ilike.%${safe}%,cliente_projeto.ilike.%${safe}%,projetista.ilike.%${safe}%`
+        `titulo.ilike.%${safe}%,cliente_projeto.ilike.%${safe}%,cidade.ilike.%${safe}%,projetista.ilike.%${safe}%`
       );
     }
   }
@@ -128,6 +129,7 @@ export async function createRelatorio({
     status,
     titulo: meta.titulo,
     cliente_projeto: meta.cliente_projeto,
+    cidade: meta.cidade,
     projetista: meta.projetista,
     setor_origem: resolvedSetor,
     created_by: usuario || null,
@@ -176,6 +178,7 @@ export async function updateRelatorio(id, { usuario, payload, payloadTipo, statu
     const meta = extractSearchMetaFromPayload(payload);
     patch.titulo = meta.titulo;
     patch.cliente_projeto = meta.cliente_projeto;
+    patch.cidade = meta.cidade;
     patch.projetista = meta.projetista;
     const column = payloadColumnForTipo(payloadTipo);
     patch[column] = await persistFormPayloadAssets(supabase, id, payload);
