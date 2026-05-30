@@ -10,7 +10,7 @@
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
 
-  const FORMULARIO_TOOL_ID = 'formulario-engenharia';
+  const FORMULARIO_TOOL_ID = 'formulario-engenharia-implantacao';
   const RETURN_TOOL_ID = 'dashboard-implantacao';
 
   let searchQuery = '';
