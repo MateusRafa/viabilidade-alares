@@ -215,7 +215,7 @@ export function extractSearchMetaFromPayload(formData) {
   return {
     titulo: (capa.titulo || '').trim() || null,
     cliente_projeto: (capa.clienteProjeto || '').trim() || null,
+    cidade: (capa.cidade || '').trim() || null,
     projetista: (cabecalho.projetista || '').trim() || null
   };
 }
-
