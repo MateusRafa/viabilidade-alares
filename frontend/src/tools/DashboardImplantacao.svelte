@@ -1,5 +1,6 @@
 <script>
   import { onMount, tick } from 'svelte';
+  import Loading from '../Loading.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
 
   export let currentUser = '';
@@ -12,18 +13,28 @@
 
   const FORMULARIO_TOOL_ID = 'formulario-engenharia-implantacao';
   const RETURN_TOOL_ID = 'dashboard-implantacao';
+  const TRANSITION_LOADING_MS = 500;
 
   let searchQuery = '';
   let recentRelatorios = [];
   let showSearch = false;
   let searchInputEl;
+  let isTransitionLoading = false;
+  let loadingMessage = '';
 
-  function abrirFormularioPdf() {
-    if (typeof onOpenTool === 'function') {
-      onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
+  async function abrirFormularioPdf() {
+    if (isTransitionLoading) return;
+
+    if (typeof onOpenTool !== 'function') {
+      alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
       return;
     }
-    alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
+
+    isTransitionLoading = true;
+    loadingMessage = 'Abrindo Relatório de Construção…';
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
+    onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
   }
 
   async function toggleSearch() {
@@ -55,10 +66,16 @@
         class:btn-primary--active={showSearch}
         on:click={toggleSearch}
         aria-expanded={showSearch}
+        disabled={isTransitionLoading}
       >
         Pesquisar
       </button>
-      <button type="button" class="btn-primary" on:click={abrirFormularioPdf}>
+      <button
+        type="button"
+        class="btn-primary"
+        on:click={abrirFormularioPdf}
+        disabled={isTransitionLoading}
+      >
         Gerar PDF
       </button>
     </div>
@@ -80,6 +97,12 @@
 
   <RelatoriosStatusQuadros relatorios={recentRelatorios} {searchQuery} />
 </div>
+
+{#if isTransitionLoading}
+  <div class="transition-loading-layer" role="status" aria-live="polite" aria-busy="true">
+    <Loading currentMessage={loadingMessage} />
+  </div>
+{/if}
 
 <style>
   .relatorios-dashboard {
@@ -153,5 +176,20 @@
     outline: none;
     border-color: #7b68ee;
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.7;
+    cursor: wait;
+  }
+
+  .transition-loading-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+  }
+
+  .transition-loading-layer :global(.loading-container) {
+    min-height: 100%;
   }
 </style>
