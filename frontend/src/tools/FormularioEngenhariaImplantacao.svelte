@@ -35,6 +35,7 @@
   import {
     createRelatorioB2b,
     updateRelatorioB2b,
+    fetchRelatorioB2bById,
     PAYLOAD_TIPO,
     SETOR_ORIGEM,
     RELATORIO_STATUS
@@ -47,6 +48,8 @@
   export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
+  /** @type {{ relatorioId?: string, mode?: 'edit'|'print' } | null} */
+  export let toolOpenOptions = null;
 
   const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
   const TRANSITION_LOADING_MS = 2000;
@@ -112,6 +115,8 @@
   let saveSuccessMessage = '';
   /** ID do relatório já salvo no backend (atualizações seguintes usam PUT). */
   let relatorioSalvoId = null;
+  let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
+  let formReadonly = false;
   let expandedSections = {
     capa: false,
     cabecalho: false,
@@ -1054,8 +1059,43 @@
     }
   }
 
+  async function carregarRelatorioSalvo(relatorioId, mode = 'edit') {
+    const usuario = (currentUser || '').trim();
+    if (!usuario || !relatorioId) return;
+
+    try {
+      const rel = await fetchRelatorioB2bById(usuario, relatorioId, {
+        payloadTipo: PAYLOAD_TIPO.IMPLANTACAO
+      });
+
+      relatorioSalvoId = rel.id;
+      relatorioStatus = rel.status || RELATORIO_STATUS.EM_ANALISE;
+      formReadonly = relatorioStatus !== RELATORIO_STATUS.EM_ANALISE;
+
+      if (rel.formData) {
+        formData = normalizeFormData(rel.formData);
+        projetistaUserDefaultApplied = true;
+      }
+
+      applyPreviewHtml();
+      schedulePassoLayoutMeasure(true);
+
+      if (mode === 'print') {
+        if (!assetsReady) {
+          pdfError = 'Aguarde o carregamento dos recursos do PDF antes de imprimir.';
+          return;
+        }
+        await tick();
+        await flushPreviewRefresh();
+        await handleGeneratePdf();
+      }
+    } catch (err) {
+      pdfError = err?.message || 'Não foi possível carregar o relatório salvo.';
+    }
+  }
+
   async function handleSalvarPdf() {
-    if (savingPDF) return;
+    if (savingPDF || formReadonly) return;
 
     const usuario = (currentUser || '').trim();
     if (!usuario) {
@@ -1073,7 +1113,7 @@
       const saveOptions = {
         payload,
         payloadTipo: PAYLOAD_TIPO.IMPLANTACAO,
-        status: RELATORIO_STATUS.EM_ANALISE,
+        status: relatorioStatus || RELATORIO_STATUS.EM_ANALISE,
         setorOrigem: SETOR_ORIGEM.IMPLANTACAO
       };
 
@@ -1082,6 +1122,7 @@
       } else {
         const criado = await createRelatorioB2b(currentUser, saveOptions);
         relatorioSalvoId = criado.id;
+        relatorioStatus = criado.status || RELATORIO_STATUS.EM_ANALISE;
       }
 
       saveSuccessMessage =
@@ -1146,6 +1187,10 @@
       applyPreviewHtml();
       schedulePassoLayoutMeasure(true);
 
+      if (toolOpenOptions?.relatorioId) {
+        await carregarRelatorioSalvo(toolOpenOptions.relatorioId, toolOpenOptions.mode || 'edit');
+      }
+
       const onWindowPaste = async (e) => {
         if (!armedUploadTarget || imagePasteInFlight) return;
         e.preventDefault();
@@ -1179,6 +1224,7 @@
     <aside class="form-column" style="width: {formColumnWidthStyle}; flex: 0 0 auto;">
       <div
         class="form-scroll"
+        class:form-readonly={formReadonly}
         on:focusin|capture={handleFormPreviewActivity}
         on:input|capture={handleFormPreviewActivity}
       >
@@ -1651,15 +1697,22 @@
         {#if pdfError}
           <p class="pdf-error" role="alert">{pdfError}</p>
         {/if}
+        {#if formReadonly}
+          <p class="readonly-banner" role="status">
+            Este relatório não pode mais ser editado (transferido ou finalizado).
+          </p>
+        {/if}
         <div class="form-actions-buttons">
-          <button
-            type="button"
-            class="btn-generate-pdf"
-            on:click={handleSalvarPdf}
-            disabled={savingPDF || generatingPDF}
-          >
-            {savingPDF ? 'Salvando…' : 'Salvar PDF'}
-          </button>
+          {#if !formReadonly}
+            <button
+              type="button"
+              class="btn-generate-pdf"
+              on:click={handleSalvarPdf}
+              disabled={savingPDF || generatingPDF}
+            >
+              {savingPDF ? 'Salvando…' : 'Salvar PDF'}
+            </button>
+          {/if}
           <button
             type="button"
             class="btn-generate-pdf"
@@ -1805,6 +1858,11 @@
     gap: 0.75rem;
     overscroll-behavior: contain;
     box-sizing: border-box;
+  }
+
+  .form-scroll.form-readonly {
+    pointer-events: none;
+    opacity: 0.92;
   }
 
   .form-box {
@@ -2254,6 +2312,17 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+
+  .readonly-banner {
+    margin: 0 0 0.65rem;
+    padding: 0.55rem 0.75rem;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-radius: 6px;
   }
 
   .btn-generate-pdf {
