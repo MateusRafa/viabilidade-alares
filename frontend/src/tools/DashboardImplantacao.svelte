@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Loading from '../Loading.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
-  import { fetchRelatoriosB2b, SETOR_ORIGEM } from './relatoriosB2bApi.js';
+  import { fetchRelatoriosB2b, updateRelatorioB2b, SETOR_ORIGEM, RELATORIO_STATUS } from './relatoriosB2bApi.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -66,6 +66,65 @@
     await tick();
     await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
     onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
+  }
+
+  async function abrirRelatorioComLoading(item, { mode = 'edit', loadingText = 'Abrindo relatório…' } = {}) {
+    if (isTransitionLoading) return;
+
+    if (typeof onOpenTool !== 'function') {
+      alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
+      return;
+    }
+
+    isTransitionLoading = true;
+    loadingMessage = loadingText;
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
+    onOpenTool(FORMULARIO_TOOL_ID, {
+      returnTo: RETURN_TOOL_ID,
+      relatorioId: item.id,
+      mode
+    });
+  }
+
+  function handleEditarRelatorio(item) {
+    abrirRelatorioComLoading(item, { mode: 'edit', loadingText: 'Abrindo relatório…' });
+  }
+
+  function handleImprimirRelatorio(item) {
+    abrirRelatorioComLoading(item, { mode: 'print', loadingText: 'Preparando impressão…' });
+  }
+
+  async function handleTransferirRelatorio(item) {
+    const ok = confirm(
+      'Transferir este relatório para Em Implantação?\n\nApós a transferência, não será mais possível editá-lo.'
+    );
+    if (!ok) return;
+
+    try {
+      await updateRelatorioB2b(currentUser, item.id, {
+        status: RELATORIO_STATUS.EM_IMPLANTACAO
+      });
+      await carregarRelatorios();
+    } catch (err) {
+      alert(err?.message || 'Não foi possível transferir o relatório.');
+    }
+  }
+
+  async function handleFinalizarRelatorio(item) {
+    const ok = confirm(
+      'Finalizar este projeto?\n\nApós a finalização, não será mais possível editá-lo.'
+    );
+    if (!ok) return;
+
+    try {
+      await updateRelatorioB2b(currentUser, item.id, {
+        status: RELATORIO_STATUS.FINALIZADO
+      });
+      await carregarRelatorios();
+    } catch (err) {
+      alert(err?.message || 'Não foi possível finalizar o relatório.');
+    }
   }
 
   async function toggleSearch() {
@@ -133,7 +192,14 @@
     <p class="load-hint" role="status">Carregando relatórios…</p>
   {/if}
 
-  <RelatoriosStatusQuadros relatorios={recentRelatorios} {searchQuery} />
+  <RelatoriosStatusQuadros
+    relatorios={recentRelatorios}
+    {searchQuery}
+    onEditar={handleEditarRelatorio}
+    onImprimir={handleImprimirRelatorio}
+    onTransferir={handleTransferirRelatorio}
+    onFinalizar={handleFinalizarRelatorio}
+  />
 </div>
 
 {#if isTransitionLoading}
