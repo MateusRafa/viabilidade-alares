@@ -1,6 +1,7 @@
 <script>
   import { onMount, tick } from 'svelte';
   import Loading from '../Loading.svelte';
+  import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
   import { fetchRelatoriosB2b, updateRelatorioB2b, SETOR_ORIGEM, RELATORIO_STATUS } from './relatoriosB2bApi.js';
 
@@ -24,6 +25,28 @@
   let loadingMessage = '';
   let loadingRelatorios = false;
   let loadRelatoriosError = '';
+  let confirmDialogOpen = false;
+  let confirmDialogLoading = false;
+  /** @type {{ type: 'transferir' | 'finalizar', item: object } | null} */
+  let pendingConfirmAction = null;
+
+  const CONFIRM_CONFIG = {
+    transferir: {
+      title: 'Transferir para Em Implantação',
+      message:
+        'Transferir este relatório para Em Implantação?\n\nApós a transferência, não será mais possível editá-lo.',
+      confirmLabel: 'Transferir'
+    },
+    finalizar: {
+      title: 'Finalizar projeto',
+      message: 'Finalizar este projeto?\n\nApós a finalização, não será mais possível editá-lo.',
+      confirmLabel: 'Finalizar'
+    }
+  };
+
+  $: confirmDialogConfig = pendingConfirmAction
+    ? CONFIRM_CONFIG[pendingConfirmAction.type]
+    : null;
 
   async function carregarRelatorios() {
     if (!(currentUser || '').trim()) {
@@ -95,36 +118,46 @@
     abrirRelatorioComLoading(item, { mode: 'print', loadingText: 'Preparando impressão…' });
   }
 
-  async function handleTransferirRelatorio(item) {
-    const ok = confirm(
-      'Transferir este relatório para Em Implantação?\n\nApós a transferência, não será mais possível editá-lo.'
-    );
-    if (!ok) return;
+  function openConfirmDialog(type, item) {
+    pendingConfirmAction = { type, item };
+    confirmDialogOpen = true;
+  }
+
+  function closeConfirmDialog() {
+    if (confirmDialogLoading) return;
+    confirmDialogOpen = false;
+    pendingConfirmAction = null;
+  }
+
+  async function handleConfirmDialogAction() {
+    if (!pendingConfirmAction || confirmDialogLoading) return;
+
+    const { type, item } = pendingConfirmAction;
+    confirmDialogLoading = true;
 
     try {
-      await updateRelatorioB2b(currentUser, item.id, {
-        status: RELATORIO_STATUS.EM_IMPLANTACAO
-      });
+      const status =
+        type === 'transferir'
+          ? RELATORIO_STATUS.EM_IMPLANTACAO
+          : RELATORIO_STATUS.FINALIZADO;
+
+      await updateRelatorioB2b(currentUser, item.id, { status });
+      confirmDialogOpen = false;
+      pendingConfirmAction = null;
       await carregarRelatorios();
     } catch (err) {
-      alert(err?.message || 'Não foi possível transferir o relatório.');
+      alert(err?.message || 'Não foi possível concluir a ação.');
+    } finally {
+      confirmDialogLoading = false;
     }
   }
 
-  async function handleFinalizarRelatorio(item) {
-    const ok = confirm(
-      'Finalizar este projeto?\n\nApós a finalização, não será mais possível editá-lo.'
-    );
-    if (!ok) return;
+  function handleTransferirRelatorio(item) {
+    openConfirmDialog('transferir', item);
+  }
 
-    try {
-      await updateRelatorioB2b(currentUser, item.id, {
-        status: RELATORIO_STATUS.FINALIZADO
-      });
-      await carregarRelatorios();
-    } catch (err) {
-      alert(err?.message || 'Não foi possível finalizar o relatório.');
-    }
+  function handleFinalizarRelatorio(item) {
+    openConfirmDialog('finalizar', item);
   }
 
   async function toggleSearch() {
@@ -206,6 +239,19 @@
   <div class="transition-loading-layer" role="status" aria-live="polite" aria-busy="true">
     <Loading currentMessage={loadingMessage} />
   </div>
+{/if}
+
+{#if confirmDialogOpen && confirmDialogConfig}
+  <ConfirmDialog
+    open={confirmDialogOpen}
+    title={confirmDialogConfig.title}
+    message={confirmDialogConfig.message}
+    confirmLabel={confirmDialogConfig.confirmLabel}
+    cancelLabel="Cancelar"
+    loading={confirmDialogLoading}
+    on:confirm={handleConfirmDialogAction}
+    on:cancel={closeConfirmDialog}
+  />
 {/if}
 
 <style>
