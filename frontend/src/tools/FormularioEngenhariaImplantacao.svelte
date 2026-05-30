@@ -4,6 +4,7 @@
    * Alterações aqui não afetam o formulário de Projetos.
    */
   import { onMount, tick } from 'svelte';
+  import Loading from '../Loading.svelte';
   import {
     defaultFormData,
     normalizeFormData,
@@ -41,17 +42,29 @@
   export let onSettingsHover = null;
 
   const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
+  const TRANSITION_LOADING_MS = 500;
 
-  function voltarParaDashboardImplantacao(event) {
+  let isTransitionLoading = false;
+  let loadingMessage = '';
+
+  async function voltarParaDashboardImplantacao(event) {
     event?.preventDefault();
     event?.stopPropagation();
     event?.stopImmediatePropagation?.();
+
+    if (isTransitionLoading) return;
+
+    isTransitionLoading = true;
+    loadingMessage = 'Voltando ao Dashboard Implantação…';
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
 
     if (typeof onOpenTool === 'function') {
       onOpenTool(DASHBOARD_IMPLANTACAO_ID);
       return;
     }
 
+    isTransitionLoading = false;
     onBackToDashboard();
   }
 
@@ -1640,6 +1653,12 @@
   </div>
 </div>
 
+{#if isTransitionLoading}
+  <div class="transition-loading-layer" role="status" aria-live="polite" aria-busy="true">
+    <Loading currentMessage={loadingMessage} />
+  </div>
+{/if}
+
 <style>
   .formulario-engenharia-implantacao {
     width: 100%;
@@ -2299,5 +2318,15 @@
     .preview-column {
       min-height: 50vh;
     }
+  }
+
+  .transition-loading-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+  }
+
+  .transition-loading-layer :global(.loading-container) {
+    min-height: 100%;
   }
 </style>
