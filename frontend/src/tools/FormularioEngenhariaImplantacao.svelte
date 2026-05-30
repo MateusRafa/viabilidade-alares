@@ -32,6 +32,13 @@
     getPassoDescricoesAposImagem,
     renderPdfFileToPageImages
   } from './formularioPdfShared.js';
+  import {
+    createRelatorioB2b,
+    updateRelatorioB2b,
+    PAYLOAD_TIPO,
+    SETOR_ORIGEM,
+    RELATORIO_STATUS
+  } from './relatoriosB2bApi.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -100,7 +107,11 @@
 
   $: applyProjetistaDefault(currentUser);
   let generatingPDF = false;
+  let savingPDF = false;
   let pdfError = '';
+  let saveSuccessMessage = '';
+  /** ID do relatório já salvo no backend (atualizações seguintes usam PUT). */
+  let relatorioSalvoId = null;
   let expandedSections = {
     capa: false,
     cabecalho: false,
@@ -1043,6 +1054,45 @@
     }
   }
 
+  async function handleSalvarPdf() {
+    if (savingPDF) return;
+
+    const usuario = (currentUser || '').trim();
+    if (!usuario) {
+      pdfError = 'Usuário não identificado. Faça login novamente.';
+      saveSuccessMessage = '';
+      return;
+    }
+
+    savingPDF = true;
+    pdfError = '';
+    saveSuccessMessage = '';
+
+    try {
+      const payload = normalizeFormData(formData);
+      const saveOptions = {
+        payload,
+        payloadTipo: PAYLOAD_TIPO.IMPLANTACAO,
+        status: RELATORIO_STATUS.EM_ANALISE,
+        setorOrigem: SETOR_ORIGEM.IMPLANTACAO
+      };
+
+      if (relatorioSalvoId) {
+        await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
+      } else {
+        const criado = await createRelatorioB2b(currentUser, saveOptions);
+        relatorioSalvoId = criado.id;
+      }
+
+      saveSuccessMessage =
+        'Relatório salvo com sucesso. Ele aparece no Dashboard Implantação, em Em Análise.';
+    } catch (err) {
+      pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
+    } finally {
+      savingPDF = false;
+    }
+  }
+
   async function handleGeneratePdf() {
     if (!assetsReady) {
       pdfError = 'Aguarde o carregamento dos recursos do PDF antes de gerar.';
@@ -1595,17 +1645,30 @@
       </div>
 
       <footer class="form-actions">
+        {#if saveSuccessMessage}
+          <p class="pdf-success" role="status">{saveSuccessMessage}</p>
+        {/if}
         {#if pdfError}
           <p class="pdf-error" role="alert">{pdfError}</p>
         {/if}
-        <button
-          type="button"
-          class="btn-generate-pdf"
-          on:click={handleGeneratePdf}
-          disabled={generatingPDF || !assetsReady}
-        >
-          {generatingPDF ? 'Abrindo impressão...' : 'Gerar PDF'}
-        </button>
+        <div class="form-actions-buttons">
+          <button
+            type="button"
+            class="btn-generate-pdf"
+            on:click={handleSalvarPdf}
+            disabled={savingPDF || generatingPDF}
+          >
+            {savingPDF ? 'Salvando…' : 'Salvar PDF'}
+          </button>
+          <button
+            type="button"
+            class="btn-generate-pdf"
+            on:click={handleGeneratePdf}
+            disabled={generatingPDF || savingPDF || !assetsReady}
+          >
+            {generatingPDF ? 'Abrindo impressão...' : 'Gerar PDF'}
+          </button>
+        </div>
       </footer>
     </aside>
 
@@ -2187,6 +2250,12 @@
     background: #f8fafc;
   }
 
+  .form-actions-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
   .btn-generate-pdf {
     width: 100%;
     padding: 0.85rem 1.25rem;
@@ -2213,6 +2282,13 @@
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
     color: #b91c1c;
+  }
+
+  .pdf-success {
+    margin: 0 0 0.5rem;
+    font-size: 0.8rem;
+    color: #047857;
+    line-height: 1.4;
   }
 
   .passo-layout-warning {
