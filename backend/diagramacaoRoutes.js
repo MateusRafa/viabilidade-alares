@@ -7,6 +7,7 @@ import path from 'path';
 import multer from 'multer';
 import { analyzePdfFile } from './lib/diagramacao/analyzePdf.js';
 import { classifyDiagramacao } from './lib/diagramacao/classify.js';
+import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 
 const jobs = new Map();
 const MAX_FILES = 200;
@@ -98,6 +99,9 @@ export function registerDiagramacaoRoutes(app, { DATA_DIR }) {
   });
 
   console.log('✅ Rotas de diagramação registradas (/api/diagramacao/*)');
+
+  registerRelatoriosB2bRoutes(app);
+  console.log('✅ [RelatoriosB2B] Rotas registradas (/api/relatorios-b2b/*)');
 }
 
 async function processJob(job, files, diagDir) {
