@@ -39,8 +39,15 @@
         limit: 100
       });
     } catch (err) {
-      loadRelatoriosError = err?.message || 'Não foi possível carregar os relatórios.';
-      recentRelatorios = [];
+      const msg = err?.message || '';
+      // Backend antigo sem a API — não alarmar o usuário; lista fica vazia
+      if (msg.includes('Rota não encontrada') || msg.includes('404')) {
+        recentRelatorios = [];
+        loadRelatoriosError = '';
+      } else {
+        loadRelatoriosError = msg || 'Não foi possível carregar os relatórios.';
+        recentRelatorios = [];
+      }
     } finally {
       loadingRelatorios = false;
     }
