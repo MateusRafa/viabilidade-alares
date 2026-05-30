@@ -19,50 +19,19 @@
     if (loading) return;
     dispatch('confirm');
   }
-
-  function handleOverlayKeydown(event) {
-    if (event.key === 'Escape') handleCancel();
-  }
-
-  function handleOverlayClick(event) {
-    if (event.target === event.currentTarget) handleCancel();
-  }
-
-  function handleWindowKeydown(event) {
-    if (open && event.key === 'Escape') handleCancel();
-  }
 </script>
 
-<svelte:window on:keydown={handleWindowKeydown} />
-
 {#if open}
-  <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
-  <div
-    class="confirm-overlay"
-    role="presentation"
-    on:click={handleOverlayClick}
-    on:keydown={handleOverlayKeydown}
-  >
+  <div class="confirm-overlay" role="presentation">
     <div
       class="confirm-box"
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
       aria-describedby="confirm-dialog-message"
-      on:click|stopPropagation
-      on:keydown|stopPropagation
     >
       <header class="confirm-header">
         <h2 id="confirm-dialog-title">{title}</h2>
-        <button
-          type="button"
-          class="confirm-close"
-          aria-label="Fechar"
-          disabled={loading}
-          on:click={handleCancel}
-        >
-          ×
-        </button>
       </header>
 
       <div class="confirm-body">
@@ -115,7 +84,7 @@
 
   .confirm-box {
     width: 100%;
-    max-width: 420px;
+    max-width: 500px;
     background: white;
     border-radius: 12px;
     overflow: hidden;
@@ -137,54 +106,26 @@
   }
 
   .confirm-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    padding: 1rem 1.15rem;
+    padding: 1.15rem 1.35rem;
     background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
     color: white;
   }
 
   .confirm-header h2 {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 1.12rem;
     font-weight: 700;
     line-height: 1.35;
   }
 
-  .confirm-close {
-    flex-shrink: 0;
-    width: 2rem;
-    height: 2rem;
-    padding: 0;
-    border: none;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.15);
-    color: white;
-    font-size: 1.35rem;
-    line-height: 1;
-    cursor: pointer;
-    transition: background 0.15s ease;
-  }
-
-  .confirm-close:hover:not(:disabled) {
-    background: rgba(255, 255, 255, 0.28);
-  }
-
-  .confirm-close:disabled {
-    opacity: 0.6;
-    cursor: wait;
-  }
-
   .confirm-body {
-    padding: 1.25rem 1.15rem 0.5rem;
+    padding: 1.4rem 1.35rem 0.65rem;
   }
 
   .confirm-body p {
     margin: 0;
-    font-size: 0.95rem;
-    line-height: 1.55;
+    font-size: 1rem;
+    line-height: 1.6;
     color: #374151;
     white-space: pre-line;
   }
@@ -193,15 +134,15 @@
     display: flex;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 0.65rem;
-    padding: 1rem 1.15rem 1.15rem;
+    gap: 0.75rem;
+    padding: 1rem 1.35rem 1.35rem;
   }
 
   .btn-cancel,
   .btn-confirm {
-    padding: 0.65rem 1.1rem;
+    padding: 0.72rem 1.25rem;
     border-radius: 8px;
-    font-size: 0.9rem;
+    font-size: 0.92rem;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
