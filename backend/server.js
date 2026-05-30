@@ -9010,7 +9010,7 @@ app.post('/api/vi-ala/upload-base', upload.single('file'), async (req, res) => {
   }
 });
 
-registerDiagramacaoRoutes(app, { DATA_DIR });
+await registerDiagramacaoRoutes(app, { DATA_DIR });
 
 // Rota catch-all para rotas não encontradas (sempre retorna JSON)
 app.use((req, res) => {
