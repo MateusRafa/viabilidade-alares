@@ -35,8 +35,25 @@
   export let currentUser = '';
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
+  /** Navega para outra ferramenta do portal (ex.: dashboard-implantacao). */
+  export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
+
+  const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
+
+  function voltarParaDashboardImplantacao(event) {
+    event?.preventDefault();
+    event?.stopPropagation();
+    event?.stopImmediatePropagation?.();
+
+    if (typeof onOpenTool === 'function') {
+      onOpenTool(DASHBOARD_IMPLANTACAO_ID);
+      return;
+    }
+
+    onBackToDashboard();
+  }
 
   let projetistaUserDefaultApplied = false;
 
@@ -1042,8 +1059,16 @@
     }
 
     let removeWindowPaste = null;
+    let removeBackCapture = null;
 
     if (typeof window !== 'undefined') {
+      const backBtn = document.querySelector('.app-container header .back-button');
+      if (backBtn) {
+        const onBackCapture = (event) => voltarParaDashboardImplantacao(event);
+        backBtn.addEventListener('click', onBackCapture, true);
+        removeBackCapture = () => backBtn.removeEventListener('click', onBackCapture, true);
+      }
+
       loadFormColumnWidthPreference();
       const origin = window.location.origin;
       const [logo, ondas, assinatura] = await Promise.all([
@@ -1075,6 +1100,7 @@
     }
 
     return () => {
+      removeBackCapture?.();
       removeWindowPaste?.();
       disarmImagePaste();
       stopResizeFormColumn();
