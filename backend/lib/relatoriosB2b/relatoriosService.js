@@ -3,7 +3,8 @@ import supabase, { isSupabaseAvailable } from '../../supabase.js';
 import {
   RELATORIOS_B2B_TABLE,
   RELATORIO_STATUS,
-  PAYLOAD_TIPO
+  PAYLOAD_TIPO,
+  SETOR_ORIGEM
 } from './constants.js';
 import {
   persistFormPayloadAssets,
@@ -42,16 +43,20 @@ export function statusLabel(status) {
   return 'Em Análise';
 }
 
-export async function listRelatorios({ status, q, limit = 50 } = {}) {
+export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}) {
   assertSupabase();
 
   let query = supabase
     .from(RELATORIOS_B2B_TABLE)
     .select(
-      'id, status, titulo, cliente_projeto, projetista, created_at, updated_at'
+      'id, status, titulo, cliente_projeto, projetista, setor_origem, created_at, updated_at'
     )
     .order('updated_at', { ascending: false })
     .limit(Math.min(Math.max(limit, 1), 100));
+
+  if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+    query = query.eq('setor_origem', setorOrigem);
+  }
 
   if (status && Object.values(RELATORIO_STATUS).includes(status)) {
     query = query.eq('status', status);
@@ -101,7 +106,8 @@ export async function createRelatorio({
   usuario,
   payload,
   payloadTipo = PAYLOAD_TIPO.PROJETOS,
-  status = RELATORIO_STATUS.EM_ANALISE
+  status = RELATORIO_STATUS.EM_ANALISE,
+  setorOrigem
 }) {
   assertSupabase();
 
@@ -110,12 +116,20 @@ export async function createRelatorio({
   const persisted = await persistFormPayloadAssets(supabase, id, payload);
   const column = payloadColumnForTipo(payloadTipo);
 
+  const resolvedSetor =
+    setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)
+      ? setorOrigem
+      : payloadTipo === PAYLOAD_TIPO.IMPLANTACAO
+        ? SETOR_ORIGEM.IMPLANTACAO
+        : SETOR_ORIGEM.PROJETOS;
+
   const row = {
     id,
     status,
     titulo: meta.titulo,
     cliente_projeto: meta.cliente_projeto,
     projetista: meta.projetista,
+    setor_origem: resolvedSetor,
     created_by: usuario || null,
     updated_by: usuario || null,
     [column]: persisted
