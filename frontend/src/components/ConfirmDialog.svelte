@@ -84,9 +84,9 @@
 
   .confirm-box {
     width: 100%;
-    max-width: 500px;
+    max-width: 580px;
     background: white;
-    border-radius: 12px;
+    border-radius: 14px;
     overflow: hidden;
     box-shadow:
       0 20px 50px rgba(0, 0, 0, 0.25),
@@ -106,26 +106,26 @@
   }
 
   .confirm-header {
-    padding: 1.15rem 1.35rem;
+    padding: 1.35rem 1.6rem;
     background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
     color: white;
   }
 
   .confirm-header h2 {
     margin: 0;
-    font-size: 1.12rem;
+    font-size: 1.2rem;
     font-weight: 700;
     line-height: 1.35;
   }
 
   .confirm-body {
-    padding: 1.4rem 1.35rem 0.65rem;
+    padding: 1.65rem 1.6rem 0.85rem;
   }
 
   .confirm-body p {
     margin: 0;
-    font-size: 1rem;
-    line-height: 1.6;
+    font-size: 1.05rem;
+    line-height: 1.65;
     color: #374151;
     white-space: pre-line;
   }
@@ -134,15 +134,15 @@
     display: flex;
     justify-content: flex-end;
     flex-wrap: wrap;
-    gap: 0.75rem;
-    padding: 1rem 1.35rem 1.35rem;
+    gap: 0.85rem;
+    padding: 1.15rem 1.6rem 1.5rem;
   }
 
   .btn-cancel,
   .btn-confirm {
-    padding: 0.72rem 1.25rem;
+    padding: 0.8rem 1.4rem;
     border-radius: 8px;
-    font-size: 0.92rem;
+    font-size: 0.95rem;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
