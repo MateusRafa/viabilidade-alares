@@ -15,12 +15,13 @@ async function parseJsonResponse(res) {
   return data;
 }
 
-/** Lista relatórios para os dashboards (filtro por status e busca). */
-export async function fetchRelatoriosB2b(currentUser, { status, q, limit } = {}) {
+/** Lista relatórios para os dashboards (filtro por status, setor e busca). */
+export async function fetchRelatoriosB2b(currentUser, { status, q, limit, setorOrigem } = {}) {
   const params = new URLSearchParams();
   if (status) params.set('status', status);
   if (q) params.set('q', q);
   if (limit) params.set('limit', String(limit));
+  if (setorOrigem) params.set('setorOrigem', setorOrigem);
 
   const qs = params.toString();
   const url = getApiUrl(`/api/relatorios-b2b${qs ? `?${qs}` : ''}`);
@@ -43,12 +44,12 @@ export async function fetchRelatorioB2bById(currentUser, id, { payloadTipo = 'pr
 /** Cria relatório novo (payload = formData do front). */
 export async function createRelatorioB2b(
   currentUser,
-  { payload, payloadTipo = 'projetos', status = 'em_analise' }
+  { payload, payloadTipo = 'projetos', status = 'em_analise', setorOrigem }
 ) {
   const res = await fetch(getApiUrl('/api/relatorios-b2b'), {
     method: 'POST',
     headers: authHeaders(currentUser),
-    body: JSON.stringify({ payload, payloadTipo, status })
+    body: JSON.stringify({ payload, payloadTipo, status, setorOrigem })
   });
   const data = await parseJsonResponse(res);
   return data.relatorio;
@@ -76,6 +77,11 @@ export const RELATORIO_STATUS = {
 };
 
 export const PAYLOAD_TIPO = {
+  PROJETOS: 'projetos',
+  IMPLANTACAO: 'implantacao'
+};
+
+export const SETOR_ORIGEM = {
   PROJETOS: 'projetos',
   IMPLANTACAO: 'implantacao'
 };
