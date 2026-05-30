@@ -88,6 +88,8 @@
   let currentTool = null; // ID da ferramenta atual
   /** Ao voltar da ferramenta filha, reabre esta ferramenta em vez do portal (ex.: dashboard-implantacao). */
   let toolReturnTo = null;
+  /** Opções ao abrir ferramenta filha (ex.: relatorioId para editar/imprimir). */
+  let toolOpenOptions = null;
   let toolSettingsHandler = null; // Função de configurações da ferramenta atual
   let toolSettingsHoverHandler = null; // Função de pré-carregamento no hover da engrenagem
   let broadcastChannel = null; // Canal de comunicação entre abas
@@ -523,6 +525,7 @@
     // Definir ferramenta atual
     currentTool = toolId;
     toolReturnTo = null;
+    toolOpenOptions = null;
     currentView = 'tool';
     
     // Cada ferramenta gerencia sua própria inicialização através do onMount do componente
@@ -532,7 +535,7 @@
   /**
    * Abre outra ferramenta a partir de uma ferramenta já aberta (ex.: Dashboard → Formulário).
    * @param {string} toolId
-   * @param {{ returnTo?: string }} [options] — returnTo: id da ferramenta ao usar "voltar"
+   * @param {{ returnTo?: string, relatorioId?: string, mode?: 'edit'|'print' }} [options]
    */
   function handleOpenTool(toolId, options = {}) {
     const tool = getToolById(toolId);
@@ -556,6 +559,10 @@
     } else {
       toolReturnTo = returnTo || null;
     }
+
+    toolOpenOptions = options.relatorioId
+      ? { relatorioId: options.relatorioId, mode: options.mode || 'edit' }
+      : null;
 
     currentTool = toolId;
     currentView = 'tool';
@@ -624,6 +631,7 @@
         if (returnTool?.available && returnTool.component) {
           currentTool = toolReturnTo;
           toolReturnTo = null;
+          toolOpenOptions = null;
           currentView = 'tool';
           toolSettingsHandler = null;
           toolSettingsHoverHandler = null;
@@ -631,6 +639,7 @@
         }
       }
       toolReturnTo = null;
+      toolOpenOptions = null;
       // Comportamento normal: voltar ao Dashboard na mesma aba
       currentView = 'dashboard';
       currentTool = null;
@@ -967,6 +976,7 @@
           onOpenTool={handleOpenTool}
           onSettingsRequest={registerToolSettings}
           onSettingsHover={registerToolSettingsHover}
+          toolOpenOptions={toolOpenOptions}
         />
       </ToolWrapper>
     {:else}
