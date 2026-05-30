@@ -13,7 +13,7 @@
 
   const FORMULARIO_TOOL_ID = 'formulario-engenharia-implantacao';
   const RETURN_TOOL_ID = 'dashboard-implantacao';
-  const TRANSITION_LOADING_MS = 500;
+  const TRANSITION_LOADING_MS = 2000;
 
   let searchQuery = '';
   let recentRelatorios = [];
