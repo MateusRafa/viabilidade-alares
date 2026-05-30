@@ -167,6 +167,12 @@ export async function updateRelatorio(id, { usuario, payload, payloadTipo, statu
   }
 
   if (payload && payloadTipo) {
+    if (existing.status !== RELATORIO_STATUS.EM_ANALISE) {
+      const err = new Error('Relatório não pode ser editado neste status.');
+      err.statusCode = 403;
+      throw err;
+    }
+
     const meta = extractSearchMetaFromPayload(payload);
     patch.titulo = meta.titulo;
     patch.cliente_projeto = meta.cliente_projeto;
