@@ -9012,21 +9012,6 @@ app.post('/api/vi-ala/upload-base', upload.single('file'), async (req, res) => {
 
 registerDiagramacaoRoutes(app, { DATA_DIR });
 
-async function setupRelatoriosB2bRoutes() {
-  try {
-    const { registerRelatoriosB2bRoutes } = await import('./relatoriosB2bRoutes.js');
-    registerRelatoriosB2bRoutes(app);
-    console.log('✅ [RelatoriosB2B] Rotas registradas');
-  } catch (err) {
-    console.warn(
-      '⚠️ [RelatoriosB2B] Rotas não carregadas — confira se relatoriosB2bRoutes.js e lib/relatoriosB2b/ foram enviados no deploy:',
-      err.message
-    );
-  }
-}
-
-await setupRelatoriosB2bRoutes();
-
 // Rota catch-all para rotas não encontradas (sempre retorna JSON)
 app.use((req, res) => {
   console.log(`⚠️ [404] Rota não encontrada: ${req.method} ${req.path}`);
