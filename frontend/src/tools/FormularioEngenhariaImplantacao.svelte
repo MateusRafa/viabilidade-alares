@@ -42,7 +42,7 @@
   export let onSettingsHover = null;
 
   const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
-  const TRANSITION_LOADING_MS = 500;
+  const TRANSITION_LOADING_MS = 2000;
 
   let isTransitionLoading = false;
   let loadingMessage = '';
