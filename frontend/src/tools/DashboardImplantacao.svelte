@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Loading from '../Loading.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
+  import { fetchRelatoriosB2b, SETOR_ORIGEM } from './relatoriosB2bApi.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -21,6 +22,29 @@
   let searchInputEl;
   let isTransitionLoading = false;
   let loadingMessage = '';
+  let loadingRelatorios = false;
+  let loadRelatoriosError = '';
+
+  async function carregarRelatorios() {
+    if (!(currentUser || '').trim()) {
+      recentRelatorios = [];
+      return;
+    }
+
+    loadingRelatorios = true;
+    loadRelatoriosError = '';
+    try {
+      recentRelatorios = await fetchRelatoriosB2b(currentUser, {
+        setorOrigem: SETOR_ORIGEM.IMPLANTACAO,
+        limit: 100
+      });
+    } catch (err) {
+      loadRelatoriosError = err?.message || 'Não foi possível carregar os relatórios.';
+      recentRelatorios = [];
+    } finally {
+      loadingRelatorios = false;
+    }
+  }
 
   async function abrirFormularioPdf() {
     if (isTransitionLoading) return;
@@ -54,6 +78,7 @@
     if (onSettingsHover && typeof onSettingsHover === 'function') {
       onSettingsHover(() => {});
     }
+    carregarRelatorios();
   });
 </script>
 
@@ -93,6 +118,12 @@
         autocomplete="off"
       />
     </section>
+  {/if}
+
+  {#if loadRelatoriosError}
+    <p class="load-error" role="alert">{loadRelatoriosError}</p>
+  {:else if loadingRelatorios}
+    <p class="load-hint" role="status">Carregando relatórios…</p>
   {/if}
 
   <RelatoriosStatusQuadros relatorios={recentRelatorios} {searchQuery} />
@@ -176,6 +207,20 @@
     outline: none;
     border-color: #7b68ee;
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
+  }
+
+  .load-error {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #b91c1c;
+    flex-shrink: 0;
+  }
+
+  .load-hint {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #6b7280;
+    flex-shrink: 0;
   }
 
   .btn-primary:disabled {
