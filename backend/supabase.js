@@ -102,7 +102,7 @@ export async function checkTables() {
   try {
     console.log('🔍 [Supabase] Verificando tabelas...');
     
-    const tables = ['ctos', 'projetistas', 'tabulacoes', 'vi_ala', 'upload_history'];
+    const tables = ['ctos', 'projetistas', 'tabulacoes', 'vi_ala', 'upload_history', 'relatorios_b2b'];
     const results = {};
     
     for (const table of tables) {
