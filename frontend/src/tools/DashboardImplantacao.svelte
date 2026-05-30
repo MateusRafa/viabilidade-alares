@@ -179,7 +179,7 @@
         id="search-relatorios-implantacao"
         type="search"
         class="search-input"
-        placeholder="Cliente, projeto, projetista…"
+        placeholder="Cliente, projeto, cidade, projetista…"
         bind:value={searchQuery}
         autocomplete="off"
       />
