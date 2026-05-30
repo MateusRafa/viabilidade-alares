@@ -139,6 +139,11 @@
           <ul class="relatorio-list">
             {#each section.items as item (item.id)}
               <li class="relatorio-card">
+                <div class="relatorio-card-main">
+                  <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
+                  <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
+                </div>
+
                 <div class="relatorio-card-actions">
                   <button
                     type="button"
@@ -218,11 +223,6 @@
                         </button>
                     </div>
                   {/if}
-                </div>
-
-                <div class="relatorio-card-main">
-                  <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
-                  <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
                 </div>
               </li>
             {/each}
@@ -363,7 +363,7 @@
 
   .relatorio-card {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
     gap: 0.55rem;
     padding: 0.65rem 0.75rem;
@@ -385,9 +385,10 @@
 
   .relatorio-card-actions {
     position: relative;
-    grid-column: 1;
+    grid-column: 2;
     grid-row: 1;
     flex-shrink: 0;
+    justify-self: end;
   }
 
   .btn-card-menu {
@@ -423,7 +424,8 @@
   .card-menu {
     position: absolute;
     top: calc(100% + 4px);
-    left: 0;
+    right: 0;
+    left: auto;
     z-index: 50;
     min-width: 9.5rem;
     padding: 0.35rem 0;
@@ -480,7 +482,7 @@
     flex-direction: column;
     gap: 0.2rem;
     min-width: 0;
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 1;
   }
 
