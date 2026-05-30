@@ -1,5 +1,5 @@
 <script>
-  /** @type {Array<{ id: string, titulo?: string, clienteProjeto?: string, status: string, statusLabel?: string }>} */
+  /** @type {Array<{ id: string, titulo?: string, clienteProjeto?: string, cidade?: string, status: string, statusLabel?: string }>} */
   export let relatorios = [];
   export let searchQuery = '';
   /** @type {(item: object) => void} */
@@ -36,7 +36,7 @@
     const q = (query || '').trim().toLowerCase();
     if (!q) return items;
     return items.filter((item) => {
-      const haystack = [item.titulo, item.clienteProjeto, item.projetista, item.statusLabel]
+      const haystack = [item.titulo, item.clienteProjeto, item.cidade, item.projetista, item.statusLabel]
         .filter(Boolean)
         .join(' ')
         .toLowerCase();
@@ -140,8 +140,8 @@
             {#each section.items as item (item.id)}
               <li class="relatorio-card">
                 <div class="relatorio-card-main">
-                  <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
-                  <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
+                  <span class="relatorio-titulo">{item.clienteProjeto || 'Sem cliente / projeto'}</span>
+                  <span class="relatorio-meta">{item.cidade || '—'}</span>
                 </div>
 
                 <div class="relatorio-card-actions">
