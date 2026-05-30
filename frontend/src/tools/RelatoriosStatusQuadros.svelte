@@ -139,21 +139,20 @@
           <ul class="relatorio-list">
             {#each section.items as item (item.id)}
               <li class="relatorio-card">
-                <div class="relatorio-card-row">
-                  <div class="relatorio-card-actions">
-                    <button
-                      type="button"
-                      class="btn-card-menu"
-                      aria-label="Ações do relatório"
-                      aria-haspopup="menu"
-                      aria-expanded={openMenuId === item.id}
-                      on:click={(e) => toggleMenu(item.id, e)}
-                    >
-                      <span class="btn-card-menu-icon" aria-hidden="true">⋮</span>
-                    </button>
+                <div class="relatorio-card-actions">
+                  <button
+                    type="button"
+                    class="btn-card-menu"
+                    aria-label="Ações do relatório"
+                    aria-haspopup="menu"
+                    aria-expanded={openMenuId === item.id}
+                    on:click={(e) => toggleMenu(item.id, e)}
+                  >
+                    <span class="btn-card-menu-icon" aria-hidden="true">⋮</span>
+                  </button>
 
-                    {#if openMenuId === item.id}
-                      <div class="card-menu" role="menu" on:click|stopPropagation>
+                  {#if openMenuId === item.id}
+                    <div class="card-menu" role="menu" on:click|stopPropagation>
                         {#if podeEditar(item)}
                           <button
                             type="button"
@@ -217,14 +216,13 @@
                         >
                           Imprimir
                         </button>
-                      </div>
-                    {/if}
-                  </div>
+                    </div>
+                  {/if}
+                </div>
 
-                  <div class="relatorio-card-main">
-                    <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
-                    <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
-                  </div>
+                <div class="relatorio-card-main">
+                  <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
+                  <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
                 </div>
               </li>
             {/each}
@@ -364,6 +362,10 @@
   }
 
   .relatorio-card {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: 0.55rem;
     padding: 0.65rem 0.75rem;
     border-radius: 8px;
     border: 1px solid #e5e7eb;
@@ -381,15 +383,10 @@
     box-shadow: 0 2px 8px rgba(123, 104, 238, 0.08);
   }
 
-  .relatorio-card-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.5rem;
-    min-width: 0;
-  }
-
   .relatorio-card-actions {
     position: relative;
+    grid-column: 1;
+    grid-row: 1;
     flex-shrink: 0;
   }
 
@@ -483,7 +480,8 @@
     flex-direction: column;
     gap: 0.2rem;
     min-width: 0;
-    flex: 1;
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .relatorio-titulo {
