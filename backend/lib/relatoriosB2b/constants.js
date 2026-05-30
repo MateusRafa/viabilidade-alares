@@ -12,4 +12,9 @@ export const PAYLOAD_TIPO = {
   IMPLANTACAO: 'implantacao'
 };
 
+export const SETOR_ORIGEM = {
+  PROJETOS: 'projetos',
+  IMPLANTACAO: 'implantacao'
+};
+
 export const SIGNED_URL_TTL_SEC = 60 * 60;
