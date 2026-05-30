@@ -2,6 +2,14 @@
   /** @type {Array<{ id: string, titulo?: string, clienteProjeto?: string, status: string, statusLabel?: string }>} */
   export let relatorios = [];
   export let searchQuery = '';
+  /** @type {(item: object) => void} */
+  export let onEditar = null;
+  /** @type {(item: object) => void} */
+  export let onImprimir = null;
+  /** @type {(item: object) => void} */
+  export let onTransferir = null;
+  /** @type {(item: object) => void} */
+  export let onFinalizar = null;
 
   const STATUS_SECTIONS = [
     {
@@ -21,6 +29,9 @@
     }
   ];
 
+  let openMenuId = null;
+  let transferSubmenuOpen = false;
+
   function filterRelatorios(items, query) {
     const q = (query || '').trim().toLowerCase();
     if (!q) return items;
@@ -33,6 +44,62 @@
     });
   }
 
+  function podeEditar(item) {
+    return item.status === 'em_analise';
+  }
+
+  function podeTransferirOuFinalizar(item) {
+    return item.status === 'em_analise';
+  }
+
+  function podeFinalizarDireto(item) {
+    return item.status === 'em_implantacao';
+  }
+
+  function toggleMenu(itemId, event) {
+    event?.stopPropagation();
+    if (openMenuId === itemId) {
+      closeMenu();
+      return;
+    }
+    openMenuId = itemId;
+    transferSubmenuOpen = false;
+  }
+
+  function closeMenu() {
+    openMenuId = null;
+    transferSubmenuOpen = false;
+  }
+
+  function toggleTransferSubmenu(event) {
+    event?.stopPropagation();
+    transferSubmenuOpen = !transferSubmenuOpen;
+  }
+
+  function handleEditar(item, event) {
+    event?.stopPropagation();
+    closeMenu();
+    onEditar?.(item);
+  }
+
+  function handleImprimir(item, event) {
+    event?.stopPropagation();
+    closeMenu();
+    onImprimir?.(item);
+  }
+
+  function handleTransferir(item, event) {
+    event?.stopPropagation();
+    closeMenu();
+    onTransferir?.(item);
+  }
+
+  function handleFinalizar(item, event) {
+    event?.stopPropagation();
+    closeMenu();
+    onFinalizar?.(item);
+  }
+
   $: filteredRelatorios = filterRelatorios(relatorios, searchQuery);
   $: sectionsWithItems = STATUS_SECTIONS.map((section) => ({
     ...section,
@@ -40,6 +107,8 @@
   }));
   $: hasSearch = !!(searchQuery || '').trim();
 </script>
+
+<svelte:window on:click={closeMenu} />
 
 <div class="status-quadros-grid" role="region" aria-label="Relatórios por status">
   {#each sectionsWithItems as section (section.status)}
@@ -70,9 +139,92 @@
           <ul class="relatorio-list">
             {#each section.items as item (item.id)}
               <li class="relatorio-card">
-                <div class="relatorio-card-main">
-                  <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
-                  <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
+                <div class="relatorio-card-row">
+                  <div class="relatorio-card-actions">
+                    <button
+                      type="button"
+                      class="btn-card-menu"
+                      aria-label="Ações do relatório"
+                      aria-haspopup="menu"
+                      aria-expanded={openMenuId === item.id}
+                      on:click={(e) => toggleMenu(item.id, e)}
+                    >
+                      <span class="btn-card-menu-icon" aria-hidden="true">⋮</span>
+                    </button>
+
+                    {#if openMenuId === item.id}
+                      <div class="card-menu" role="menu" on:click|stopPropagation>
+                        {#if podeEditar(item)}
+                          <button
+                            type="button"
+                            class="card-menu-item"
+                            role="menuitem"
+                            on:click={(e) => handleEditar(item, e)}
+                          >
+                            Editar
+                          </button>
+                        {/if}
+
+                        {#if podeTransferirOuFinalizar(item)}
+                          <div class="card-menu-group">
+                            <button
+                              type="button"
+                              class="card-menu-item card-menu-item--has-sub"
+                              role="menuitem"
+                              aria-expanded={transferSubmenuOpen}
+                              on:click={toggleTransferSubmenu}
+                            >
+                              Transferir
+                              <span class="sub-chevron" aria-hidden="true">›</span>
+                            </button>
+                            {#if transferSubmenuOpen}
+                              <div class="card-submenu" role="menu">
+                                <button
+                                  type="button"
+                                  class="card-menu-item card-menu-item--sub"
+                                  role="menuitem"
+                                  on:click={(e) => handleTransferir(item, e)}
+                                >
+                                  Transferir
+                                </button>
+                                <button
+                                  type="button"
+                                  class="card-menu-item card-menu-item--sub"
+                                  role="menuitem"
+                                  on:click={(e) => handleFinalizar(item, e)}
+                                >
+                                  Finalizar
+                                </button>
+                              </div>
+                            {/if}
+                          </div>
+                        {:else if podeFinalizarDireto(item)}
+                          <button
+                            type="button"
+                            class="card-menu-item"
+                            role="menuitem"
+                            on:click={(e) => handleFinalizar(item, e)}
+                          >
+                            Finalizar
+                          </button>
+                        {/if}
+
+                        <button
+                          type="button"
+                          class="card-menu-item"
+                          role="menuitem"
+                          on:click={(e) => handleImprimir(item, e)}
+                        >
+                          Imprimir
+                        </button>
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="relatorio-card-main">
+                    <span class="relatorio-titulo">{item.titulo || 'Sem título'}</span>
+                    <span class="relatorio-meta">{item.clienteProjeto || '—'}</span>
+                  </div>
                 </div>
               </li>
             {/each}
@@ -212,12 +364,11 @@
   }
 
   .relatorio-card {
-    padding: 0.75rem 0.85rem;
+    padding: 0.65rem 0.75rem;
     border-radius: 8px;
     border: 1px solid #e5e7eb;
     background: #fafbff;
     margin-bottom: 0.45rem;
-    cursor: default;
     transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
 
@@ -230,11 +381,109 @@
     box-shadow: 0 2px 8px rgba(123, 104, 238, 0.08);
   }
 
+  .relatorio-card-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .relatorio-card-actions {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .btn-card-menu {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: white;
+    color: #4b5563;
+    cursor: pointer;
+    line-height: 1;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .btn-card-menu:hover,
+  .btn-card-menu[aria-expanded='true'] {
+    background: #f5f3ff;
+    border-color: rgba(123, 104, 238, 0.45);
+    color: #5b21b6;
+  }
+
+  .btn-card-menu-icon {
+    font-size: 1.1rem;
+    font-weight: 700;
+    line-height: 1;
+    transform: translateY(-1px);
+  }
+
+  .card-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 50;
+    min-width: 9.5rem;
+    padding: 0.35rem 0;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  }
+
+  .card-menu-group {
+    position: relative;
+  }
+
+  .card-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0.5rem 0.85rem;
+    border: none;
+    background: transparent;
+    color: #1f2937;
+    font-size: 0.82rem;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .card-menu-item:hover {
+    background: #f5f3ff;
+    color: #5b21b6;
+  }
+
+  .card-menu-item--has-sub .sub-chevron {
+    margin-left: 0.75rem;
+    color: #9ca3af;
+    font-size: 0.95rem;
+  }
+
+  .card-submenu {
+    padding: 0.25rem 0 0.35rem;
+    border-top: 1px solid #f3f4f6;
+    background: #fafbff;
+  }
+
+  .card-menu-item--sub {
+    padding-left: 1.25rem;
+    font-size: 0.8rem;
+  }
+
   .relatorio-card-main {
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
     min-width: 0;
+    flex: 1;
   }
 
   .relatorio-titulo {
