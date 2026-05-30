@@ -56,6 +56,16 @@ const portalToolsMeta = [
     available: true
   },
   {
+    id: 'formulario-engenharia-implantacao',
+    title: 'Relatório de Construção - Implantação',
+    description:
+      'Formulário de relatório de construção para o setor de Implantação (cópia independente do formulário de Projetos)',
+    icon: '🏗️',
+    color: '#0D9488',
+    available: true,
+    portalVisible: false
+  },
+  {
     id: 'dashboard-projetos',
     title: 'Dashboard Projetos',
     description: 'Gerenciar relatórios técnicos B2B do setor de Projetos',
@@ -92,6 +102,7 @@ const TOOL_COMPONENT_FILES = {
   'mapa-consulta': './MapaConsulta.svelte',
   'dashboard-censup': './DashboardCensup.svelte',
   'formulario-engenharia': './FormularioEngenharia.svelte',
+  'formulario-engenharia-implantacao': './FormularioEngenhariaImplantacao.svelte',
   'dashboard-projetos': './DashboardProjetos.svelte',
   'dashboard-implantacao': './DashboardImplantacao.svelte',
   'ia-auditoria-diagramacao': './IaAuditoriaDiagramacao.svelte'
@@ -156,7 +167,9 @@ export function getToolById(toolId) {
  * Retorna todas as ferramentas disponíveis
  */
 export function getAvailableTools() {
-  return toolsRegistry.filter((tool) => tool.available && tool.component);
+  return toolsRegistry.filter(
+    (tool) => tool.available && tool.component && tool.portalVisible !== false
+  );
 }
 
 /**
