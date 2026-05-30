@@ -395,22 +395,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 1.75rem;
-    height: 1.75rem;
+    width: 1.5rem;
+    height: 1.5rem;
     padding: 0;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    background: white;
-    color: #4b5563;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: #6b7280;
     cursor: pointer;
     line-height: 1;
-    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    transition: color 0.15s ease;
   }
 
   .btn-card-menu:hover,
   .btn-card-menu[aria-expanded='true'] {
-    background: #f5f3ff;
-    border-color: rgba(123, 104, 238, 0.45);
+    background: transparent;
     color: #5b21b6;
   }
 
