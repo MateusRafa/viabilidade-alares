@@ -38,7 +38,8 @@
     fetchRelatorioB2bById,
     PAYLOAD_TIPO,
     SETOR_ORIGEM,
-    RELATORIO_STATUS
+    RELATORIO_STATUS,
+    notifyRelatoriosB2bAtualizados
   } from './relatoriosB2bApi.js';
 
   export let currentUser = '';
@@ -70,7 +71,7 @@
     await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
 
     if (typeof onOpenTool === 'function') {
-      onOpenTool(DASHBOARD_IMPLANTACAO_ID);
+      onOpenTool(DASHBOARD_IMPLANTACAO_ID, { refreshRelatorios: true });
       return;
     }
 
@@ -1127,6 +1128,7 @@
 
       saveSuccessMessage =
         'Relatório salvo com sucesso. Ele aparece no Dashboard Implantação, em Em Análise.';
+      notifyRelatoriosB2bAtualizados();
     } catch (err) {
       pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
     } finally {
