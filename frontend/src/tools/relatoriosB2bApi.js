@@ -91,3 +91,12 @@ export const SETOR_ORIGEM = {
   PROJETOS: 'projetos',
   IMPLANTACAO: 'implantacao'
 };
+
+/** Disparado após salvar/atualizar relatório — dashboards escutam para recarregar a lista. */
+export const RELATORIOS_B2B_ATUALIZADOS_EVENT = 'relatorios-b2b-atualizados';
+
+export function notifyRelatoriosB2bAtualizados() {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(RELATORIOS_B2B_ATUALIZADOS_EVENT));
+  }
+}
