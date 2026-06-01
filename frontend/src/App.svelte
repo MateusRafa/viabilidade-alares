@@ -90,6 +90,30 @@
   let toolReturnTo = null;
   /** Opções ao abrir ferramenta filha (ex.: relatorioId para editar/imprimir). */
   let toolOpenOptions = null;
+  /** Força remount/recarga dos dashboards de relatórios B2B ao voltar do formulário. */
+  let relatoriosDashboardRefreshKey = 0;
+
+  const DASHBOARD_RELATORIOS_TOOL_IDS = ['dashboard-projetos', 'dashboard-implantacao'];
+
+  function isDashboardRelatoriosTool(toolId) {
+    return DASHBOARD_RELATORIOS_TOOL_IDS.includes(toolId);
+  }
+
+  function bumpRelatoriosDashboardRefresh() {
+    relatoriosDashboardRefreshKey += 1;
+    return relatoriosDashboardRefreshKey;
+  }
+
+  function buildToolOpenOptionsForNavigation(toolId, options = {}) {
+    if (options.relatorioId) {
+      return { relatorioId: options.relatorioId, mode: options.mode || 'edit' };
+    }
+    if (isDashboardRelatoriosTool(toolId) || options.refreshRelatorios) {
+      const refreshKey = bumpRelatoriosDashboardRefresh();
+      return { refreshRelatorios: true, refreshKey };
+    }
+    return null;
+  }
   let toolSettingsHandler = null; // Função de configurações da ferramenta atual
   let toolSettingsHoverHandler = null; // Função de pré-carregamento no hover da engrenagem
   let broadcastChannel = null; // Canal de comunicação entre abas
@@ -560,9 +584,7 @@
       toolReturnTo = returnTo || null;
     }
 
-    toolOpenOptions = options.relatorioId
-      ? { relatorioId: options.relatorioId, mode: options.mode || 'edit' }
-      : null;
+    toolOpenOptions = buildToolOpenOptionsForNavigation(toolId, options);
 
     currentTool = toolId;
     currentView = 'tool';
@@ -631,7 +653,9 @@
         if (returnTool?.available && returnTool.component) {
           currentTool = toolReturnTo;
           toolReturnTo = null;
-          toolOpenOptions = null;
+          toolOpenOptions = buildToolOpenOptionsForNavigation(currentTool, {
+            refreshRelatorios: true
+          });
           currentView = 'tool';
           toolSettingsHandler = null;
           toolSettingsHoverHandler = null;
@@ -969,6 +993,7 @@
         onSettingsHover={handleSettingsHover}
         showSettingsButton={toolSettingsHandler !== null && tool.id !== 'analise-cobertura' && tool.id !== 'viabilidade-alares' && tool.id !== 'formulario-engenharia' && tool.id !== 'formulario-engenharia-implantacao' && tool.id !== 'dashboard-projetos' && tool.id !== 'dashboard-implantacao'}
       >
+        {#key isDashboardRelatoriosTool(currentTool) ? `${currentTool}-${relatoriosDashboardRefreshKey}` : currentTool}
         <svelte:component this={tool.component} 
           currentUser={currentUser}
           userTipo={userTipo}
@@ -978,6 +1003,7 @@
           onSettingsHover={registerToolSettingsHover}
           toolOpenOptions={toolOpenOptions}
         />
+        {/key}
       </ToolWrapper>
     {:else}
       <div class="error-container">
