@@ -56,8 +56,10 @@ export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}
     .limit(Math.min(Math.max(limit, 1), 100));
 
   if (setorOrigem === SETOR_ORIGEM.PROJETOS) {
-    // Inclui legado sem setor_origem (criados antes da coluna existir)
-    query = query.or('setor_origem.eq.projetos,setor_origem.is.null');
+    // Projetos: itens do setor + legado sem setor + todos os finalizados (incl. finalizados em Implantação)
+    query = query.or(
+      'setor_origem.eq.projetos,setor_origem.is.null,status.eq.finalizado'
+    );
   } else if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
     query = query.eq('setor_origem', setorOrigem);
   }
