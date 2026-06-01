@@ -3,7 +3,13 @@
   import Loading from '../Loading.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
-  import { fetchRelatoriosB2b, updateRelatorioB2b, SETOR_ORIGEM, RELATORIO_STATUS } from './relatoriosB2bApi.js';
+  import {
+    fetchRelatoriosB2b,
+    updateRelatorioB2b,
+    SETOR_ORIGEM,
+    RELATORIO_STATUS,
+    RELATORIOS_B2B_ATUALIZADOS_EVENT
+  } from './relatoriosB2bApi.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -12,6 +18,8 @@
   export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
+  /** @type {{ refreshRelatorios?: boolean, refreshKey?: number } | null} */
+  export let toolOpenOptions = null;
 
   const FORMULARIO_TOOL_ID = 'formulario-engenharia-implantacao';
   const RETURN_TOOL_ID = 'dashboard-implantacao';
@@ -29,6 +37,15 @@
   let confirmDialogLoading = false;
   /** @type {{ type: 'transferir' | 'finalizar', item: object } | null} */
   let pendingConfirmAction = null;
+  let appliedRefreshKey = 0;
+
+  $: if (
+    toolOpenOptions?.refreshKey != null &&
+    toolOpenOptions.refreshKey !== appliedRefreshKey
+  ) {
+    appliedRefreshKey = toolOpenOptions.refreshKey;
+    carregarRelatorios();
+  }
 
   const CONFIRM_CONFIG = {
     transferir: {
@@ -182,6 +199,17 @@
       onSettingsHover(() => {});
     }
     carregarRelatorios();
+
+    const onRelatoriosAtualizados = () => carregarRelatorios();
+    if (typeof window !== 'undefined') {
+      window.addEventListener(RELATORIOS_B2B_ATUALIZADOS_EVENT, onRelatoriosAtualizados);
+    }
+
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener(RELATORIOS_B2B_ATUALIZADOS_EVENT, onRelatoriosAtualizados);
+      }
+    };
   });
 </script>
 
