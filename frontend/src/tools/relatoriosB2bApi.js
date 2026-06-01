@@ -59,12 +59,13 @@ export async function createRelatorioB2b(
 export async function updateRelatorioB2b(
   currentUser,
   id,
-  { payload, payloadTipo, status } = {}
+  { payload, payloadTipo, status, setorOrigem } = {}
 ) {
   const body = {};
   if (payload !== undefined) body.payload = payload;
   if (payloadTipo !== undefined) body.payloadTipo = payloadTipo;
   if (status !== undefined) body.status = status;
+  if (setorOrigem !== undefined) body.setorOrigem = setorOrigem;
 
   const res = await fetch(getApiUrl(`/api/relatorios-b2b/${encodeURIComponent(id)}`), {
     method: 'PUT',
