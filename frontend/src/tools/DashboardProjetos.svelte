@@ -135,12 +135,17 @@
     confirmDialogLoading = true;
 
     try {
-      const status =
-        type === 'transferir'
-          ? RELATORIO_STATUS.EM_IMPLANTACAO
-          : RELATORIO_STATUS.FINALIZADO;
-
-      await updateRelatorioB2b(currentUser, item.id, { status });
+      if (type === 'transferir') {
+        await updateRelatorioB2b(currentUser, item.id, {
+          status: RELATORIO_STATUS.EM_IMPLANTACAO,
+          setorOrigem: SETOR_ORIGEM.IMPLANTACAO
+        });
+      } else {
+        await updateRelatorioB2b(currentUser, item.id, {
+          status: RELATORIO_STATUS.FINALIZADO,
+          setorOrigem: SETOR_ORIGEM.PROJETOS
+        });
+      }
       confirmDialogOpen = false;
       pendingConfirmAction = null;
       await carregarRelatorios();
