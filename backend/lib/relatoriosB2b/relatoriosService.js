@@ -55,12 +55,9 @@ export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}
     .order('updated_at', { ascending: false })
     .limit(Math.min(Math.max(limit, 1), 100));
 
-  if (setorOrigem === SETOR_ORIGEM.PROJETOS) {
-    // Projetos: itens do setor + legado sem setor + todos os finalizados (incl. finalizados em Implantação)
-    query = query.or(
-      'setor_origem.eq.projetos,setor_origem.is.null,status.eq.finalizado'
-    );
-  } else if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+  const isVisaoProjetos = setorOrigem === SETOR_ORIGEM.PROJETOS;
+
+  if (!isVisaoProjetos && setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
     query = query.eq('setor_origem', setorOrigem);
   }
 
