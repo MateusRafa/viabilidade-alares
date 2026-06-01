@@ -1,18 +1,172 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import Loading from '../Loading.svelte';
+  import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
+  import { fetchRelatoriosB2b, updateRelatorioB2b, SETOR_ORIGEM, RELATORIO_STATUS } from './relatoriosB2bApi.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
+  /** Abre outra ferramenta do portal (ex.: formulario-engenharia). */
+  export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
 
+  const FORMULARIO_TOOL_ID = 'formulario-engenharia';
+  const RETURN_TOOL_ID = 'dashboard-projetos';
+  const TRANSITION_LOADING_MS = 2000;
+
   let searchQuery = '';
   let recentRelatorios = [];
+  let showSearch = false;
+  let searchInputEl;
+  let isTransitionLoading = false;
+  let loadingMessage = '';
+  let loadingRelatorios = false;
+  let loadRelatoriosError = '';
+  let confirmDialogOpen = false;
+  let confirmDialogLoading = false;
+  /** @type {{ type: 'transferir' | 'finalizar', item: object } | null} */
+  let pendingConfirmAction = null;
 
-  function handleNovoRelatorio() {
-    // Próxima etapa: abrir editor / criar relatório no backend
+  const CONFIRM_CONFIG = {
+    transferir: {
+      title: 'Transferir para Em Implantação',
+      message:
+        'Transferir este relatório para Em Implantação?\n\nApós a transferência, não será mais possível editá-lo.',
+      confirmLabel: 'Transferir'
+    },
+    finalizar: {
+      title: 'Finalizar projeto',
+      message: 'Finalizar este projeto?\n\nApós a finalização, não será mais possível editá-lo.',
+      confirmLabel: 'Finalizar'
+    }
+  };
+
+  $: confirmDialogConfig = pendingConfirmAction
+    ? CONFIRM_CONFIG[pendingConfirmAction.type]
+    : null;
+
+  async function carregarRelatorios() {
+    if (!(currentUser || '').trim()) {
+      recentRelatorios = [];
+      return;
+    }
+
+    loadingRelatorios = true;
+    loadRelatoriosError = '';
+    try {
+      recentRelatorios = await fetchRelatoriosB2b(currentUser, {
+        setorOrigem: SETOR_ORIGEM.PROJETOS,
+        limit: 100
+      });
+    } catch (err) {
+      const msg = err?.message || '';
+      if (msg.includes('Rota não encontrada') || msg.includes('404')) {
+        recentRelatorios = [];
+        loadRelatoriosError = '';
+      } else {
+        loadRelatoriosError = msg || 'Não foi possível carregar os relatórios.';
+        recentRelatorios = [];
+      }
+    } finally {
+      loadingRelatorios = false;
+    }
+  }
+
+  async function abrirFormularioPdf() {
+    if (isTransitionLoading) return;
+
+    if (typeof onOpenTool !== 'function') {
+      alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
+      return;
+    }
+
+    isTransitionLoading = true;
+    loadingMessage = 'Abrindo Relatório Técnico…';
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
+    onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
+  }
+
+  async function abrirRelatorioComLoading(item, { mode = 'edit', loadingText = 'Abrindo relatório…' } = {}) {
+    if (isTransitionLoading) return;
+
+    if (typeof onOpenTool !== 'function') {
+      alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
+      return;
+    }
+
+    isTransitionLoading = true;
+    loadingMessage = loadingText;
+    await tick();
+    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
+    onOpenTool(FORMULARIO_TOOL_ID, {
+      returnTo: RETURN_TOOL_ID,
+      relatorioId: item.id,
+      mode
+    });
+  }
+
+  function handleEditarRelatorio(item) {
+    abrirRelatorioComLoading(item, { mode: 'edit', loadingText: 'Abrindo relatório…' });
+  }
+
+  function handleImprimirRelatorio(item) {
+    abrirRelatorioComLoading(item, { mode: 'print', loadingText: 'Preparando impressão…' });
+  }
+
+  function openConfirmDialog(type, item) {
+    pendingConfirmAction = { type, item };
+    confirmDialogOpen = true;
+  }
+
+  function closeConfirmDialog() {
+    if (confirmDialogLoading) return;
+    confirmDialogOpen = false;
+    pendingConfirmAction = null;
+  }
+
+  async function handleConfirmDialogAction() {
+    if (!pendingConfirmAction || confirmDialogLoading) return;
+
+    const { type, item } = pendingConfirmAction;
+    confirmDialogLoading = true;
+
+    try {
+      const status =
+        type === 'transferir'
+          ? RELATORIO_STATUS.EM_IMPLANTACAO
+          : RELATORIO_STATUS.FINALIZADO;
+
+      await updateRelatorioB2b(currentUser, item.id, { status });
+      confirmDialogOpen = false;
+      pendingConfirmAction = null;
+      await carregarRelatorios();
+    } catch (err) {
+      alert(err?.message || 'Não foi possível concluir a ação.');
+    } finally {
+      confirmDialogLoading = false;
+    }
+  }
+
+  function handleTransferirRelatorio(item) {
+    openConfirmDialog('transferir', item);
+  }
+
+  function handleFinalizarRelatorio(item) {
+    openConfirmDialog('finalizar', item);
+  }
+
+  async function toggleSearch() {
+    showSearch = !showSearch;
+    if (!showSearch) {
+      searchQuery = '';
+      return;
+    }
+    await tick();
+    searchInputEl?.focus();
   }
 
   onMount(() => {
@@ -22,34 +176,82 @@
     if (onSettingsHover && typeof onSettingsHover === 'function') {
       onSettingsHover(() => {});
     }
+    carregarRelatorios();
   });
 </script>
 
 <div class="relatorios-dashboard">
   <header class="dashboard-header">
-    <div class="dashboard-header-text">
-      <h1>Dashboard Projetos</h1>
-      <p>Setor de Planejamento e Projetos — gerencie relatórios técnicos B2B</p>
+    <div class="dashboard-actions">
+      <button
+        type="button"
+        class="btn-primary"
+        class:btn-primary--active={showSearch}
+        on:click={toggleSearch}
+        aria-expanded={showSearch}
+        disabled={isTransitionLoading}
+      >
+        Pesquisar
+      </button>
+      <button
+        type="button"
+        class="btn-primary"
+        on:click={abrirFormularioPdf}
+        disabled={isTransitionLoading}
+      >
+        Gerar PDF
+      </button>
     </div>
-    <button type="button" class="btn-primary" on:click={handleNovoRelatorio}>
-      + Novo relatório
-    </button>
   </header>
 
-  <section class="search-section" aria-label="Pesquisar relatórios">
-    <label class="search-label" for="search-relatorios-projetos">Pesquisar relatórios</label>
-    <input
-      id="search-relatorios-projetos"
-      type="search"
-      class="search-input"
-      placeholder="Cliente, projeto, projetista…"
-      bind:value={searchQuery}
-      autocomplete="off"
-    />
-  </section>
+  {#if showSearch}
+    <section class="search-panel" aria-label="Pesquisar relatórios">
+      <input
+        bind:this={searchInputEl}
+        id="search-relatorios-projetos"
+        type="search"
+        class="search-input"
+        placeholder="Cliente, projeto, cidade, projetista…"
+        bind:value={searchQuery}
+        autocomplete="off"
+      />
+    </section>
+  {/if}
 
-  <RelatoriosStatusQuadros relatorios={recentRelatorios} {searchQuery} />
+  {#if loadRelatoriosError}
+    <p class="load-error" role="alert">{loadRelatoriosError}</p>
+  {:else if loadingRelatorios}
+    <p class="load-hint" role="status">Carregando relatórios…</p>
+  {/if}
+
+  <RelatoriosStatusQuadros
+    relatorios={recentRelatorios}
+    {searchQuery}
+    onEditar={handleEditarRelatorio}
+    onImprimir={handleImprimirRelatorio}
+    onTransferir={handleTransferirRelatorio}
+    onFinalizar={handleFinalizarRelatorio}
+  />
 </div>
+
+{#if isTransitionLoading}
+  <div class="transition-loading-layer" role="status" aria-live="polite" aria-busy="true">
+    <Loading currentMessage={loadingMessage} />
+  </div>
+{/if}
+
+{#if confirmDialogOpen && confirmDialogConfig}
+  <ConfirmDialog
+    open={confirmDialogOpen}
+    title={confirmDialogConfig.title}
+    message={confirmDialogConfig.message}
+    confirmLabel={confirmDialogConfig.confirmLabel}
+    cancelLabel="Cancelar"
+    loading={confirmDialogLoading}
+    on:confirm={handleConfirmDialogAction}
+    on:cancel={closeConfirmDialog}
+  />
+{/if}
 
 <style>
   .relatorios-dashboard {
@@ -66,26 +268,16 @@
 
   .dashboard-header {
     display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
+    justify-content: flex-start;
     flex-shrink: 0;
   }
 
-  .dashboard-header-text h1 {
-    margin: 0 0 0.35rem;
-    font-size: 1.35rem;
-    font-weight: 700;
-    color: #4c1d95;
-  }
-
-  .dashboard-header-text p {
-    margin: 0;
-    font-size: 0.9rem;
-    color: #6b7280;
-    max-width: 36rem;
-    line-height: 1.45;
+  .dashboard-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.65rem;
   }
 
   .btn-primary {
@@ -105,24 +297,21 @@
     filter: brightness(1.06);
   }
 
-  .search-section {
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
+  .btn-primary--active {
+    box-shadow:
+      0 4px 12px rgba(123, 104, 238, 0.35),
+      inset 0 0 0 2px rgba(255, 255, 255, 0.45);
   }
 
-  .search-label {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: #5b21b6;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+  .search-panel {
+    flex-shrink: 0;
+    display: flex;
+    justify-content: flex-start;
   }
 
   .search-input {
     width: 100%;
-    max-width: 32rem;
+    max-width: 24rem;
     box-sizing: border-box;
     padding: 0.6rem 0.85rem;
     border: 1px solid #d1d5db;
@@ -136,5 +325,34 @@
     outline: none;
     border-color: #7b68ee;
     box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.15);
+  }
+
+  .load-error {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #b91c1c;
+    flex-shrink: 0;
+  }
+
+  .load-hint {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #6b7280;
+    flex-shrink: 0;
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.7;
+    cursor: wait;
+  }
+
+  .transition-loading-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+  }
+
+  .transition-loading-layer :global(.loading-container) {
+    min-height: 100%;
   }
 </style>
