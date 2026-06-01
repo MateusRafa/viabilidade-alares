@@ -55,7 +55,10 @@ export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}
     .order('updated_at', { ascending: false })
     .limit(Math.min(Math.max(limit, 1), 100));
 
-  if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+  if (setorOrigem === SETOR_ORIGEM.PROJETOS) {
+    // Inclui legado sem setor_origem (criados antes da coluna existir)
+    query = query.or('setor_origem.eq.projetos,setor_origem.is.null');
+  } else if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
     query = query.eq('setor_origem', setorOrigem);
   }
 
@@ -143,7 +146,7 @@ export async function createRelatorio({
   return rowToListItem(data);
 }
 
-export async function updateRelatorio(id, { usuario, payload, payloadTipo, status }) {
+export async function updateRelatorio(id, { usuario, payload, payloadTipo, status, setorOrigem }) {
   assertSupabase();
 
   const { data: existing, error: fetchError } = await supabase
@@ -166,6 +169,10 @@ export async function updateRelatorio(id, { usuario, payload, payloadTipo, statu
 
   if (status && Object.values(RELATORIO_STATUS).includes(status)) {
     patch.status = status;
+  }
+
+  if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+    patch.setor_origem = setorOrigem;
   }
 
   if (payload && payloadTipo) {
