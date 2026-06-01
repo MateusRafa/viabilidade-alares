@@ -130,17 +130,20 @@ async function registerRelatoriosB2bRoutesSafe(app) {
           return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
         }
 
-        const { payload, payloadTipo, status } = req.body || {};
+        const { payload, payloadTipo, status, setorOrigem } = req.body || {};
         const tipo =
           payloadTipo === PAYLOAD_TIPO.IMPLANTACAO ? PAYLOAD_TIPO.IMPLANTACAO : PAYLOAD_TIPO.PROJETOS;
 
         const validStatus = status && Object.values(RELATORIO_STATUS).includes(status) ? status : undefined;
+        const validSetor =
+          setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem) ? setorOrigem : undefined;
 
         const relatorio = await updateRelatorio(req.params.id, {
           usuario,
           payload,
           payloadTipo: payload ? tipo : undefined,
-          status: validStatus
+          status: validStatus,
+          setorOrigem: validSetor
         });
 
         res.json({ success: true, relatorio });
