@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Loading from '../Loading.svelte';
   import InfoDialog from '../components/InfoDialog.svelte';
+  import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import {
     defaultFormData,
     normalizeFormData,
@@ -56,12 +57,45 @@
 
   let isTransitionLoading = false;
   let loadingMessage = '';
+  let exitWithoutSaveDialogOpen = false;
+  /** Snapshot do formulário após salvar ou carregar — detecta alterações não salvas. */
+  let lastPersistedFormJson = '';
 
-  async function voltarParaDashboardProjetos(event) {
+  function syncPersistedSnapshot() {
+    lastPersistedFormJson = JSON.stringify(normalizeFormData(formData));
+  }
+
+  function hasUnsavedChanges() {
+    if (formReadonly) return false;
+    return JSON.stringify(normalizeFormData(formData)) !== lastPersistedFormJson;
+  }
+
+  function solicitarVoltarParaDashboardProjetos(event) {
     event?.preventDefault();
     event?.stopPropagation();
     event?.stopImmediatePropagation?.();
 
+    if (isTransitionLoading) return;
+
+    if (hasUnsavedChanges()) {
+      saveSuccessDialogOpen = false;
+      exitWithoutSaveDialogOpen = true;
+      return;
+    }
+
+    void executarVoltarParaDashboardProjetos();
+  }
+
+  function closeExitWithoutSaveDialog() {
+    exitWithoutSaveDialogOpen = false;
+  }
+
+  function confirmExitWithoutSave() {
+    exitWithoutSaveDialogOpen = false;
+    void executarVoltarParaDashboardProjetos();
+  }
+
+  async function executarVoltarParaDashboardProjetos() {
     if (isTransitionLoading) return;
 
     saveSuccessDialogOpen = false;
@@ -1086,6 +1120,7 @@
 
     applyPreviewHtml();
     schedulePassoLayoutMeasure(true);
+    syncPersistedSnapshot();
   }
 
   async function bootstrapFormulario() {
@@ -1140,6 +1175,8 @@
       pdfError = err?.message || 'Não foi possível carregar o relatório.';
     } finally {
       if (abrindoRelatorio) isTransitionLoading = false;
+      await tick();
+      syncPersistedSnapshot();
     }
   }
 
@@ -1192,6 +1229,7 @@
     }
 
     notifyRelatoriosB2bAtualizados();
+    syncPersistedSnapshot();
   }
 
   async function handleSalvarPdf() {
@@ -1255,7 +1293,7 @@
     if (typeof window !== 'undefined') {
       const backBtn = document.querySelector('.app-container header .back-button');
       if (backBtn) {
-        const onBackCapture = (event) => voltarParaDashboardProjetos(event);
+        const onBackCapture = (event) => solicitarVoltarParaDashboardProjetos(event);
         backBtn.addEventListener('click', onBackCapture, true);
         removeBackCapture = () => backBtn.removeEventListener('click', onBackCapture, true);
       }
@@ -1851,7 +1889,19 @@
   secondaryLabel="Voltar a Editar"
   primaryLabel="Voltar ao Dashboard"
   on:secondary={() => (saveSuccessDialogOpen = false)}
-  on:primary={() => voltarParaDashboardProjetos()}
+  on:primary={() => executarVoltarParaDashboardProjetos()}
+/>
+
+<ConfirmDialog
+  open={exitWithoutSaveDialogOpen}
+  title="Sair sem salvar?"
+  message="Existem alterações que ainda não foram salvas no relatório.
+
+Tem certeza que deseja sair sem salvar o arquivo?"
+  confirmLabel="Sair sem salvar"
+  cancelLabel="Continuar editando"
+  on:confirm={confirmExitWithoutSave}
+  on:cancel={closeExitWithoutSaveDialog}
 />
 
 <style>
