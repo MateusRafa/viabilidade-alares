@@ -92,11 +92,30 @@
   let toolOpenOptions = null;
   /** Força remount/recarga dos dashboards de relatórios B2B ao voltar do formulário. */
   let relatoriosDashboardRefreshKey = 0;
+  /** Força remount limpo do formulário PDF a cada abertura (evita estado travado). */
+  let formToolSessionKey = 0;
+  /** Voltar do header — registrado pelo formulário de relatório. */
+  let toolBackHandler = null;
 
   const DASHBOARD_RELATORIOS_TOOL_IDS = ['dashboard-projetos', 'dashboard-implantacao'];
+  const FORM_RELATORIO_TOOL_IDS = ['formulario-engenharia', 'formulario-engenharia-implantacao'];
 
   function isDashboardRelatoriosTool(toolId) {
     return DASHBOARD_RELATORIOS_TOOL_IDS.includes(toolId);
+  }
+
+  function getToolComponentKey(toolId) {
+    if (isDashboardRelatoriosTool(toolId)) {
+      return `${toolId}-${relatoriosDashboardRefreshKey}`;
+    }
+    if (FORM_RELATORIO_TOOL_IDS.includes(toolId)) {
+      return `${toolId}-${formToolSessionKey}`;
+    }
+    return toolId;
+  }
+
+  function registerToolBackHandler(handler) {
+    toolBackHandler = typeof handler === 'function' ? handler : null;
   }
 
   function bumpRelatoriosDashboardRefresh() {
@@ -594,6 +613,11 @@
 
     toolOpenOptions = buildToolOpenOptionsForNavigation(toolId, options);
 
+    toolBackHandler = null;
+    if (FORM_RELATORIO_TOOL_IDS.includes(toolId)) {
+      formToolSessionKey += 1;
+    }
+
     currentTool = toolId;
     currentView = 'tool';
     toolSettingsHandler = null;
@@ -602,6 +626,11 @@
 
   // Função para voltar ao Dashboard
   async function handleBackToDashboard() {
+    if (typeof toolBackHandler === 'function') {
+      toolBackHandler();
+      return;
+    }
+
     // Se a ferramenta está em nova aba, tentar encontrar Dashboard aberto
     if (isToolInNewTab && typeof window !== 'undefined' && broadcastChannel) {
       try {
@@ -672,6 +701,7 @@
       }
       toolReturnTo = null;
       toolOpenOptions = null;
+      toolBackHandler = null;
       // Comportamento normal: voltar ao Dashboard na mesma aba
       currentView = 'dashboard';
       currentTool = null;
@@ -1001,12 +1031,13 @@
         onSettingsHover={handleSettingsHover}
         showSettingsButton={toolSettingsHandler !== null && tool.id !== 'analise-cobertura' && tool.id !== 'viabilidade-alares' && tool.id !== 'formulario-engenharia' && tool.id !== 'formulario-engenharia-implantacao' && tool.id !== 'dashboard-projetos' && tool.id !== 'dashboard-implantacao'}
       >
-        {#key isDashboardRelatoriosTool(currentTool) ? `${currentTool}-${relatoriosDashboardRefreshKey}` : currentTool}
+        {#key getToolComponentKey(currentTool)}
         <svelte:component this={tool.component} 
           currentUser={currentUser}
           userTipo={userTipo}
           onBackToDashboard={handleBackToDashboard}
           onOpenTool={handleOpenTool}
+          onBackRequest={registerToolBackHandler}
           onSettingsRequest={registerToolSettings}
           onSettingsHover={registerToolSettingsHover}
           toolOpenOptions={toolOpenOptions}
