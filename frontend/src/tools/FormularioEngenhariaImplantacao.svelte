@@ -66,6 +66,7 @@
 
     if (isTransitionLoading) return;
 
+    saveSuccessDialogOpen = false;
     isTransitionLoading = true;
     loadingMessage = 'Voltando ao Dashboard Implantação…';
     await tick();
@@ -1776,8 +1777,10 @@
   open={saveSuccessDialogOpen}
   title="Relatório salvo"
   message="Relatório salvo com sucesso!"
-  okLabel="OK"
-  on:close={() => (saveSuccessDialogOpen = false)}
+  secondaryLabel="Voltar a Editar"
+  primaryLabel="Voltar ao Dashboard"
+  on:secondary={() => (saveSuccessDialogOpen = false)}
+  on:primary={() => voltarParaDashboardImplantacao()}
 />
 
 <style>
