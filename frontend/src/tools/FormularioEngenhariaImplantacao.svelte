@@ -37,11 +37,13 @@
     createRelatorioB2b,
     updateRelatorioB2b,
     fetchRelatorioB2bById,
+    fetchRelatoriosB2b,
     PAYLOAD_TIPO,
     SETOR_ORIGEM,
     RELATORIO_STATUS,
     notifyRelatoriosB2bAtualizados
   } from './relatoriosB2bApi.js';
+  import { runDuringTransition } from './transitionLoading.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -50,7 +52,7 @@
   export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
-  /** @type {{ relatorioId?: string, mode?: 'edit'|'print' } | null} */
+  /** @type {{ relatorioId?: string, mode?: 'edit'|'print', prefetchedRelatorio?: object } | null} */
   export let toolOpenOptions = null;
 
   const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
@@ -70,15 +72,30 @@
     isTransitionLoading = true;
     loadingMessage = 'Voltando ao Dashboard Implantação…';
     await tick();
-    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
 
-    if (typeof onOpenTool === 'function') {
-      onOpenTool(DASHBOARD_IMPLANTACAO_ID, { refreshRelatorios: true });
+    if (typeof onOpenTool !== 'function') {
+      isTransitionLoading = false;
+      onBackToDashboard();
       return;
     }
 
-    isTransitionLoading = false;
-    onBackToDashboard();
+    try {
+      const initialRelatorios = await runDuringTransition(
+        () =>
+          fetchRelatoriosB2b(currentUser, {
+            setorOrigem: SETOR_ORIGEM.IMPLANTACAO,
+            limit: 100
+          }),
+        TRANSITION_LOADING_MS
+      );
+      onOpenTool(DASHBOARD_IMPLANTACAO_ID, {
+        refreshRelatorios: true,
+        initialRelatorios
+      });
+    } catch (err) {
+      alert(err?.message || 'Não foi possível carregar o dashboard.');
+      isTransitionLoading = false;
+    }
   }
 
   let projetistaUserDefaultApplied = false;
@@ -1062,6 +1079,75 @@
     }
   }
 
+  function aplicarRelatorioApi(rel) {
+    relatorioSalvoId = rel.id;
+    relatorioStatus = rel.status || RELATORIO_STATUS.EM_ANALISE;
+    formReadonly = relatorioStatus !== RELATORIO_STATUS.EM_ANALISE;
+
+    if (rel.formData) {
+      formData = normalizeFormData(rel.formData);
+      projetistaUserDefaultApplied = true;
+    }
+
+    applyPreviewHtml();
+    schedulePassoLayoutMeasure(true);
+  }
+
+  async function bootstrapFormulario() {
+    const mode = toolOpenOptions?.mode || 'edit';
+    const abrindoRelatorio = Boolean(
+      toolOpenOptions?.prefetchedRelatorio || toolOpenOptions?.relatorioId
+    );
+
+    if (abrindoRelatorio) {
+      isTransitionLoading = true;
+      loadingMessage = 'Carregando relatório…';
+      await tick();
+    }
+
+    try {
+      const usuario = (currentUser || '').trim();
+      const origin = window.location.origin;
+
+      const relatorioPromise = toolOpenOptions?.prefetchedRelatorio
+        ? Promise.resolve(toolOpenOptions.prefetchedRelatorio)
+        : toolOpenOptions?.relatorioId && usuario
+          ? fetchRelatorioB2bById(usuario, toolOpenOptions.relatorioId, {
+              payloadTipo: PAYLOAD_TIPO.IMPLANTACAO
+            })
+          : Promise.resolve(null);
+
+      const [rel, logo, ondas, assinatura] = await Promise.all([
+        relatorioPromise,
+        loadLogoDataUrl(origin),
+        loadCapaOndasDataUrl(origin),
+        loadAssinaturaSupervisorDataUrl(origin)
+      ]);
+
+      logoDataUrl = logo;
+      capaOndasDataUrl = ondas;
+      assinaturaSupervisorDataUrl = assinatura;
+      assetsReady = true;
+
+      if (rel) {
+        aplicarRelatorioApi(rel);
+      } else {
+        applyPreviewHtml();
+        schedulePassoLayoutMeasure(true);
+      }
+
+      if (mode === 'print' && rel) {
+        await tick();
+        await flushPreviewRefresh();
+        await handleGeneratePdf();
+      }
+    } catch (err) {
+      pdfError = err?.message || 'Não foi possível carregar o relatório.';
+    } finally {
+      if (abrindoRelatorio) isTransitionLoading = false;
+    }
+  }
+
   async function carregarRelatorioSalvo(relatorioId, mode = 'edit') {
     const usuario = (currentUser || '').trim();
     if (!usuario || !relatorioId) return;
@@ -1070,18 +1156,7 @@
       const rel = await fetchRelatorioB2bById(usuario, relatorioId, {
         payloadTipo: PAYLOAD_TIPO.IMPLANTACAO
       });
-
-      relatorioSalvoId = rel.id;
-      relatorioStatus = rel.status || RELATORIO_STATUS.EM_ANALISE;
-      formReadonly = relatorioStatus !== RELATORIO_STATUS.EM_ANALISE;
-
-      if (rel.formData) {
-        formData = normalizeFormData(rel.formData);
-        projetistaUserDefaultApplied = true;
-      }
-
-      applyPreviewHtml();
-      schedulePassoLayoutMeasure(true);
+      aplicarRelatorioApi(rel);
 
       if (mode === 'print') {
         if (!assetsReady) {
@@ -1175,22 +1250,7 @@
       }
 
       loadFormColumnWidthPreference();
-      const origin = window.location.origin;
-      const [logo, ondas, assinatura] = await Promise.all([
-        loadLogoDataUrl(origin),
-        loadCapaOndasDataUrl(origin),
-        loadAssinaturaSupervisorDataUrl(origin)
-      ]);
-      logoDataUrl = logo;
-      capaOndasDataUrl = ondas;
-      assinaturaSupervisorDataUrl = assinatura;
-      assetsReady = true;
-      applyPreviewHtml();
-      schedulePassoLayoutMeasure(true);
-
-      if (toolOpenOptions?.relatorioId) {
-        await carregarRelatorioSalvo(toolOpenOptions.relatorioId, toolOpenOptions.mode || 'edit');
-      }
+      await bootstrapFormulario();
 
       const onWindowPaste = async (e) => {
         if (!armedUploadTarget || imagePasteInFlight) return;
