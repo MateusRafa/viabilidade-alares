@@ -105,12 +105,20 @@
   }
 
   function buildToolOpenOptionsForNavigation(toolId, options = {}) {
-    if (options.relatorioId) {
-      return { relatorioId: options.relatorioId, mode: options.mode || 'edit' };
+    if (options.relatorioId || options.prefetchedRelatorio) {
+      return {
+        relatorioId: options.relatorioId,
+        mode: options.mode || 'edit',
+        prefetchedRelatorio: options.prefetchedRelatorio ?? null
+      };
     }
     if (isDashboardRelatoriosTool(toolId) || options.refreshRelatorios) {
       const refreshKey = bumpRelatoriosDashboardRefresh();
-      return { refreshRelatorios: true, refreshKey };
+      const result = { refreshRelatorios: true, refreshKey };
+      if (options.initialRelatorios != null) {
+        result.initialRelatorios = options.initialRelatorios;
+      }
+      return result;
     }
     return null;
   }
