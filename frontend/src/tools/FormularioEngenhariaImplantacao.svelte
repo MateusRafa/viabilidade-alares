@@ -5,6 +5,7 @@
    */
   import { onMount, tick } from 'svelte';
   import Loading from '../Loading.svelte';
+  import InfoDialog from '../components/InfoDialog.svelte';
   import {
     defaultFormData,
     normalizeFormData,
@@ -113,7 +114,7 @@
   let generatingPDF = false;
   let savingPDF = false;
   let pdfError = '';
-  let saveSuccessMessage = '';
+  let saveSuccessDialogOpen = false;
   /** ID do relatório já salvo no backend (atualizações seguintes usam PUT). */
   let relatorioSalvoId = null;
   let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
@@ -1101,13 +1102,11 @@
     const usuario = (currentUser || '').trim();
     if (!usuario) {
       pdfError = 'Usuário não identificado. Faça login novamente.';
-      saveSuccessMessage = '';
       return;
     }
 
     savingPDF = true;
     pdfError = '';
-    saveSuccessMessage = '';
 
     try {
       const payload = normalizeFormData(formData);
@@ -1126,8 +1125,7 @@
         relatorioStatus = criado.status || RELATORIO_STATUS.EM_ANALISE;
       }
 
-      saveSuccessMessage =
-        'Relatório salvo com sucesso. Ele aparece no Dashboard Implantação, em Em Análise.';
+      saveSuccessDialogOpen = true;
       notifyRelatoriosB2bAtualizados();
     } catch (err) {
       pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
@@ -1693,9 +1691,6 @@
       </div>
 
       <footer class="form-actions">
-        {#if saveSuccessMessage}
-          <p class="pdf-success" role="status">{saveSuccessMessage}</p>
-        {/if}
         {#if pdfError}
           <p class="pdf-error" role="alert">{pdfError}</p>
         {/if}
@@ -1776,6 +1771,16 @@
     <Loading currentMessage={loadingMessage} />
   </div>
 {/if}
+
+<InfoDialog
+  open={saveSuccessDialogOpen}
+  title="PDF salvo"
+  message="Relatório salvo com sucesso.
+
+Ele aparece no Dashboard Implantação, em Em Análise."
+  okLabel="OK"
+  on:close={() => (saveSuccessDialogOpen = false)}
+/>
 
 <style>
   .formulario-engenharia-implantacao {
@@ -2353,13 +2358,6 @@
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
     color: #b91c1c;
-  }
-
-  .pdf-success {
-    margin: 0 0 0.5rem;
-    font-size: 0.8rem;
-    color: #047857;
-    line-height: 1.4;
   }
 
   .passo-layout-warning {
