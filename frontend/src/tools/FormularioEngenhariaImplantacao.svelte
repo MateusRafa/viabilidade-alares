@@ -1172,37 +1172,42 @@
     }
   }
 
-  async function handleSalvarPdf() {
-    if (savingPDF || formReadonly) return;
+  async function persistRelatorio() {
+    if (formReadonly) return;
 
     const usuario = (currentUser || '').trim();
     if (!usuario) {
-      pdfError = 'Usuário não identificado. Faça login novamente.';
-      return;
+      throw new Error('Usuário não identificado. Faça login novamente.');
     }
+
+    const payload = normalizeFormData(formData);
+    const saveOptions = {
+      payload,
+      payloadTipo: PAYLOAD_TIPO.IMPLANTACAO,
+      status: relatorioStatus || RELATORIO_STATUS.EM_ANALISE,
+      setorOrigem: SETOR_ORIGEM.IMPLANTACAO
+    };
+
+    if (relatorioSalvoId) {
+      await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
+    } else {
+      const criado = await createRelatorioB2b(currentUser, saveOptions);
+      relatorioSalvoId = criado.id;
+      relatorioStatus = criado.status || RELATORIO_STATUS.EM_ANALISE;
+    }
+
+    notifyRelatoriosB2bAtualizados();
+  }
+
+  async function handleSalvarPdf() {
+    if (savingPDF || formReadonly) return;
 
     savingPDF = true;
     pdfError = '';
 
     try {
-      const payload = normalizeFormData(formData);
-      const saveOptions = {
-        payload,
-        payloadTipo: PAYLOAD_TIPO.IMPLANTACAO,
-        status: relatorioStatus || RELATORIO_STATUS.EM_ANALISE,
-        setorOrigem: SETOR_ORIGEM.IMPLANTACAO
-      };
-
-      if (relatorioSalvoId) {
-        await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
-      } else {
-        const criado = await createRelatorioB2b(currentUser, saveOptions);
-        relatorioSalvoId = criado.id;
-        relatorioStatus = criado.status || RELATORIO_STATUS.EM_ANALISE;
-      }
-
+      await persistRelatorio();
       saveSuccessDialogOpen = true;
-      notifyRelatoriosB2bAtualizados();
     } catch (err) {
       pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
     } finally {
@@ -1215,18 +1220,29 @@
       pdfError = 'Aguarde o carregamento dos recursos do PDF antes de gerar.';
       return;
     }
+    if (generatingPDF || savingPDF) return;
+
     generatingPDF = true;
     pdfError = '';
-    await flushPreviewRefresh();
-    const docTitle = getEngineeringPdfDocumentTitle(formData);
-    const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
-    const result = await printPdfHtmlNamed(printHtml, { title: docTitle });
-    generatingPDF = false;
-    if (!result.success) {
-      pdfError =
-        result.error === 'popup_blocked'
-          ? 'Não foi possível abrir a impressão. Permita pop-ups para este site e tente de novo.'
-          : 'Não foi possível abrir a impressão. Tente novamente.';
+
+    try {
+      if (!formReadonly) {
+        await persistRelatorio();
+      }
+      await flushPreviewRefresh();
+      const docTitle = getEngineeringPdfDocumentTitle(formData);
+      const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
+      const result = await printPdfHtmlNamed(printHtml, { title: docTitle });
+      if (!result.success) {
+        pdfError =
+          result.error === 'popup_blocked'
+            ? 'Não foi possível abrir a impressão. Permita pop-ups para este site e tente de novo.'
+            : 'Não foi possível abrir a impressão. Tente novamente.';
+      }
+    } catch (err) {
+      pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
+    } finally {
+      generatingPDF = false;
     }
   }
 
