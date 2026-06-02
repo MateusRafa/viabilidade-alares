@@ -5,11 +5,14 @@
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
   import {
     fetchRelatoriosB2b,
+    fetchRelatorioB2bById,
     updateRelatorioB2b,
     SETOR_ORIGEM,
     RELATORIO_STATUS,
+    PAYLOAD_TIPO,
     RELATORIOS_B2B_ATUALIZADOS_EVENT
   } from './relatoriosB2bApi.js';
+  import { runDuringTransition } from './transitionLoading.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -18,7 +21,7 @@
   export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
-  /** @type {{ refreshRelatorios?: boolean, refreshKey?: number } | null} */
+  /** @type {{ refreshRelatorios?: boolean, refreshKey?: number, initialRelatorios?: object[] } | null} */
   export let toolOpenOptions = null;
 
   const FORMULARIO_TOOL_ID = 'formulario-engenharia';
@@ -44,7 +47,13 @@
     toolOpenOptions.refreshKey !== appliedRefreshKey
   ) {
     appliedRefreshKey = toolOpenOptions.refreshKey;
-    carregarRelatorios();
+    if (toolOpenOptions.initialRelatorios) {
+      recentRelatorios = toolOpenOptions.initialRelatorios;
+      loadingRelatorios = false;
+      loadRelatoriosError = '';
+    } else {
+      carregarRelatorios();
+    }
   }
 
   const CONFIRM_CONFIG = {
@@ -118,12 +127,27 @@
     isTransitionLoading = true;
     loadingMessage = loadingText;
     await tick();
-    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
-    onOpenTool(FORMULARIO_TOOL_ID, {
-      returnTo: RETURN_TOOL_ID,
-      relatorioId: item.id,
-      mode
-    });
+
+    try {
+      const prefetchedRelatorio = await runDuringTransition(
+        () =>
+          fetchRelatorioB2bById(currentUser, item.id, {
+            payloadTipo: PAYLOAD_TIPO.PROJETOS
+          }),
+        TRANSITION_LOADING_MS
+      );
+
+      onOpenTool(FORMULARIO_TOOL_ID, {
+        returnTo: RETURN_TOOL_ID,
+        relatorioId: item.id,
+        mode,
+        prefetchedRelatorio
+      });
+    } catch (err) {
+      alert(err?.message || 'Não foi possível carregar o relatório.');
+    } finally {
+      isTransitionLoading = false;
+    }
   }
 
   function handleEditarRelatorio(item) {
@@ -198,7 +222,11 @@
     if (onSettingsHover && typeof onSettingsHover === 'function') {
       onSettingsHover(() => {});
     }
-    carregarRelatorios();
+    if (toolOpenOptions?.initialRelatorios) {
+      recentRelatorios = toolOpenOptions.initialRelatorios;
+    } else {
+      carregarRelatorios();
+    }
 
     const onRelatoriosAtualizados = () => carregarRelatorios();
     if (typeof window !== 'undefined') {
