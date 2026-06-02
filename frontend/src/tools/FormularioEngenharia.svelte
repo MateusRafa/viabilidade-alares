@@ -1,5 +1,5 @@
 <script>
-  import { onMount, tick } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import Loading from '../Loading.svelte';
   import InfoDialog from '../components/InfoDialog.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
@@ -49,6 +49,8 @@
   export let onOpenTool = null;
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
+  /** Registra o handler do botão voltar do header (App.svelte). */
+  export let onBackRequest = null;
   /** @type {{ relatorioId?: string, mode?: 'edit'|'print', prefetchedRelatorio?: object } | null} */
   export let toolOpenOptions = null;
 
@@ -133,6 +135,7 @@
       });
     } catch (err) {
       alert(err?.message || 'Não foi possível carregar o dashboard.');
+    } finally {
       isTransitionLoading = false;
     }
   }
@@ -1292,24 +1295,22 @@
   }
 
   onMount(async () => {
+    isTransitionLoading = false;
+    exitWithoutSaveDialogOpen = false;
+
     if (onSettingsRequest && typeof onSettingsRequest === 'function') {
       onSettingsRequest(() => {});
     }
     if (onSettingsHover && typeof onSettingsHover === 'function') {
       onSettingsHover(() => {});
     }
+    if (typeof onBackRequest === 'function') {
+      onBackRequest(() => solicitarVoltarParaDashboardProjetos());
+    }
 
     let removeWindowPaste = null;
-    let removeBackCapture = null;
 
     if (typeof window !== 'undefined') {
-      const backBtn = document.querySelector('.app-container header .back-button');
-      if (backBtn) {
-        const onBackCapture = (event) => solicitarVoltarParaDashboardProjetos(event);
-        backBtn.addEventListener('click', onBackCapture, true);
-        removeBackCapture = () => backBtn.removeEventListener('click', onBackCapture, true);
-      }
-
       loadFormColumnWidthPreference();
       await bootstrapFormulario();
 
@@ -1330,13 +1331,22 @@
     }
 
     return () => {
-      removeBackCapture?.();
+      if (typeof onBackRequest === 'function') {
+        onBackRequest(null);
+      }
       removeWindowPaste?.();
       disarmImagePaste();
       stopResizeFormColumn();
       clearTimeout(previewDebounceTimer);
       clearTimeout(measureDebounceTimer);
     };
+  });
+
+  onDestroy(() => {
+    isTransitionLoading = false;
+    if (typeof onBackRequest === 'function') {
+      onBackRequest(null);
+    }
   });
 </script>
 
