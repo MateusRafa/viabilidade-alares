@@ -58,8 +58,10 @@
   let isTransitionLoading = false;
   let loadingMessage = '';
   let exitWithoutSaveDialogOpen = false;
-  /** Snapshot do formulário após salvar ou carregar — detecta alterações não salvas. */
+  /** Snapshot do formulário após Salvar PDF ou carregar — Gerar PDF não atualiza. */
   let lastPersistedFormJson = '';
+  /** Só true após Salvar PDF ou ao abrir relatório já existente para edição. */
+  let formSavedViaSalvarButton = false;
 
   function syncPersistedSnapshot() {
     lastPersistedFormJson = JSON.stringify(normalizeFormData(formData));
@@ -70,6 +72,13 @@
     return JSON.stringify(normalizeFormData(formData)) !== lastPersistedFormJson;
   }
 
+  /** Exige Salvar PDF; Gerar PDF grava no servidor mas não libera saída sem aviso. */
+  function shouldPromptExitWithoutSave() {
+    if (formReadonly) return false;
+    if (!formSavedViaSalvarButton) return true;
+    return hasUnsavedChanges();
+  }
+
   function solicitarVoltarParaDashboardProjetos(event) {
     event?.preventDefault();
     event?.stopPropagation();
@@ -77,7 +86,7 @@
 
     if (isTransitionLoading) return;
 
-    if (hasUnsavedChanges()) {
+    if (shouldPromptExitWithoutSave()) {
       saveSuccessDialogOpen = false;
       exitWithoutSaveDialogOpen = true;
       return;
@@ -1120,6 +1129,7 @@
 
     applyPreviewHtml();
     schedulePassoLayoutMeasure(true);
+    formSavedViaSalvarButton = true;
     syncPersistedSnapshot();
   }
 
@@ -1162,6 +1172,7 @@
       if (rel) {
         aplicarRelatorioApi(rel);
       } else {
+        formSavedViaSalvarButton = false;
         applyPreviewHtml();
         schedulePassoLayoutMeasure(true);
       }
@@ -1229,7 +1240,6 @@
     }
 
     notifyRelatoriosB2bAtualizados();
-    syncPersistedSnapshot();
   }
 
   async function handleSalvarPdf() {
@@ -1240,6 +1250,8 @@
 
     try {
       await persistRelatorio();
+      formSavedViaSalvarButton = true;
+      syncPersistedSnapshot();
       saveSuccessDialogOpen = true;
     } catch (err) {
       pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
