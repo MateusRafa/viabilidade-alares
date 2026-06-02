@@ -112,9 +112,13 @@
 
     isTransitionLoading = true;
     loadingMessage = 'Abrindo Relatório de Construção…';
-    await tick();
-    await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
-    onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
+    try {
+      await tick();
+      await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
+      onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
+    } finally {
+      isTransitionLoading = false;
+    }
   }
 
   async function abrirRelatorioComLoading(item, { mode = 'edit', loadingText = 'Abrindo relatório…' } = {}) {
