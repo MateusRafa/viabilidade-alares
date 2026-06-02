@@ -4,12 +4,25 @@
   export let open = false;
   export let title = 'Informação';
   export let message = '';
+  /** Botão único (modo legado). Ignorado se secondaryLabel e primaryLabel estiverem definidos. */
   export let okLabel = 'OK';
+  export let secondaryLabel = '';
+  export let primaryLabel = '';
 
   const dispatch = createEventDispatcher();
 
+  $: dualActions = !!(secondaryLabel && primaryLabel);
+
   function handleOk() {
     dispatch('close');
+  }
+
+  function handleSecondary() {
+    dispatch('secondary');
+  }
+
+  function handlePrimary() {
+    dispatch('primary');
   }
 </script>
 
@@ -30,10 +43,19 @@
         <p id="info-dialog-message">{message}</p>
       </div>
 
-      <footer class="info-footer">
-        <button type="button" class="btn-ok" on:click={handleOk}>
-          {okLabel}
-        </button>
+      <footer class="info-footer" class:info-footer--dual={dualActions}>
+        {#if dualActions}
+          <button type="button" class="btn-secondary" on:click={handleSecondary}>
+            {secondaryLabel}
+          </button>
+          <button type="button" class="btn-primary" on:click={handlePrimary}>
+            {primaryLabel}
+          </button>
+        {:else}
+          <button type="button" class="btn-primary" on:click={handleOk}>
+            {okLabel}
+          </button>
+        {/if}
       </footer>
     </div>
   </div>
@@ -115,21 +137,41 @@
     padding: 1.15rem 1.6rem 1.5rem;
   }
 
-  .btn-ok {
+  .info-footer--dual {
+    flex-wrap: wrap;
+    gap: 0.85rem;
+  }
+
+  .btn-secondary,
+  .btn-primary {
     padding: 0.8rem 1.4rem;
-    border: none;
     border-radius: 8px;
     font-size: 0.95rem;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
+    transition: filter 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  }
+
+  .btn-secondary {
+    border: 1px solid #d1d5db;
+    background: white;
+    color: #4b5563;
+  }
+
+  .btn-secondary:hover {
+    background: #f9fafb;
+    border-color: #9ca3af;
+  }
+
+  .btn-primary {
+    border: none;
     background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
     color: white;
     box-shadow: 0 4px 12px rgba(123, 104, 238, 0.35);
-    transition: filter 0.15s ease;
   }
 
-  .btn-ok:hover {
+  .btn-primary:hover {
     filter: brightness(1.06);
   }
 </style>
