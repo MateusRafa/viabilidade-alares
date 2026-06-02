@@ -1774,10 +1774,8 @@
 
 <InfoDialog
   open={saveSuccessDialogOpen}
-  title="PDF salvo"
-  message="Relatório salvo com sucesso.
-
-Ele aparece no Dashboard Implantação, em Em Análise."
+  title="Relatório salvo"
+  message="Relatório salvo com sucesso!"
   okLabel="OK"
   on:close={() => (saveSuccessDialogOpen = false)}
 />
