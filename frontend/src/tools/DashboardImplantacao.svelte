@@ -7,6 +7,8 @@
     fetchRelatoriosB2b,
     fetchRelatorioB2bById,
     updateRelatorioB2b,
+    deleteRelatorioB2b,
+    notifyRelatoriosB2bAtualizados,
     SETOR_ORIGEM,
     RELATORIO_STATUS,
     PAYLOAD_TIPO,
@@ -67,6 +69,12 @@
       title: 'Finalizar projeto',
       message: 'Finalizar este projeto?\n\nApós a finalização, não será mais possível editá-lo.',
       confirmLabel: 'Finalizar'
+    },
+    excluir: {
+      title: 'Excluir relatório',
+      message:
+        'Tem certeza que deseja excluir este relatório?\n\nEsta ação não pode ser desfeita.',
+      confirmLabel: 'Excluir'
     }
   };
 
@@ -185,11 +193,14 @@
         await updateRelatorioB2b(currentUser, item.id, {
           status: RELATORIO_STATUS.EM_IMPLANTACAO
         });
-      } else {
+      } else if (type === 'finalizar') {
         await updateRelatorioB2b(currentUser, item.id, {
           status: RELATORIO_STATUS.FINALIZADO,
           setorOrigem: SETOR_ORIGEM.IMPLANTACAO
         });
+      } else if (type === 'excluir') {
+        await deleteRelatorioB2b(currentUser, item.id);
+        notifyRelatoriosB2bAtualizados();
       }
       confirmDialogOpen = false;
       pendingConfirmAction = null;
@@ -207,6 +218,10 @@
 
   function handleFinalizarRelatorio(item) {
     openConfirmDialog('finalizar', item);
+  }
+
+  function handleExcluirRelatorio(item) {
+    openConfirmDialog('excluir', item);
   }
 
   async function toggleSearch() {
@@ -296,6 +311,7 @@
     onImprimir={handleImprimirRelatorio}
     onTransferir={handleTransferirRelatorio}
     onFinalizar={handleFinalizarRelatorio}
+    onExcluir={handleExcluirRelatorio}
   />
 </div>
 
