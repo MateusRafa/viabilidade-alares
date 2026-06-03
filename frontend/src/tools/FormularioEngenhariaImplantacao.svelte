@@ -1782,8 +1782,9 @@
           {#if expandedSections.anexosPdf}
             <div class="form-box-body form-box-body-anexos">
               <p class="anexos-pdf-hint">
-                Cada PDF anexado vira páginas na prévia e no PDF final, após a Lista de Material. Máximo
-                {MAX_ANEXO_PDF_MB} MB por arquivo. Não é possível editar o conteúdo dos anexos.
+                Cada PDF anexado vira páginas na prévia e no PDF final, após a Lista de Material. Até
+                {MAX_ANEXO_PDF_MB} MB por arquivo (o limite é o tamanho do arquivo, não a quantidade de páginas).
+                Não é possível editar o conteúdo dos anexos.
               </p>
 
               {#each formData.anexosPdf as anexo, anexoIndex (anexo.id)}
