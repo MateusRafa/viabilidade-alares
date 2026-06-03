@@ -9,6 +9,7 @@
     updateRelatorioB2b,
     deleteRelatorioB2b,
     notifyRelatoriosB2bAtualizados,
+    applyRelatorioListAction,
     SETOR_ORIGEM,
     RELATORIO_STATUS,
     PAYLOAD_TIPO,
@@ -82,14 +83,17 @@
     ? CONFIRM_CONFIG[pendingConfirmAction.type]
     : null;
 
-  async function carregarRelatorios() {
+  async function carregarRelatorios({ silent = false } = {}) {
     if (!(currentUser || '').trim()) {
       recentRelatorios = [];
       return;
     }
 
-    loadingRelatorios = true;
-    loadRelatoriosError = '';
+    if (!silent) {
+      loadingRelatorios = true;
+      loadRelatoriosError = '';
+    }
+
     try {
       recentRelatorios = await fetchRelatoriosB2b(currentUser, {
         setorOrigem: SETOR_ORIGEM.PROJETOS,
@@ -98,14 +102,16 @@
     } catch (err) {
       const msg = err?.message || '';
       if (msg.includes('Rota não encontrada') || msg.includes('404')) {
-        recentRelatorios = [];
-        loadRelatoriosError = '';
-      } else {
+        if (!silent) {
+          recentRelatorios = [];
+          loadRelatoriosError = '';
+        }
+      } else if (!silent) {
         loadRelatoriosError = msg || 'Não foi possível carregar os relatórios.';
         recentRelatorios = [];
       }
     } finally {
-      loadingRelatorios = false;
+      if (!silent) loadingRelatorios = false;
     }
   }
 
@@ -202,9 +208,11 @@
         await deleteRelatorioB2b(currentUser, item.id);
         notifyRelatoriosB2bAtualizados();
       }
+
+      recentRelatorios = applyRelatorioListAction(recentRelatorios, type, item);
       confirmDialogOpen = false;
       pendingConfirmAction = null;
-      await carregarRelatorios();
+      void carregarRelatorios({ silent: true });
     } catch (err) {
       alert(err?.message || 'Não foi possível concluir a ação.');
     } finally {
@@ -247,7 +255,7 @@
       carregarRelatorios();
     }
 
-    const onRelatoriosAtualizados = () => carregarRelatorios();
+    const onRelatoriosAtualizados = () => carregarRelatorios({ silent: true });
     if (typeof window !== 'undefined') {
       window.addEventListener(RELATORIOS_B2B_ATUALIZADOS_EVENT, onRelatoriosAtualizados);
     }
@@ -298,9 +306,10 @@
     </section>
   {/if}
 
+  <div class="quadros-area">
   {#if loadRelatoriosError}
     <p class="load-error" role="alert">{loadRelatoriosError}</p>
-  {:else if loadingRelatorios}
+  {:else if loadingRelatorios && recentRelatorios.length === 0}
     <p class="load-hint" role="status">Carregando relatórios…</p>
   {/if}
 
@@ -313,6 +322,7 @@
     onFinalizar={handleFinalizarRelatorio}
     onExcluir={handleExcluirRelatorio}
   />
+  </div>
 </div>
 
 {#if isTransitionLoading}
@@ -420,6 +430,20 @@
     font-size: 0.85rem;
     color: #6b7280;
     flex-shrink: 0;
+  }
+
+  .quadros-area {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    gap: 0.5rem;
+  }
+
+  .quadros-area :global(.status-quadros-grid) {
+    flex: 1;
+    min-height: 0;
   }
 
   .btn-primary:disabled {
