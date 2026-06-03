@@ -41,7 +41,7 @@ function sendRelatoriosError(res, err) {
 async function registerRelatoriosB2bRoutesSafe(app) {
   try {
     const [
-      { listRelatorios, getRelatorioById, createRelatorio, updateRelatorio },
+      { listRelatorios, getRelatorioById, createRelatorio, updateRelatorio, deleteRelatorio },
       { PAYLOAD_TIPO, RELATORIO_STATUS, SETOR_ORIGEM }
     ] = await Promise.all([
       import('./lib/relatoriosB2b/relatoriosService.js'),
@@ -149,6 +149,21 @@ async function registerRelatoriosB2bRoutesSafe(app) {
         res.json({ success: true, relatorio });
       } catch (err) {
         console.error('❌ [RelatoriosB2B] PUT:', err);
+        sendRelatoriosError(res, err);
+      }
+    });
+
+    app.delete('/api/relatorios-b2b/:id', async (req, res) => {
+      try {
+        const usuario = getUsuarioFromRequest(req);
+        if (!usuario) {
+          return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+        }
+
+        const result = await deleteRelatorio(req.params.id);
+        res.json({ success: true, ...result });
+      } catch (err) {
+        console.error('❌ [RelatoriosB2B] DELETE:', err);
         sendRelatoriosError(res, err);
       }
     });
