@@ -5,7 +5,8 @@ import {
   listRelatorios,
   getRelatorioById,
   createRelatorio,
-  updateRelatorio
+  updateRelatorio,
+  deleteRelatorio
 } from './lib/relatoriosB2b/relatoriosService.js';
 import { PAYLOAD_TIPO, RELATORIO_STATUS, SETOR_ORIGEM } from './lib/relatoriosB2b/constants.js';
 
@@ -132,6 +133,21 @@ export function registerRelatoriosB2bRoutes(app) {
       res.json({ success: true, relatorio });
     } catch (err) {
       console.error('❌ [RelatoriosB2B] PUT:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.delete('/api/relatorios-b2b/:id', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const result = await deleteRelatorio(req.params.id);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [RelatoriosB2B] DELETE:', err);
       sendError(res, err);
     }
   });
