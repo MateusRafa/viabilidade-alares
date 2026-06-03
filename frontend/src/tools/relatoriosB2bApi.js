@@ -104,6 +104,26 @@ export const SETOR_ORIGEM = {
 /** Disparado após salvar/atualizar relatório — dashboards escutam para recarregar a lista. */
 export const RELATORIOS_B2B_ATUALIZADOS_EVENT = 'relatorios-b2b-atualizados';
 
+export function statusLabelForList(status) {
+  if (status === RELATORIO_STATUS.EM_IMPLANTACAO) return 'Em Implantação';
+  if (status === RELATORIO_STATUS.FINALIZADO) return 'Projetos Finalizados';
+  return 'Em Análise';
+}
+
+/** Atualiza a lista no cliente após transferir, finalizar ou excluir (sem piscar o layout). */
+export function applyRelatorioListAction(relatorios, type, item) {
+  if (type === 'excluir') {
+    return relatorios.filter((r) => r.id !== item.id);
+  }
+  const nextStatus =
+    type === 'transferir' ? RELATORIO_STATUS.EM_IMPLANTACAO : RELATORIO_STATUS.FINALIZADO;
+  return relatorios.map((r) =>
+    r.id === item.id
+      ? { ...r, status: nextStatus, statusLabel: statusLabelForList(nextStatus) }
+      : r
+  );
+}
+
 export function notifyRelatoriosB2bAtualizados() {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(RELATORIOS_B2B_ATUALIZADOS_EVENT));
