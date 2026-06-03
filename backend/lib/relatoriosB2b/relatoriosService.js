@@ -9,7 +9,8 @@ import {
 import {
   persistFormPayloadAssets,
   hydrateFormPayloadAssets,
-  extractSearchMetaFromPayload
+  extractSearchMetaFromPayload,
+  deleteRelatorioStorageAssets
 } from './payloadAssets.js';
 
 function assertSupabase() {
@@ -199,4 +200,28 @@ export async function updateRelatorio(id, { usuario, payload, payloadTipo, statu
 
   if (error) throw new Error(error.message);
   return rowToListItem(data);
+}
+
+export async function deleteRelatorio(id) {
+  assertSupabase();
+
+  const { data: existing, error: fetchError } = await supabase
+    .from(RELATORIOS_B2B_TABLE)
+    .select('id')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (fetchError) throw new Error(fetchError.message);
+  if (!existing) {
+    const err = new Error('Relatório não encontrado');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  await deleteRelatorioStorageAssets(supabase, id);
+
+  const { error } = await supabase.from(RELATORIOS_B2B_TABLE).delete().eq('id', id);
+  if (error) throw new Error(error.message);
+
+  return { id, deleted: true };
 }
