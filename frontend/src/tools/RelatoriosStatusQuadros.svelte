@@ -10,6 +10,8 @@
   export let onTransferir = null;
   /** @type {(item: object) => void} */
   export let onFinalizar = null;
+  /** @type {(item: object) => void} */
+  export let onExcluir = null;
 
   const STATUS_SECTIONS = [
     {
@@ -98,6 +100,12 @@
     event?.stopPropagation();
     closeMenu();
     onFinalizar?.(item);
+  }
+
+  function handleExcluir(item, event) {
+    event?.stopPropagation();
+    closeMenu();
+    onExcluir?.(item);
   }
 
   $: filteredRelatorios = filterRelatorios(relatorios, searchQuery);
@@ -220,6 +228,15 @@
                           on:click={(e) => handleImprimir(item, e)}
                         >
                           Imprimir
+                        </button>
+
+                        <button
+                          type="button"
+                          class="card-menu-item card-menu-item--danger"
+                          role="menuitem"
+                          on:click={(e) => handleExcluir(item, e)}
+                        >
+                          Excluir
                         </button>
                     </div>
                   {/if}
@@ -475,6 +492,18 @@
   .card-menu-item--sub {
     padding: 0.65rem 1.15rem 0.65rem 1.5rem;
     font-size: 0.9rem;
+  }
+
+  .card-menu-item--danger {
+    color: #b91c1c;
+    border-top: 1px solid #f3f4f6;
+    margin-top: 0.15rem;
+    padding-top: 0.75rem;
+  }
+
+  .card-menu-item--danger:hover {
+    background: #fef2f2;
+    color: #991b1b;
   }
 
   .relatorio-card-main {
