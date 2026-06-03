@@ -209,6 +209,44 @@ async function hydrateImagensList(supabase, imagens) {
   return out;
 }
 
+/** Remove todos os arquivos do relatório no bucket de storage. */
+export async function deleteRelatorioStorageAssets(supabase, relatorioId) {
+  if (!relatorioId) return;
+
+  const paths = [];
+
+  async function walk(folderPath) {
+    const { data, error } = await supabase.storage.from(RELATORIOS_B2B_BUCKET).list(folderPath, {
+      limit: 1000
+    });
+    if (error) {
+      console.warn(`⚠️ [RelatoriosB2B] list storage (${folderPath}):`, error.message);
+      return;
+    }
+    for (const item of data || []) {
+      const fullPath = folderPath ? `${folderPath}/${item.name}` : item.name;
+      if (item.id == null) {
+        await walk(fullPath);
+      } else {
+        paths.push(fullPath);
+      }
+    }
+  }
+
+  await walk(relatorioId);
+
+  if (paths.length === 0) return;
+
+  const batchSize = 100;
+  for (let i = 0; i < paths.length; i += batchSize) {
+    const batch = paths.slice(i, i + batchSize);
+    const { error } = await supabase.storage.from(RELATORIOS_B2B_BUCKET).remove(batch);
+    if (error) {
+      console.warn('⚠️ [RelatoriosB2B] remove storage batch:', error.message);
+    }
+  }
+}
+
 export function extractSearchMetaFromPayload(formData) {
   const capa = formData?.capa || {};
   const cabecalho = formData?.cabecalho || {};
