@@ -288,22 +288,22 @@
       >
         Gerar PDF
       </button>
+
+      {#if showSearch}
+        <section class="search-panel" aria-label="Pesquisar relatórios">
+          <input
+            bind:this={searchInputEl}
+            id="search-relatorios-implantacao"
+            type="search"
+            class="search-input"
+            placeholder="Cliente, projeto, cidade, projetista…"
+            bind:value={searchQuery}
+            autocomplete="off"
+          />
+        </section>
+      {/if}
     </div>
   </header>
-
-  {#if showSearch}
-    <section class="search-panel" aria-label="Pesquisar relatórios">
-      <input
-        bind:this={searchInputEl}
-        id="search-relatorios-implantacao"
-        type="search"
-        class="search-input"
-        placeholder="Cliente, projeto, cidade, projetista…"
-        bind:value={searchQuery}
-        autocomplete="off"
-      />
-    </section>
-  {/if}
 
   <div class="quadros-area">
   {#if loadRelatoriosError}
@@ -364,10 +364,12 @@
 
   .dashboard-actions {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: flex-start;
     gap: 0.65rem;
+    width: 100%;
+    min-width: 0;
   }
 
   .btn-primary {
@@ -394,14 +396,16 @@
   }
 
   .search-panel {
-    flex-shrink: 0;
+    flex: 1 1 auto;
+    min-width: 12rem;
+    max-width: 24rem;
     display: flex;
-    justify-content: flex-start;
+    align-items: center;
   }
 
   .search-input {
     width: 100%;
-    max-width: 24rem;
+    min-width: 0;
     box-sizing: border-box;
     padding: 0.6rem 0.85rem;
     border: 1px solid #d1d5db;
