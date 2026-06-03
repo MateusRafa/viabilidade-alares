@@ -55,6 +55,15 @@ export async function createRelatorioB2b(
   return data.relatorio;
 }
 
+/** Exclui relatório permanentemente. */
+export async function deleteRelatorioB2b(currentUser, id) {
+  const res = await fetch(getApiUrl(`/api/relatorios-b2b/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: authHeaders(currentUser)
+  });
+  return parseJsonResponse(res);
+}
+
 /** Atualiza relatório existente. */
 export async function updateRelatorioB2b(
   currentUser,
