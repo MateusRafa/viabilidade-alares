@@ -8,12 +8,17 @@
   export let onImprimir = null;
   /** @type {(item: object) => void} */
   export let onTransferir = null;
+  /** Devolve relatório em implantação para edição (Em Análise no setor Implantação) */
+  /** @type {(item: object) => void} */
+  export let onTransferirParaEdicao = null;
   /** @type {(item: object) => void} */
   export let onFinalizar = null;
   /** @type {(item: object) => void} */
   export let onExcluir = null;
+  /** 'projetos' = três colunas; 'implantacao' = só Em Implantação e Finalizado */
+  export let dashboardVariant = 'projetos';
 
-  const STATUS_SECTIONS = [
+  const STATUS_SECTIONS_ALL = [
     {
       status: 'em_analise',
       title: 'Em Análise',
@@ -28,6 +33,19 @@
       status: 'finalizado',
       title: 'Projetos Finalizados',
       emptyText: 'Nenhum projeto finalizado ainda.'
+    }
+  ];
+
+  const STATUS_SECTIONS_IMPLANTACAO = [
+    {
+      status: 'em_implantacao',
+      title: 'Em Implantação',
+      emptyText: 'Nenhum relatório em implantação no momento.'
+    },
+    {
+      status: 'finalizado',
+      title: 'Finalizado',
+      emptyText: 'Nenhum relatório finalizado ainda.'
     }
   ];
 
@@ -56,6 +74,10 @@
 
   function podeFinalizarDireto(item) {
     return item.status === 'em_implantacao';
+  }
+
+  function podeTransferirParaEdicao(item) {
+    return dashboardVariant === 'implantacao' && item.status === 'em_implantacao';
   }
 
   function toggleMenu(itemId, event) {
@@ -96,6 +118,12 @@
     onTransferir?.(item);
   }
 
+  function handleTransferirParaEdicao(item, event) {
+    event?.stopPropagation();
+    closeMenu();
+    onTransferirParaEdicao?.(item);
+  }
+
   function handleFinalizar(item, event) {
     event?.stopPropagation();
     closeMenu();
@@ -108,17 +136,32 @@
     onExcluir?.(item);
   }
 
+  function itemMatchesSection(item, sectionStatus) {
+    if (sectionStatus === 'em_implantacao' && dashboardVariant === 'implantacao') {
+      return item.status === 'em_implantacao' || item.status === 'em_analise';
+    }
+    return item.status === sectionStatus;
+  }
+
+  $: statusSections =
+    dashboardVariant === 'implantacao' ? STATUS_SECTIONS_IMPLANTACAO : STATUS_SECTIONS_ALL;
   $: filteredRelatorios = filterRelatorios(relatorios, searchQuery);
-  $: sectionsWithItems = STATUS_SECTIONS.map((section) => ({
+  $: sectionsWithItems = statusSections.map((section) => ({
     ...section,
-    items: filteredRelatorios.filter((item) => item.status === section.status)
+    items: filteredRelatorios.filter((item) => itemMatchesSection(item, section.status))
   }));
   $: hasSearch = !!(searchQuery || '').trim();
+  $: gridColumns = dashboardVariant === 'implantacao' ? 2 : 3;
 </script>
 
 <svelte:window on:click={closeMenu} />
 
-<div class="status-quadros-grid" role="region" aria-label="Relatórios por status">
+<div
+  class="status-quadros-grid"
+  class:status-quadros-grid--two-cols={gridColumns === 2}
+  role="region"
+  aria-label="Relatórios por status"
+>
   {#each sectionsWithItems as section (section.status)}
     <section
       class="status-quadro"
@@ -211,6 +254,16 @@
                             {/if}
                           </div>
                         {:else if podeFinalizarDireto(item)}
+                          {#if podeTransferirParaEdicao(item)}
+                            <button
+                              type="button"
+                              class="card-menu-item"
+                              role="menuitem"
+                              on:click={(e) => handleTransferirParaEdicao(item, e)}
+                            >
+                              Transferir
+                            </button>
+                          {/if}
                           <button
                             type="button"
                             class="card-menu-item"
@@ -258,6 +311,10 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 1rem;
     overflow: hidden;
+  }
+
+  .status-quadros-grid--two-cols {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .status-quadro {
