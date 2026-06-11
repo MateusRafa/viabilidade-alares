@@ -45,4 +45,3 @@ yarn.lock
 **/*.xlsx
 **/*.csv
 **/*.xls
-
