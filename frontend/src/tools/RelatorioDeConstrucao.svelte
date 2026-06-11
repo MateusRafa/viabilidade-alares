@@ -294,11 +294,8 @@
       assinaturaSupervisorDataUrl,
       projetosPassoLayouts,
       resolutaPassoLayouts: layoutsForPreview,
-      passoLayouts: layoutsForPreview,
       measurePassoLayout,
-      measureNonce,
-      resolutaPageTitle: 'Resoluta do Projeto',
-      pdfSectionKey: measurePassoLayout ? undefined : 'passo-resoluta'
+      measureNonce
     };
   }
 
