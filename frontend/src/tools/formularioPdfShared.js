@@ -1192,13 +1192,16 @@ function measureDescricaoImagensLayout(
 }
 
 /** Mede na prévia (passo em folha única para medição) quantas páginas de texto e se há página de imagem */
-export function measurePassoLayoutsFromDocument(doc, passos = []) {
+export function measurePassoLayoutsFromDocument(doc, passos = [], { pdfSectionKey } = {}) {
   if (!doc?.body) return passos.map((p) => defaultPassoLayout(p));
 
   return passos.map((passo, i) => {
     const hasImage = hasPassoImagens(passo);
     const passoNumero = i + 1;
-    const page = doc.querySelector(`.pdf-page-passo[data-passo-index="${i}"]`);
+    const pageSelector = pdfSectionKey
+      ? `.pdf-page-passo[data-pdf-section="${pdfSectionKey}"][data-passo-index="${i}"]`
+      : `.pdf-page-passo[data-passo-index="${i}"]`;
+    const page = doc.querySelector(pageSelector);
 
     if (!page) {
       return defaultPassoLayout(passo);
@@ -2632,9 +2635,10 @@ function buildPassoPageShell({
 
   const passoIndexAttr =
     passoIndex != null && passoIndex !== '' ? ` data-passo-index="${passoIndex}"` : '';
+  const pdfSectionKey = options.pdfSectionKey || `passo-${passoNumero}`;
 
   return `
-    <div class="pdf-page ${pageClass}" data-pdf-page="${pageNum}" data-pdf-section="passo-${passoNumero}"${passoIndexAttr}>
+    <div class="pdf-page ${pageClass}" data-pdf-page="${pageNum}" data-pdf-section="${pdfSectionKey}"${passoIndexAttr}>
       ${ondasImg}
       <div class="page-shell-artwork">
         <div class="capa-logo-wrap">
@@ -2711,12 +2715,16 @@ function buildPagePassoMeasure(passo, passoNumero, passoIndex, pageNum, options)
               }
             </div>`;
 
+  const tituloHtml = options.resolutaPageTitle
+    ? `<h2 class="page-title">${escapeHtml(options.resolutaPageTitle)}</h2>`
+    : `<h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}</h2>`;
+
   return buildPassoPageShell({
     pageNum,
     passoIndex,
     passoNumero,
     pageClass: 'pdf-page-passo pdf-page-passo-measure',
-    tituloHtml: `<h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}</h2>`,
+    tituloHtml,
     bodyHtml,
     options
   });
@@ -2754,12 +2762,16 @@ function buildPagePassoTextChunk(
               ${imageHtml}
             </div>`;
 
+  const tituloHtml = options.resolutaPageTitle
+    ? `<h2 class="page-title">${escapeHtml(options.resolutaPageTitle)}${escapeHtml(suffix)}</h2>`
+    : `<h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}${escapeHtml(suffix)}</h2>`;
+
   return buildPassoPageShell({
     pageNum,
     passoIndex: chunkIndex === 0 ? passoIndex : null,
     passoNumero,
     pageClass: 'pdf-page-passo pdf-page-passo-texto',
-    tituloHtml: `<h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}${escapeHtml(suffix)}</h2>`,
+    tituloHtml,
     bodyHtml,
     options
   });
@@ -2783,12 +2795,16 @@ function buildPagePassoImageOnly(
               ${buildPassoImagesBlock(imagePasso, passoNumero, { showLabel: false, imageIndices })}
             </div>`;
 
+  const tituloHtml = options.resolutaPageTitle
+    ? `<h2 class="page-title">${escapeHtml(options.resolutaPageTitle)}</h2>`
+    : `<h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}</h2>`;
+
   return buildPassoPageShell({
     pageNum,
     passoIndex: null,
     passoNumero,
     pageClass: 'pdf-page-passo pdf-page-passo-imagem',
-    tituloHtml: `<h2 class="page-title">Passo ${passoNumero}° — ${escapeHtml(tituloPasso)}</h2>`,
+    tituloHtml,
     bodyHtml,
     options
   });
@@ -3026,6 +3042,104 @@ export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
       ${anexosHtml}
     </div>
   `;
+}
+
+/** Páginas do PDF de Construção: projeto (até lista de material) + Resoluta + anexos do projeto */
+export function getConstrucaoPdfPageCount(projetosFormData, resolutaFormData, options = {}) {
+  const projetosPassos = projetosFormData?.passos?.length ? projetosFormData.passos : [emptyPasso()];
+  const projetosLayouts =
+    options.projetosPassoLayouts || projetosPassos.map((p) => defaultPassoLayout(p));
+  let passoPages = 0;
+  projetosPassos.forEach((passo, i) => {
+    passoPages += countPassoPages(projetosLayouts[i] || defaultPassoLayout(passo));
+  });
+  const resolutaPasso = resolutaFormData?.passos?.[0] || emptyPasso();
+  const resolutaLayouts = options.resolutaPassoLayouts || [defaultPassoLayout(resolutaPasso)];
+  passoPages += countPassoPages(resolutaLayouts[0] || defaultPassoLayout(resolutaPasso));
+  return 2 + passoPages + 1 + countAnexoPdfPages(projetosFormData);
+}
+
+export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, meta = {}, options = {}) {
+  const totalPages =
+    options.totalPages ?? getConstrucaoPdfPageCount(projetosFormData, resolutaFormData, options);
+  const buildOpts = { ...options, totalPages };
+  const projetosPassos = projetosFormData?.passos?.length ? projetosFormData.passos : [emptyPasso()];
+  const projetosLayouts =
+    options.projetosPassoLayouts || projetosPassos.map((p) => defaultPassoLayout(p));
+
+  let pageNum = 2;
+  let projetosPassosHtml = '';
+  projetosPassos.forEach((passo, index) => {
+    const built = buildPassoPagesHtml(passo, index + 1, index, pageNum, buildOpts);
+    projetosPassosHtml += built.html;
+    pageNum = built.nextPageNum;
+  });
+
+  const listaMaterialHtml = buildPageListaMaterial(projetosFormData, pageNum + 1, buildOpts);
+  pageNum += 1;
+
+  const resolutaPasso = resolutaFormData?.passos?.[0] || emptyPasso();
+  const resolutaLayouts = options.resolutaPassoLayouts || [defaultPassoLayout(resolutaPasso)];
+  const resolutaBuilt = buildPassoPagesHtml(resolutaPasso, 1, 0, pageNum, {
+    ...buildOpts,
+    passoLayouts: resolutaLayouts,
+    pdfSectionKey: 'passo-resoluta',
+    resolutaPageTitle: 'Resoluta do Projeto'
+  });
+  const resolutaHtml = resolutaBuilt.html;
+  pageNum = resolutaBuilt.nextPageNum;
+
+  let anexosHtml = '';
+  (projetosFormData.anexosPdf || []).forEach((anexo) => {
+    const images = anexo.pageImages || [];
+    const pageTotal = images.length;
+    images.forEach((imageDataUrl, pageIndex) => {
+      pageNum += 1;
+      anexosHtml += buildPageAnexoPdf({
+        pageNum,
+        totalPages,
+        anexoId: anexo.id,
+        anexoNome: anexo.nome,
+        pageIndex,
+        pageTotal,
+        imageDataUrl,
+        options: buildOpts
+      });
+    });
+  });
+
+  return `
+    <div class="pdf-document">
+      ${buildPageCapa(projetosFormData, buildOpts)}
+      ${buildPageCabecalho(projetosFormData, buildOpts)}
+      ${projetosPassosHtml}
+      ${listaMaterialHtml}
+      ${resolutaHtml}
+      ${anexosHtml}
+    </div>
+  `;
+}
+
+export function buildConstrucaoFullPdfHtml(projetosFormData, resolutaFormData, meta = {}, options = {}) {
+  const measureNonce = options.measureNonce ?? '';
+  const title = getEngineeringPdfDocumentTitle(projetosFormData);
+  const baseUrl = options.baseUrl || '';
+  const baseTag = baseUrl
+    ? `<base href="${escapeHtml(baseUrl.replace(/\/$/, '') + '/')}">`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8">
+    ${baseTag}
+    <title>${escapeHtml(title)}</title>
+    <style>${FORMULARIO_PDF_STYLES}</style>
+  </head>
+  <body data-measure-nonce="${escapeHtml(measureNonce)}">
+    ${buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, meta, options)}
+  </body>
+</html>`;
 }
 
 export function buildFullPdfHtml(formData, meta = {}, options = {}) {
