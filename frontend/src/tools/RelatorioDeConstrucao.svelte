@@ -927,14 +927,14 @@
   }
 
   function handlePassoDescricaoInput(passoIndex, event) {
-    previewFocusAnchor = `passo:${passoIndex}`;
+    previewFocusAnchor = 'resoluta';
     previewPreferTailScroll = true;
     syncDescricaoEditor(passoIndex, event.currentTarget);
     schedulePassoLayoutMeasure();
   }
 
   function handlePassoDescricaoAposInput(passoIndex, blockId, event) {
-    previewFocusAnchor = `passo:${passoIndex}`;
+    previewFocusAnchor = 'resoluta';
     previewPreferTailScroll = true;
     syncDescricaoAposEditor(passoIndex, blockId, event.currentTarget);
     schedulePassoLayoutMeasure();
