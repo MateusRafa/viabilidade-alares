@@ -1046,8 +1046,8 @@
     }
   }
 
-  /** Reidrata editores ao expandir a Resoluta — não a cada tecla na descrição. */
-  $: if (expandedSections[RESOLUTA_SECTION_ID]) {
+  /** Reidrata editores da Resoluta — não a cada tecla na descrição. */
+  $: if (formData.passos[0]) {
     tick().then(() => {
       initDescricaoEditor(0);
       getPassoDescricoesAposImagem(formData.passos[0]).forEach((block) => {
@@ -1150,7 +1150,6 @@
     }
 
     projetosPassoLayouts = (projetosFormData.passos || []).map((p) => defaultPassoLayout(p));
-    expandedSections = { [RESOLUTA_SECTION_ID]: !formReadonly };
 
     applyPreviewHtml();
     schedulePassoLayoutMeasure(true);
@@ -1399,22 +1398,14 @@
           {@const editorKey = descricaoEditorKey(passoIndex)}
           {@const uploadCtx = { type: 'passo', index: passoIndex }}
           <section
-            class="form-box form-box-resoluta"
-            class:expanded={expandedSections[RESOLUTA_SECTION_ID]}
+            class="form-box form-box-resoluta expanded"
             data-preview-anchor="resoluta"
             data-passo-index={passoIndex}
           >
-            <button
-              type="button"
-              class="form-box-header"
-              on:click={() => toggleSection(RESOLUTA_SECTION_ID)}
-              aria-expanded={expandedSections[RESOLUTA_SECTION_ID]}
-            >
+            <div class="form-box-header form-box-header-static" role="heading" aria-level="2">
               <span class="form-box-title">Resoluta do Projeto</span>
-              <span class="chevron" class:open={expandedSections[RESOLUTA_SECTION_ID]}>▼</span>
-            </button>
-            {#if expandedSections[RESOLUTA_SECTION_ID]}
-              <div class="form-box-body">
+            </div>
+            <div class="form-box-body">
                 <label class="field field-descricao-resoluta">
                   <span>Descrição</span>
                   <div
@@ -1598,10 +1589,9 @@
                   + Adicionar descrição abaixo das imagens
                 </button>
               </div>
-              {#each passoLayoutWarnings.filter((w) => w.passoIndex === passoIndex) as w (w.message)}
-                <p class="passo-layout-warning" role="status">{w.message}</p>
-              {/each}
-            {/if}
+            {#each passoLayoutWarnings.filter((w) => w.passoIndex === passoIndex) as w (w.message)}
+              <p class="passo-layout-warning" role="status">{w.message}</p>
+            {/each}
           </section>
         {/if}
       </div>
@@ -1828,15 +1818,24 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     max-height: none;
   }
 
-  .form-box-resoluta.expanded .field-descricao-resoluta {
-    flex: 1;
-    min-height: 0;
+  .form-box-header-static {
+    cursor: default;
   }
 
-  .form-box-resoluta.expanded .rich-editor-resoluta {
-    flex: 1;
+  .form-box-header-static:hover {
+    filter: none;
+  }
+
+  .form-box-resoluta .field-descricao-resoluta {
+    flex: 0 0 auto;
+  }
+
+  .form-box-resoluta .rich-editor-resoluta {
+    resize: vertical;
+    overflow: auto;
     min-height: 8rem;
-    max-height: none;
+    height: 14rem;
+    max-height: 70vh;
   }
 
   .form-box-header-row {
