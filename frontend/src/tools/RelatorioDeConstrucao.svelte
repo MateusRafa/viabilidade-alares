@@ -14,8 +14,6 @@
     defaultPassoLayout,
     measurePassoLayoutsFromDocument,
     getPassoLayoutWarnings,
-    CABECALHO_FIELDS,
-    getCabecalhoFieldsForDisplay,
     buildFullPdfHtml,
     getEngineeringPdfDocumentTitle,
     printPdfHtmlNamed,
@@ -60,6 +58,8 @@
 
   const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
   const TRANSITION_LOADING_MS = 2000;
+  const RESOLUTA_SECTION_ID = 'resoluta';
+  const RESOLUTA_TITULO_PASSO = 'Resoluta do Projeto';
 
   let isTransitionLoading = false;
   let loadingMessage = '';
@@ -146,8 +146,17 @@
 
   let projetistaUserDefaultApplied = false;
 
+  function normalizeResolutaFormData(data) {
+    const base = normalizeFormData(data);
+    const primeiro = base.passos?.[0] ? { ...base.passos[0] } : emptyPasso();
+    if (!primeiro.tituloPasso?.trim()) {
+      primeiro.tituloPasso = RESOLUTA_TITULO_PASSO;
+    }
+    return { ...base, passos: [primeiro] };
+  }
+
   function createInitialFormData(user = '') {
-    const data = normalizeFormData(defaultFormData());
+    const data = normalizeResolutaFormData(defaultFormData());
     const name = (user ?? '').trim();
     if (!name) return data;
     projetistaUserDefaultApplied = true;
@@ -184,11 +193,7 @@
   let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
   let formReadonly = false;
   let expandedSections = {
-    capa: false,
-    cabecalho: false,
-    'passo-0': false,
-    listaMaterial: false,
-    anexosPdf: false
+    [RESOLUTA_SECTION_ID]: false
   };
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
@@ -241,7 +246,6 @@
   /** Ignora eventos load antigos do iframe quando várias atualizações seguidas */
   let previewApplyGeneration = 0;
 
-  $: cabecalhoFieldsVisible = getCabecalhoFieldsForDisplay(formData.cabecalho);
 
   $: previewBaseUrl = typeof window !== 'undefined' ? window.location.origin : '';
   $: layoutsForPreview =
@@ -1024,27 +1028,14 @@
     }
   }
 
-  /** Só reidrata editores ao expandir passos ou mudar quantidade — não a cada tecla na descrição. */
-  $: passoEditorsHydrateKey = `${formData.passos.length}|${Object.entries(expandedSections)
-    .filter(([id, open]) => open && id.startsWith('passo-'))
-    .map(([id]) => id)
-    .join(',')}`;
-
-  $: if (passoEditorsHydrateKey) {
-    formData.passos.forEach((passo, passoIndex) => {
-      if (expandedSections[passoSectionId(passoIndex)]) {
-        tick().then(() => {
-          initDescricaoEditor(passoIndex);
-          getPassoDescricoesAposImagem(passo).forEach((block) => {
-            initDescricaoAposEditor(passoIndex, block.id);
-          });
-        });
-      }
+  /** Reidrata editores ao expandir a Resoluta — não a cada tecla na descrição. */
+  $: if (expandedSections[RESOLUTA_SECTION_ID]) {
+    tick().then(() => {
+      initDescricaoEditor(0);
+      getPassoDescricoesAposImagem(formData.passos[0]).forEach((block) => {
+        initDescricaoAposEditor(0, block.id);
+      });
     });
-  }
-
-  $: if (expandedSections.listaMaterial) {
-    tick().then(initMaterialDescricaoEditor);
   }
 
   function removePassoImagem(passoIndex, imagemId) {
@@ -1131,7 +1122,7 @@
     formReadonly = relatorioStatus !== RELATORIO_STATUS.EM_ANALISE;
 
     if (rel.formData) {
-      formData = normalizeFormData(rel.formData);
+      formData = normalizeResolutaFormData(rel.formData);
       projetistaUserDefaultApplied = true;
     }
 
@@ -1365,103 +1356,6 @@
         on:focusin|capture={handleFormPreviewActivity}
         on:input|capture={handleFormPreviewActivity}
       >
-        <!-- Box: Capa -->
-        <section class="form-box" class:expanded={expandedSections.capa} data-preview-anchor="capa">
-          <button
-            type="button"
-            class="form-box-header"
-            on:click={() => toggleSection('capa')}
-            aria-expanded={expandedSections.capa}
-          >
-            <span class="form-box-title">Capa</span>
-            <span class="chevron" class:open={expandedSections.capa}>▼</span>
-          </button>
-          {#if expandedSections.capa}
-            <div class="form-box-body">
-              <label class="field">
-                <span>Título</span>
-                <input
-                  type="text"
-                  bind:value={formData.capa.titulo}
-                  placeholder="Ex: Planejamento e Engenharia de Redes FTTx"
-                />
-              </label>
-              <label class="field">
-                <span>Cliente / Projeto</span>
-                <input
-                  type="text"
-                  bind:value={formData.capa.clienteProjeto}
-                  placeholder="Ex: SICRED CAMBARÁ (ENGT-46557)"
-                />
-              </label>
-              <label class="field">
-                <span>Data</span>
-                <input
-                  type="text"
-                  bind:value={formData.capa.data}
-                  placeholder="Ex: 04 de Fevereiro - 2026"
-                />
-              </label>
-              <label class="field">
-                <span>Cidade</span>
-                <input
-                  type="text"
-                  bind:value={formData.capa.cidade}
-                  placeholder="Ex: Cambará – PR"
-                />
-              </label>
-            </div>
-          {/if}
-        </section>
-
-        <!-- Box: Informações do projeto -->
-        <section class="form-box" class:expanded={expandedSections.cabecalho} data-preview-anchor="cabecalho">
-          <button
-            type="button"
-            class="form-box-header"
-            on:click={() => toggleSection('cabecalho')}
-            aria-expanded={expandedSections.cabecalho}
-          >
-            <span class="form-box-title">Informações do projeto</span>
-            <span class="chevron" class:open={expandedSections.cabecalho}>▼</span>
-          </button>
-          {#if expandedSections.cabecalho}
-            <div class="form-box-body form-box-body-cabecalho">
-              {#each cabecalhoFieldsVisible as field (field.key)}
-                <label class="field">
-                  <span>{field.label}</span>
-                  {#if field.multiline}
-                    <textarea
-                      rows="3"
-                      bind:value={formData.cabecalho[field.key]}
-                      placeholder={field.placeholder}
-                    ></textarea>
-                  {:else if field.options?.length}
-                    <input
-                      type="text"
-                      class="field-combobox"
-                      list="cabecalho-{field.key}-opcoes"
-                      bind:value={formData.cabecalho[field.key]}
-                      placeholder={field.placeholder}
-                    />
-                    <datalist id="cabecalho-{field.key}-opcoes">
-                      {#each field.options as opcao (opcao)}
-                        <option value={opcao}></option>
-                      {/each}
-                    </datalist>
-                  {:else}
-                    <input
-                      type="text"
-                      bind:value={formData.cabecalho[field.key]}
-                      placeholder={field.placeholder}
-                    />
-                  {/if}
-                </label>
-              {/each}
-            </div>
-          {/if}
-        </section>
-
         <input
           bind:this={passoImageInput}
           type="file"
@@ -1473,54 +1367,27 @@
           aria-hidden="true"
         />
 
-        {#each formData.passos as passo, passoIndex (passoIndex)}
-          {@const sectionId = passoSectionId(passoIndex)}
+        {#if formData.passos[0]}
+          {@const passo = formData.passos[0]}
+          {@const passoIndex = 0}
           {@const editorKey = descricaoEditorKey(passoIndex)}
           {@const uploadCtx = { type: 'passo', index: passoIndex }}
-          {@const isLastPasso = passoIndex === formData.passos.length - 1}
-          {@const canRemovePasso = passoIndex >= 1}
           <section
             class="form-box"
-            class:expanded={expandedSections[sectionId]}
+            class:expanded={expandedSections[RESOLUTA_SECTION_ID]}
             data-preview-anchor="passo"
             data-passo-index={passoIndex}
           >
-            <div class="form-box-header-row">
-              <button
-                type="button"
-                class="form-box-header"
-                on:click={() => toggleSection(sectionId)}
-                aria-expanded={expandedSections[sectionId]}
-              >
-                <span class="form-box-title"
-                  >Passo {passoIndex + 1}° — {passo.tituloPasso || 'XXXXX'}</span
-                >
-                <span class="chevron" class:open={expandedSections[sectionId]}>▼</span>
-              </button>
-              {#if canRemovePasso}
-                <button
-                  type="button"
-                  class="btn-remove-passo"
-                  title="Remover Passo {passoIndex + 1}°"
-                  aria-label="Remover este passo"
-                  on:click|stopPropagation={() => removePasso(passoIndex)}
-                >
-                  −
-                </button>
-              {/if}
-              {#if isLastPasso}
-                <button
-                  type="button"
-                  class="btn-add-passo"
-                  title="Adicionar Passo {passoIndex + 2}°"
-                  aria-label="Adicionar próximo passo"
-                  on:click|stopPropagation={addPasso}
-                >
-                  +
-                </button>
-              {/if}
-            </div>
-            {#if expandedSections[sectionId]}
+            <button
+              type="button"
+              class="form-box-header"
+              on:click={() => toggleSection(RESOLUTA_SECTION_ID)}
+              aria-expanded={expandedSections[RESOLUTA_SECTION_ID]}
+            >
+              <span class="form-box-title">Resoluta do Projeto</span>
+              <span class="chevron" class:open={expandedSections[RESOLUTA_SECTION_ID]}>▼</span>
+            </button>
+            {#if expandedSections[RESOLUTA_SECTION_ID]}
               <div class="form-box-body">
                 <label class="field">
                   <span>Nome do passo (substitui XXXXX)</span>
@@ -1728,104 +1595,7 @@
               {/each}
             {/if}
           </section>
-        {/each}
-
-        <!-- Box: Lista de Material -->
-        <section class="form-box" class:expanded={expandedSections.listaMaterial} data-preview-anchor="listaMaterial">
-          <button
-            type="button"
-            class="form-box-header"
-            on:click={() => toggleSection('listaMaterial')}
-            aria-expanded={expandedSections.listaMaterial}
-          >
-            <span class="form-box-title">Lista de Material</span>
-            <span class="chevron" class:open={expandedSections.listaMaterial}>▼</span>
-          </button>
-          {#if expandedSections.listaMaterial}
-            <div class="form-box-body">
-              <label class="field">
-                <span>Descrição</span>
-                <div
-                  use:registerDescricaoEditor={{ key: 'material' }}
-                  class="rich-editor"
-                  contenteditable="true"
-                  role="textbox"
-                  aria-multiline="true"
-                  data-editor="material"
-                  data-placeholder="Descrição da lista de material"
-                  on:focus={() => {
-                    focusedDescricaoEditorKey = 'material';
-                  }}
-                  on:input={handleMaterialDescricaoInput}
-                  on:paste={handleDescricaoPaste}
-                  on:blur={(e) => {
-                    focusedDescricaoEditorKey = null;
-                    syncMaterialDescricaoEditor(e.currentTarget);
-                  }}
-                ></div>
-              </label>
-            </div>
-          {/if}
-        </section>
-
-        <!-- Box: Anexos PDF -->
-        <section class="form-box" class:expanded={expandedSections.anexosPdf} data-preview-anchor="anexosPdf">
-          <button
-            type="button"
-            class="form-box-header"
-            on:click={() => toggleSection('anexosPdf')}
-            aria-expanded={expandedSections.anexosPdf}
-          >
-            <span class="form-box-title">Anexos PDF</span>
-            <span class="chevron" class:open={expandedSections.anexosPdf}>▼</span>
-          </button>
-          {#if expandedSections.anexosPdf}
-            <div class="form-box-body form-box-body-anexos">
-              <p class="anexos-pdf-hint">
-                Cada PDF anexado vira páginas na prévia e no PDF final, após a Lista de Material. Até
-                {MAX_ANEXO_PDF_MB} MB por arquivo (o limite é o tamanho do arquivo, não a quantidade de páginas).
-                Não é possível editar o conteúdo dos anexos.
-              </p>
-
-              {#each formData.anexosPdf as anexo, anexoIndex (anexo.id)}
-                <div class="anexo-pdf-item">
-                  <div class="anexo-pdf-item-header">
-                    <span class="anexo-pdf-item-nome" title={anexo.nome}>{anexo.nome}</span>
-                    <span class="anexo-pdf-item-meta"
-                      >{anexo.pageImages.length} página{anexo.pageImages.length === 1 ? '' : 's'}</span
-                    >
-                  </div>
-                  <button
-                    type="button"
-                    class="btn-remove-anexo"
-                    on:click={() => removeAnexoPdf(anexoIndex)}
-                  >
-                    Remover anexo
-                  </button>
-                </div>
-              {/each}
-
-              <input
-                bind:this={anexoPdfInput}
-                type="file"
-                class="file-input-hidden"
-                accept="application/pdf,.pdf"
-                on:change={handleAnexoPdfSelected}
-                tabindex="-1"
-                aria-hidden="true"
-              />
-
-              <button
-                type="button"
-                class="btn-add-anexo-pdf"
-                on:click={triggerAnexoPdfPicker}
-                disabled={processingAnexoPdf}
-              >
-                {processingAnexoPdf ? 'Processando PDF…' : '+ Adicionar PDF anexo'}
-              </button>
-            </div>
-          {/if}
-        </section>
+        {/if}
       </div>
 
       <footer class="form-actions">
