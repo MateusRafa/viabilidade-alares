@@ -33,4 +33,3 @@ if (fs.existsSync(OLD_BASE) && !fs.existsSync(NEW_BASE)) {
 console.log('\n📁 Arquivos devem estar em: backend/data/');
 console.log('   - base.xlsx');
 console.log('   - projetistas.xlsx\n');
-
