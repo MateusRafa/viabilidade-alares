@@ -162,4 +162,3 @@ if (supabaseAvailable) {
   console.log('⚠️ [Supabase] Módulo carregado, mas não configurado');
   console.log('⚠️ [Supabase] O sistema usará arquivos Excel até que Supabase seja configurado');
 }
-
