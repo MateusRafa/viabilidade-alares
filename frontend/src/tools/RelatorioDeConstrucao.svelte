@@ -1416,15 +1416,6 @@
             {#if expandedSections[RESOLUTA_SECTION_ID]}
               <div class="form-box-body">
                 <label class="field">
-                  <span>Nome do passo (substitui XXXXX)</span>
-                  <input
-                    type="text"
-                    value={passo.tituloPasso}
-                    on:input={(e) => updatePasso(passoIndex, { tituloPasso: e.currentTarget.value })}
-                    placeholder="XXXXX"
-                  />
-                </label>
-                <label class="field">
                   <span>Descrição</span>
                   <div
                     use:registerDescricaoEditor={{ key: editorKey }}
