@@ -1399,7 +1399,7 @@
           {@const editorKey = descricaoEditorKey(passoIndex)}
           {@const uploadCtx = { type: 'passo', index: passoIndex }}
           <section
-            class="form-box"
+            class="form-box form-box-resoluta"
             class:expanded={expandedSections[RESOLUTA_SECTION_ID]}
             data-preview-anchor="resoluta"
             data-passo-index={passoIndex}
@@ -1415,11 +1415,11 @@
             </button>
             {#if expandedSections[RESOLUTA_SECTION_ID]}
               <div class="form-box-body">
-                <label class="field">
+                <label class="field field-descricao-resoluta">
                   <span>Descrição</span>
                   <div
                     use:registerDescricaoEditor={{ key: editorKey }}
-                    class="rich-editor"
+                    class="rich-editor rich-editor-resoluta"
                     contenteditable="true"
                     role="textbox"
                     aria-multiline="true"
@@ -1783,18 +1783,18 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     width: 4px;
   }
 
-  /* Rolagem entre os boxes (Capa, Informações, Passo 1) */
+  /* Área do formulário — box Resoluta ocupa toda a altura até os botões */
   .form-scroll {
     flex: 1;
     min-height: 0;
     min-width: 0;
     width: 100%;
-    overflow-y: auto;
+    overflow: hidden;
     overflow-x: hidden;
     padding: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0;
     overscroll-behavior: contain;
     box-sizing: border-box;
   }
@@ -1820,6 +1820,32 @@ Tem certeza que deseja sair sem salvar o arquivo?"
 
   .form-box.expanded {
     max-height: min(58vh, 540px);
+  }
+
+  .form-box-resoluta {
+    flex: 1;
+    min-height: 0;
+    flex-shrink: 1;
+  }
+
+  .form-box-resoluta.expanded {
+    max-height: none;
+  }
+
+  .form-box-resoluta.expanded .form-box-body {
+    flex: 1;
+    max-height: none;
+  }
+
+  .form-box-resoluta.expanded .field-descricao-resoluta {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .form-box-resoluta.expanded .rich-editor-resoluta {
+    flex: 1;
+    min-height: 8rem;
+    max-height: none;
   }
 
   .form-box-header-row {
@@ -2242,6 +2268,7 @@ Tem certeza que deseja sair sem salvar o arquivo?"
   }
 
   .form-actions {
+    flex-shrink: 0;
     padding: 1rem;
     border-top: 1px solid #e2e8f0;
     background: #f8fafc;
