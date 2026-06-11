@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import Loading from '../Loading.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
+  import InfoDialog from '../components/InfoDialog.svelte';
   import RelatoriosStatusQuadros from './RelatoriosStatusQuadros.svelte';
   import {
     fetchRelatoriosB2b,
@@ -13,7 +14,7 @@
     SETOR_ORIGEM,
     RELATORIO_STATUS,
     PAYLOAD_TIPO,
-    RELATORIOS_B2B_ATUALIZADOS_EVENT
+    subscribeRelatoriosB2bAtualizados
   } from './relatoriosB2bApi.js';
   import { runDuringTransition } from './transitionLoading.js';
 
@@ -27,7 +28,7 @@
   /** @type {{ refreshRelatorios?: boolean, refreshKey?: number, initialRelatorios?: object[] } | null} */
   export let toolOpenOptions = null;
 
-  const FORMULARIO_TOOL_ID = 'formulario-engenharia-implantacao';
+  const FORMULARIO_TOOL_ID = 'relatorio-de-construcao';
   const RETURN_TOOL_ID = 'dashboard-implantacao';
   const TRANSITION_LOADING_MS = 2000;
 
@@ -41,8 +42,11 @@
   let loadRelatoriosError = '';
   let confirmDialogOpen = false;
   let confirmDialogLoading = false;
-  /** @type {{ type: 'transferir' | 'finalizar', item: object } | null} */
+  /** @type {{ type: 'transferir' | 'transferirParaEdicao' | 'excluir', item: object } | null} */
   let pendingConfirmAction = null;
+  let finalizarInfoOpen = false;
+  /** @type {object | null} */
+  let pendingFinalizarItem = null;
   let appliedRefreshKey = 0;
 
   $: if (
@@ -66,10 +70,11 @@
         'Transferir este relatório para Em Implantação?\n\nApós a transferência, não será mais possível editá-lo.',
       confirmLabel: 'Transferir'
     },
-    finalizar: {
-      title: 'Finalizar projeto',
-      message: 'Finalizar este projeto?\n\nApós a finalização, não será mais possível editá-lo.',
-      confirmLabel: 'Finalizar'
+    transferirParaEdicao: {
+      title: 'Transferir de volta para Projetos',
+      message:
+        'Deseja devolver este relatório para edição no setor de Projetos?\n\nEle voltará para análise de projetos e poderá ser editado antes de voltar para implantação.',
+      confirmLabel: 'Transferir'
     },
     excluir: {
       title: 'Excluir relatório',
@@ -112,25 +117,6 @@
       }
     } finally {
       if (!silent) loadingRelatorios = false;
-    }
-  }
-
-  async function abrirFormularioPdf() {
-    if (isTransitionLoading) return;
-
-    if (typeof onOpenTool !== 'function') {
-      alert('Não foi possível abrir o formulário. Recarregue a página e tente novamente.');
-      return;
-    }
-
-    isTransitionLoading = true;
-    loadingMessage = 'Abrindo Relatório de Construção…';
-    try {
-      await tick();
-      await new Promise((resolve) => setTimeout(resolve, TRANSITION_LOADING_MS));
-      onOpenTool(FORMULARIO_TOOL_ID, { returnTo: RETURN_TOOL_ID });
-    } finally {
-      isTransitionLoading = false;
     }
   }
 
@@ -196,13 +182,16 @@
     try {
       if (type === 'transferir') {
         await updateRelatorioB2b(currentUser, item.id, {
-          status: RELATORIO_STATUS.EM_IMPLANTACAO
-        });
-      } else if (type === 'finalizar') {
-        await updateRelatorioB2b(currentUser, item.id, {
-          status: RELATORIO_STATUS.FINALIZADO,
+          status: RELATORIO_STATUS.EM_IMPLANTACAO,
           setorOrigem: SETOR_ORIGEM.IMPLANTACAO
         });
+        notifyRelatoriosB2bAtualizados();
+      } else if (type === 'transferirParaEdicao') {
+        await updateRelatorioB2b(currentUser, item.id, {
+          status: RELATORIO_STATUS.EM_ANALISE,
+          setorOrigem: SETOR_ORIGEM.PROJETOS
+        });
+        notifyRelatoriosB2bAtualizados();
       } else if (type === 'excluir') {
         await deleteRelatorioB2b(currentUser, item.id);
         notifyRelatoriosB2bAtualizados();
@@ -223,8 +212,32 @@
     openConfirmDialog('transferir', item);
   }
 
+  function handleTransferirParaEdicao(item) {
+    openConfirmDialog('transferirParaEdicao', item);
+  }
+
   function handleFinalizarRelatorio(item) {
-    openConfirmDialog('finalizar', item);
+    pendingFinalizarItem = item;
+    finalizarInfoOpen = true;
+  }
+
+  function closeFinalizarInfoDialog() {
+    finalizarInfoOpen = false;
+    pendingFinalizarItem = null;
+  }
+
+  function handleFinalizarInfoRetornar() {
+    closeFinalizarInfoDialog();
+  }
+
+  function handleFinalizarInfoAdicionarConstrucao() {
+    const item = pendingFinalizarItem;
+    closeFinalizarInfoDialog();
+    if (!item) return;
+    abrirRelatorioComLoading(item, {
+      mode: 'edit',
+      loadingText: 'Abrindo Relatório de Construção…'
+    });
   }
 
   function handleExcluirRelatorio(item) {
@@ -254,15 +267,10 @@
       carregarRelatorios();
     }
 
-    const onRelatoriosAtualizados = () => carregarRelatorios({ silent: true });
-    if (typeof window !== 'undefined') {
-      window.addEventListener(RELATORIOS_B2B_ATUALIZADOS_EVENT, onRelatoriosAtualizados);
-    }
+    const unsubscribe = subscribeRelatoriosB2bAtualizados(() => carregarRelatorios({ silent: true }));
 
     return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener(RELATORIOS_B2B_ATUALIZADOS_EVENT, onRelatoriosAtualizados);
-      }
+      unsubscribe();
     };
   });
 </script>
@@ -279,14 +287,6 @@
         disabled={isTransitionLoading}
       >
         Pesquisar
-      </button>
-      <button
-        type="button"
-        class="btn-primary"
-        on:click={abrirFormularioPdf}
-        disabled={isTransitionLoading}
-      >
-        Gerar PDF
       </button>
 
       {#if showSearch}
@@ -313,11 +313,13 @@
   {/if}
 
   <RelatoriosStatusQuadros
+    dashboardVariant="implantacao"
     relatorios={recentRelatorios}
     {searchQuery}
     onEditar={handleEditarRelatorio}
     onImprimir={handleImprimirRelatorio}
     onTransferir={handleTransferirRelatorio}
+    onTransferirParaEdicao={handleTransferirParaEdicao}
     onFinalizar={handleFinalizarRelatorio}
     onExcluir={handleExcluirRelatorio}
   />
@@ -340,6 +342,18 @@
     loading={confirmDialogLoading}
     on:confirm={handleConfirmDialogAction}
     on:cancel={closeConfirmDialog}
+  />
+{/if}
+
+{#if finalizarInfoOpen}
+  <InfoDialog
+    open={finalizarInfoOpen}
+    title="Finalizar Relatório"
+    message="Para finalizar o Relatório é necessário adicionar o Relatório de Construção."
+    secondaryLabel="Retornar para o Dashboard"
+    primaryLabel="+ Relatório de Construção"
+    on:secondary={handleFinalizarInfoRetornar}
+    on:primary={handleFinalizarInfoAdicionarConstrucao}
   />
 {/if}
 
