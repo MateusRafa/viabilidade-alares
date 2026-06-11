@@ -223,7 +223,7 @@
   const FORM_COLUMN_WIDTH_KEY = 'formularioEngenhariaImplantacao_formColumnWidth';
   const FORM_COLUMN_MIN_PX = 320;
   const FORM_COLUMN_MAX_PX = 720;
-  const FORM_COLUMN_DEFAULT_PX = 440;
+  const FORM_COLUMN_DEFAULT_PX = 520;
 
   let formColumnWidth = FORM_COLUMN_DEFAULT_PX;
   let isResizingFormColumn = false;
@@ -1076,7 +1076,8 @@
       if (!saved) return;
       const parsed = parseInt(saved, 10);
       if (!Number.isNaN(parsed)) {
-        formColumnWidth = Math.max(FORM_COLUMN_MIN_PX, Math.min(FORM_COLUMN_MAX_PX, parsed));
+        const width = parsed === 440 ? FORM_COLUMN_DEFAULT_PX : parsed;
+        formColumnWidth = Math.max(FORM_COLUMN_MIN_PX, Math.min(FORM_COLUMN_MAX_PX, width));
       }
     } catch {
       /* ignore */
@@ -1752,7 +1753,7 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     width: 100%;
     overflow: hidden;
     overflow-x: hidden;
-    padding: 1rem;
+    padding: 1rem 0.65rem 1rem 1rem;
     display: flex;
     flex-direction: column;
     gap: 0;
@@ -2327,12 +2328,12 @@ Tem certeza que deseja sair sem salvar o arquivo?"
 
   .preview-frame-wrapper {
     flex: 1;
-    padding: 1rem;
+    padding: 1rem 1rem 1rem 0.35rem;
     overflow: auto;
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    align-items: center;
+    justify-content: flex-start;
+    align-items: flex-start;
     position: relative;
   }
 
