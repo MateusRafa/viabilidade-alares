@@ -14,7 +14,7 @@
     defaultPassoLayout,
     measurePassoLayoutsFromDocument,
     getPassoLayoutWarnings,
-    buildFullPdfHtml,
+    buildConstrucaoFullPdfHtml,
     getEngineeringPdfDocumentTitle,
     printPdfHtmlNamed,
     loadLogoDataUrl,
@@ -182,6 +182,9 @@
   }
 
   let formData = createInitialFormData(currentUser);
+  /** Conteúdo do projeto (somente leitura na prévia) — payload_projetos */
+  let projetosFormData = normalizeFormData(defaultFormData());
+  let projetosPassoLayouts = [];
 
   $: applyProjetistaDefault(currentUser);
   let generatingPDF = false;
@@ -193,7 +196,7 @@
   let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
   let formReadonly = false;
   let expandedSections = {
-    [RESOLUTA_SECTION_ID]: false
+    [RESOLUTA_SECTION_ID]: true
   };
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
@@ -238,7 +241,7 @@
   /** HTML do iframe oculto só para medição de quebra de página */
   let measureHtml = '';
   /** Seção do formulário em edição — prévia volta para a página correspondente */
-  let previewFocusAnchor = 'capa';
+  let previewFocusAnchor = 'resoluta';
   /** Restaura rolagem da prévia após atualização automática (mesma seção em edição) */
   let previewScrollRestore = null;
   /** Ao digitar descrição longa, rolar para a última folha de texto do passo */
@@ -272,11 +275,14 @@
 
   $: formPreviewKey = assetsReady
     ? JSON.stringify({
-        capa: formData.capa,
-        cabecalho: formData.cabecalho,
-        passos: formData.passos,
-        listaMaterial: formData.listaMaterial,
-        anexosPdf: (formData.anexosPdf || []).map((a) => [a.id, a.pageImages?.length || 0])
+        projetos: {
+          capa: projetosFormData.capa,
+          cabecalho: projetosFormData.cabecalho,
+          passos: projetosFormData.passos,
+          listaMaterial: projetosFormData.listaMaterial,
+          anexosPdf: (projetosFormData.anexosPdf || []).map((a) => [a.id, a.pageImages?.length || 0])
+        },
+        resoluta: formData.passos
       })
     : '';
 
@@ -286,10 +292,21 @@
       logoDataUrl,
       capaOndasDataUrl,
       assinaturaSupervisorDataUrl,
+      projetosPassoLayouts,
+      resolutaPassoLayouts: layoutsForPreview,
       passoLayouts: layoutsForPreview,
       measurePassoLayout,
-      measureNonce
+      measureNonce,
+      resolutaPageTitle: 'Resoluta do Projeto',
+      pdfSectionKey: measurePassoLayout ? undefined : 'passo-resoluta'
     };
+  }
+
+  function buildConstrucaoPreviewHtml(options = {}) {
+    return buildConstrucaoFullPdfHtml(projetosFormData, formData, {}, {
+      ...buildPreviewHtmlOptions(options),
+      ...options
+    });
   }
 
   function syncPreviewFocusFromTarget(target) {
@@ -297,12 +314,12 @@
 
     const editor = target.closest('.rich-editor[data-passo-index]');
     if (editor) {
-      previewFocusAnchor = `passo:${editor.dataset.passoIndex ?? '0'}`;
+      previewFocusAnchor = 'resoluta';
       return true;
     }
     const editorApos = target.closest('.rich-editor[data-desc-apos-id]');
     if (editorApos) {
-      previewFocusAnchor = `passo:${editorApos.dataset.passoIndex ?? '0'}`;
+      previewFocusAnchor = 'resoluta';
       return true;
     }
 
@@ -315,8 +332,8 @@
     if (!box) return false;
 
     const anchor = box.dataset.previewAnchor;
-    if (anchor === 'passo') {
-      previewFocusAnchor = `passo:${box.dataset.passoIndex ?? '0'}`;
+    if (anchor === 'passo' || anchor === 'resoluta') {
+      previewFocusAnchor = 'resoluta';
     } else {
       previewFocusAnchor = anchor;
     }
@@ -360,6 +377,12 @@
         return doc.querySelector(`[data-pdf-section="anexo-${anexoId}"]`);
       }
       return doc.querySelector('.pdf-page-anexo');
+    }
+    if (previewFocusAnchor === 'resoluta') {
+      const resolutaPages = doc.querySelectorAll('[data-pdf-section="passo-resoluta"]');
+      if (resolutaPages.length) {
+        return preferTail ? resolutaPages[resolutaPages.length - 1] : resolutaPages[0];
+      }
     }
     if (previewFocusAnchor.startsWith('passo:')) {
       const passoIndex = previewFocusAnchor.split(':')[1];
@@ -418,7 +441,7 @@
     if (!assetsReady) return;
     capturePreviewScroll();
     previewApplyGeneration += 1;
-    previewHtmlDisplayed = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
+    previewHtmlDisplayed = buildConstrucaoPreviewHtml();
   }
 
   function schedulePreviewRefresh(immediate = false) {
@@ -469,7 +492,9 @@
       requestAnimationFrame(() => requestAnimationFrame(resolve));
     });
 
-    const next = measurePassoLayoutsFromDocument(doc, formData.passos);
+    const next = measurePassoLayoutsFromDocument(doc, formData.passos, {
+      pdfSectionKey: 'passo-resoluta'
+    });
     const changed = JSON.stringify(next) !== JSON.stringify(passoLayouts);
 
     if (changed) {
@@ -488,14 +513,10 @@
     clearTimeout(measureDebounceTimer);
     measureDebounceTimer = setTimeout(
       () => {
-        measureHtml = buildFullPdfHtml(
-          formData,
-          {},
-          buildPreviewHtmlOptions({
-            measurePassoLayout: true,
-            measureNonce: `${measurePassoKey}-m`
-          })
-        );
+        measureHtml = buildConstrucaoPreviewHtml({
+          measurePassoLayout: true,
+          measureNonce: `${measurePassoKey}-m`
+        });
       },
       immediate ? 0 : MEASURE_DEBOUNCE_MS
     );
@@ -1118,13 +1139,21 @@
 
   function aplicarRelatorioApi(rel) {
     relatorioSalvoId = rel.id;
-    relatorioStatus = rel.status || RELATORIO_STATUS.EM_ANALISE;
-    formReadonly = relatorioStatus !== RELATORIO_STATUS.EM_ANALISE;
+    relatorioStatus = rel.status || RELATORIO_STATUS.EM_IMPLANTACAO;
+    formReadonly = relatorioStatus === RELATORIO_STATUS.FINALIZADO;
 
+    if (rel.formDataProjetos && Object.keys(rel.formDataProjetos).length) {
+      projetosFormData = normalizeFormData(rel.formDataProjetos);
+    } else if (rel.payloadProjetos && Object.keys(rel.payloadProjetos).length) {
+      projetosFormData = normalizeFormData(rel.payloadProjetos);
+    }
     if (rel.formData) {
       formData = normalizeResolutaFormData(rel.formData);
       projetistaUserDefaultApplied = true;
     }
+
+    projetosPassoLayouts = (projetosFormData.passos || []).map((p) => defaultPassoLayout(p));
+    expandedSections = { [RESOLUTA_SECTION_ID]: !formReadonly };
 
     applyPreviewHtml();
     schedulePassoLayoutMeasure(true);
@@ -1222,11 +1251,11 @@
       throw new Error('Usuário não identificado. Faça login novamente.');
     }
 
-    const payload = normalizeFormData(formData);
+    const payload = normalizeResolutaFormData(formData);
     const saveOptions = {
       payload,
       payloadTipo: PAYLOAD_TIPO.IMPLANTACAO,
-      status: relatorioStatus || RELATORIO_STATUS.EM_ANALISE,
+      status: relatorioStatus || RELATORIO_STATUS.EM_IMPLANTACAO,
       setorOrigem: SETOR_ORIGEM.IMPLANTACAO
     };
 
@@ -1274,8 +1303,8 @@
         await persistRelatorio();
       }
       await flushPreviewRefresh();
-      const docTitle = getEngineeringPdfDocumentTitle(formData);
-      const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
+      const docTitle = getEngineeringPdfDocumentTitle(projetosFormData);
+      const printHtml = buildConstrucaoPreviewHtml();
       const result = await printPdfHtmlNamed(printHtml, { title: docTitle });
       if (!result.success) {
         pdfError =
@@ -1375,7 +1404,7 @@
           <section
             class="form-box"
             class:expanded={expandedSections[RESOLUTA_SECTION_ID]}
-            data-preview-anchor="passo"
+            data-preview-anchor="resoluta"
             data-passo-index={passoIndex}
           >
             <button
@@ -1601,11 +1630,6 @@
       <footer class="form-actions">
         {#if pdfError}
           <p class="pdf-error" role="alert">{pdfError}</p>
-        {/if}
-        {#if formReadonly}
-          <p class="readonly-banner" role="status">
-            Este relatório não pode mais ser editado (transferido ou finalizado).
-          </p>
         {/if}
         <div class="form-actions-buttons">
           {#if !formReadonly}
