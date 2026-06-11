@@ -940,16 +940,6 @@
     schedulePassoLayoutMeasure();
   }
 
-  function updatePassoBlocoTituloImagem(passoIndex, blockId, tituloImagem) {
-    const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
-    updatePasso(passoIndex, {
-      descricoesAposImagem: blocks.map((b) =>
-        b.id === blockId ? { ...b, tituloImagem } : b
-      )
-    });
-    schedulePassoLayoutMeasure();
-  }
-
   function addDescricaoAposImagem(passoIndex) {
     const blocks = getPassoDescricoesAposImagem(formData.passos[passoIndex]);
     const novo = emptyPassoBlocoApos();
@@ -1506,16 +1496,6 @@
                           syncDescricaoAposEditor(passoIndex, block.id, e.currentTarget);
                         }}
                       ></div>
-                    </label>
-                    <label class="field">
-                      <span>Título da seção de Imagens</span>
-                      <input
-                        type="text"
-                        value={block.tituloImagem || 'Imagem'}
-                        on:input={(e) =>
-                          updatePassoBlocoTituloImagem(passoIndex, block.id, e.currentTarget.value)}
-                        placeholder="Imagem"
-                      />
                     </label>
                     <div class="field field-upload">
                       <div
