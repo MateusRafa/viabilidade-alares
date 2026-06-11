@@ -220,10 +220,10 @@
 
   const PREVIEW_DEBOUNCE_MS = 50;
   const MEASURE_DEBOUNCE_MS = 50;
-  const FORM_COLUMN_WIDTH_KEY = 'formularioEngenhariaImplantacao_formColumnWidth';
-  const FORM_COLUMN_MIN_PX = 320;
-  const FORM_COLUMN_MAX_PX = 720;
+  /** Largura padrão — distância ideal entre o box e o PDF; só muda se o usuário arrastar. */
+  const FORM_COLUMN_WIDTH_KEY = 'relatorioDeConstrucao_formColumnWidth';
   const FORM_COLUMN_DEFAULT_PX = 440;
+  const FORM_COLUMN_MAX_PX = 720;
 
   let formColumnWidth = FORM_COLUMN_DEFAULT_PX;
   let isResizingFormColumn = false;
@@ -1081,12 +1081,13 @@
 
   function loadFormColumnWidthPreference() {
     if (typeof window === 'undefined') return;
+    formColumnWidth = FORM_COLUMN_DEFAULT_PX;
     try {
       const saved = localStorage.getItem(FORM_COLUMN_WIDTH_KEY);
       if (!saved) return;
       const parsed = parseInt(saved, 10);
-      if (!Number.isNaN(parsed)) {
-        formColumnWidth = Math.max(FORM_COLUMN_MIN_PX, Math.min(FORM_COLUMN_MAX_PX, parsed));
+      if (!Number.isNaN(parsed) && parsed > FORM_COLUMN_DEFAULT_PX) {
+        formColumnWidth = Math.min(FORM_COLUMN_MAX_PX, parsed);
       }
     } catch {
       /* ignore */
@@ -1113,7 +1114,7 @@
     const clientX = e.clientX ?? e.touches?.[0]?.clientX ?? resizeStartX;
     const deltaX = clientX - resizeStartX;
     formColumnWidth = Math.max(
-      FORM_COLUMN_MIN_PX,
+      FORM_COLUMN_DEFAULT_PX,
       Math.min(FORM_COLUMN_MAX_PX, resizeStartFormWidth + deltaX)
     );
   }
@@ -1128,7 +1129,11 @@
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
     try {
-      localStorage.setItem(FORM_COLUMN_WIDTH_KEY, String(formColumnWidth));
+      if (formColumnWidth > FORM_COLUMN_DEFAULT_PX) {
+        localStorage.setItem(FORM_COLUMN_WIDTH_KEY, String(formColumnWidth));
+      } else {
+        localStorage.removeItem(FORM_COLUMN_WIDTH_KEY);
+      }
     } catch {
       /* ignore */
     }
