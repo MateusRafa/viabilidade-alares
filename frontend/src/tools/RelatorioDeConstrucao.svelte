@@ -222,11 +222,9 @@
   const MEASURE_DEBOUNCE_MS = 50;
   const FORM_COLUMN_WIDTH_KEY = 'formularioEngenhariaImplantacao_formColumnWidth';
   const FORM_COLUMN_MIN_PX = 320;
-  const PREVIEW_COLUMN_MIN_PX = 280;
-  const RESIZE_HANDLE_PX = 10;
+  const FORM_COLUMN_MAX_PX = 720;
   const FORM_COLUMN_DEFAULT_PX = 440;
 
-  let workspaceEl;
   let formColumnWidth = FORM_COLUMN_DEFAULT_PX;
   let isResizingFormColumn = false;
   let resizeStartX = 0;
@@ -1081,30 +1079,14 @@
     };
   }
 
-  function getFormColumnMaxPx() {
-    if (typeof window === 'undefined') return 1200;
-    const width = workspaceEl?.clientWidth ?? window.innerWidth;
-    return Math.max(
-      FORM_COLUMN_MIN_PX,
-      width - PREVIEW_COLUMN_MIN_PX - RESIZE_HANDLE_PX
-    );
-  }
-
-  function clampFormColumnWidth(width = formColumnWidth) {
-    formColumnWidth = Math.max(FORM_COLUMN_MIN_PX, Math.min(getFormColumnMaxPx(), width));
-  }
-
   function loadFormColumnWidthPreference() {
     if (typeof window === 'undefined') return;
     try {
       const saved = localStorage.getItem(FORM_COLUMN_WIDTH_KEY);
-      if (!saved) {
-        clampFormColumnWidth(FORM_COLUMN_DEFAULT_PX);
-        return;
-      }
+      if (!saved) return;
       const parsed = parseInt(saved, 10);
       if (!Number.isNaN(parsed)) {
-        clampFormColumnWidth(parsed);
+        formColumnWidth = Math.max(FORM_COLUMN_MIN_PX, Math.min(FORM_COLUMN_MAX_PX, parsed));
       }
     } catch {
       /* ignore */
@@ -1130,7 +1112,10 @@
     e.preventDefault();
     const clientX = e.clientX ?? e.touches?.[0]?.clientX ?? resizeStartX;
     const deltaX = clientX - resizeStartX;
-    clampFormColumnWidth(resizeStartFormWidth + deltaX);
+    formColumnWidth = Math.max(
+      FORM_COLUMN_MIN_PX,
+      Math.min(FORM_COLUMN_MAX_PX, resizeStartFormWidth + deltaX)
+    );
   }
 
   function stopResizeFormColumn() {
@@ -1345,13 +1330,9 @@
     }
 
     let removeWindowPaste = null;
-    let removeWindowResize = null;
 
     if (typeof window !== 'undefined') {
       loadFormColumnWidthPreference();
-      const onWindowResize = () => clampFormColumnWidth();
-      window.addEventListener('resize', onWindowResize);
-      removeWindowResize = () => window.removeEventListener('resize', onWindowResize);
       await bootstrapFormulario();
 
       const onWindowPaste = async (e) => {
@@ -1374,7 +1355,6 @@
       if (typeof onBackRequest === 'function') {
         onBackRequest(null);
       }
-      removeWindowResize?.();
       removeWindowPaste?.();
       disarmImagePaste();
       stopResizeFormColumn();
@@ -1392,7 +1372,7 @@
 </script>
 
 <div class="relatorio-de-construcao">
-  <div class="workspace" bind:this={workspaceEl}>
+  <div class="workspace">
     <!-- Coluna esquerda: formulário -->
     <aside class="form-column" style="width: {formColumnWidthStyle}; flex: 0 0 auto;">
       <div
@@ -2371,8 +2351,8 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     overflow: auto;
     display: flex;
     flex-direction: column;
-    justify-content: flex-start;
-    align-items: flex-start;
+    justify-content: center;
+    align-items: center;
     position: relative;
   }
 
@@ -2405,14 +2385,13 @@ Tem certeza que deseja sair sem salvar o arquivo?"
 
   .pdf-preview-iframe {
     width: 100%;
-    max-width: min(100%, 210mm);
+    max-width: 240mm;
     height: 100%;
     min-height: 520px;
     border: 2px solid #7b68ee;
     border-radius: 6px;
     background: #e8ecf4;
     box-shadow: 0 4px 20px rgba(123, 104, 238, 0.15);
-    flex-shrink: 0;
   }
 
   @media (max-width: 900px) {
