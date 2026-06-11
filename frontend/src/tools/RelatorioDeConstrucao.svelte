@@ -1830,7 +1830,7 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     flex: 0 0 auto;
   }
 
-  .form-box-resoluta .rich-editor-resoluta {
+  .form-box-resoluta .rich-editor {
     resize: vertical;
     overflow: auto;
     min-height: 8rem;
