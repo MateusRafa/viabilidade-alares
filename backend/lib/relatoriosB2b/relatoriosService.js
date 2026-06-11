@@ -58,7 +58,12 @@ export async function listRelatorios({ status, q, limit = 50, setorOrigem } = {}
 
   const isVisaoProjetos = setorOrigem === SETOR_ORIGEM.PROJETOS;
 
-  if (!isVisaoProjetos && setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+  if (setorOrigem === SETOR_ORIGEM.IMPLANTACAO) {
+    // Setor implantação + em implantação + todos os finalizados (visíveis também no dash de Projetos)
+    query = query.or(
+      'setor_origem.eq.implantacao,status.eq.em_implantacao,status.eq.finalizado'
+    );
+  } else if (!isVisaoProjetos && setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
     query = query.eq('setor_origem', setorOrigem);
   }
 
@@ -171,7 +176,16 @@ export async function updateRelatorio(id, { usuario, payload, payloadTipo, statu
     patch.status = status;
   }
 
-  if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+  if (status === RELATORIO_STATUS.FINALIZADO) {
+    if (
+      existing.setor_origem === SETOR_ORIGEM.IMPLANTACAO ||
+      existing.status === RELATORIO_STATUS.EM_IMPLANTACAO
+    ) {
+      patch.setor_origem = SETOR_ORIGEM.IMPLANTACAO;
+    } else if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
+      patch.setor_origem = setorOrigem;
+    }
+  } else if (setorOrigem && Object.values(SETOR_ORIGEM).includes(setorOrigem)) {
     patch.setor_origem = setorOrigem;
   }
 
