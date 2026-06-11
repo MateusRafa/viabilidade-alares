@@ -3070,7 +3070,12 @@ export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, m
   let pageNum = 2;
   let projetosPassosHtml = '';
   projetosPassos.forEach((passo, index) => {
-    const built = buildPassoPagesHtml(passo, index + 1, index, pageNum, buildOpts);
+    const built = buildPassoPagesHtml(passo, index + 1, index, pageNum, {
+      ...buildOpts,
+      passoLayouts: projetosLayouts,
+      pdfSectionKey: undefined,
+      resolutaPageTitle: undefined
+    });
     projetosPassosHtml += built.html;
     pageNum = built.nextPageNum;
   });
