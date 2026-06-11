@@ -1436,15 +1436,6 @@
                     }}
                   ></div>
                 </label>
-                <label class="field">
-                  <span>Título da seção de Imagens</span>
-                  <input
-                    type="text"
-                    value={passo.tituloImagem || 'Imagem'}
-                    on:input={(e) => updatePasso(passoIndex, { tituloImagem: e.currentTarget.value })}
-                    placeholder="Imagem"
-                  />
-                </label>
                 <div class="field field-upload">
                   <div
                     class="upload-box"
