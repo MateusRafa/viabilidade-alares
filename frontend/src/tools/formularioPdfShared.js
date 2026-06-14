@@ -1912,6 +1912,10 @@ export const FORMULARIO_PDF_STYLES = `
   .pdf-page-lista-material .artwork-page-footer .capa-rodape {
     display: none;
   }
+  .pdf-page-passo.resoluta-projeto .artwork-page-footer .capa-rodape,
+  [data-pdf-section="passo-resoluta"] .artwork-page-footer .capa-rodape {
+    display: none;
+  }
   .artwork-page-num {
     position: absolute;
     right: 0;
@@ -2668,9 +2672,10 @@ function buildPassoPageShell({
   const passoIndexAttr =
     passoIndex != null && passoIndex !== '' ? ` data-passo-index="${passoIndex}"` : '';
   const pdfSectionKey = options.pdfSectionKey || `passo-${passoNumero}`;
+  const resolutaPageClass = pdfSectionKey === 'passo-resoluta' ? ' resoluta-projeto' : '';
 
   return `
-    <div class="pdf-page ${pageClass}" data-pdf-page="${pageNum}" data-pdf-section="${pdfSectionKey}"${passoIndexAttr}>
+    <div class="pdf-page ${pageClass${resolutaPageClass}" data-pdf-page="${pageNum}" data-pdf-section="${pdfSectionKey}"${passoIndexAttr}>
       ${ondasImg}
       <div class="page-shell-artwork">
         <div class="capa-logo-wrap">
