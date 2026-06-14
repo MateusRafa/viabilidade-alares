@@ -21,6 +21,7 @@
     loadLogoDataUrl,
     loadCapaOndasDataUrl,
     loadAssinaturaSupervisorDataUrl,
+    loadAssinaturaSupervisorImplantacaoDataUrl,
     waitForPrintImages,
     sanitizeRichHtml,
     MAX_ANEXO_PDF_MB,
@@ -215,6 +216,7 @@
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
   let assinaturaSupervisorDataUrl = '';
+  let assinaturaSupervisorImplantacaoDataUrl = '';
   let assetsReady = false;
   let passoImageInput;
   let anexoPdfInput;
@@ -307,6 +309,7 @@
       logoDataUrl,
       capaOndasDataUrl,
       assinaturaSupervisorDataUrl,
+      assinaturaSupervisorImplantacaoDataUrl,
       projetosPassoLayouts,
       resolutaPassoLayouts: layoutsForPreview,
       measurePassoLayout,
@@ -1250,16 +1253,18 @@
             })
           : Promise.resolve(null);
 
-      const [rel, logo, ondas, assinatura] = await Promise.all([
+      const [rel, logo, ondas, assinatura, assinaturaImplantacao] = await Promise.all([
         relatorioPromise,
         loadLogoDataUrl(origin),
         loadCapaOndasDataUrl(origin),
-        loadAssinaturaSupervisorDataUrl(origin)
+        loadAssinaturaSupervisorDataUrl(origin),
+        loadAssinaturaSupervisorImplantacaoDataUrl(origin)
       ]);
 
       logoDataUrl = logo;
       capaOndasDataUrl = ondas;
       assinaturaSupervisorDataUrl = assinatura;
+      assinaturaSupervisorImplantacaoDataUrl = assinaturaImplantacao;
       assetsReady = true;
 
       if (rel) {
