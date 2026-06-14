@@ -2675,7 +2675,7 @@ function buildPassoPageShell({
   const resolutaPageClass = pdfSectionKey === 'passo-resoluta' ? ' resoluta-projeto' : '';
 
   return `
-    <div class="pdf-page ${pageClass${resolutaPageClass}" data-pdf-page="${pageNum}" data-pdf-section="${pdfSectionKey}"${passoIndexAttr}>
+    <div class="pdf-page ${pageClass}${resolutaPageClass}" data-pdf-page="${pageNum}" data-pdf-section="${pdfSectionKey}"${passoIndexAttr}>
       ${ondasImg}
       <div class="page-shell-artwork">
         <div class="capa-logo-wrap">
