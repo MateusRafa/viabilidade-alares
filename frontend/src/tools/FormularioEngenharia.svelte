@@ -175,6 +175,7 @@
   let savingPDF = false;
   let pdfError = '';
   let saveSuccessDialogOpen = false;
+  let gerarPdfDialogOpen = false;
   let relatorioSalvoId = null;
   let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
   let formReadonly = false;
@@ -1218,7 +1219,7 @@
     }
   }
 
-  async function persistRelatorio() {
+  async function persistRelatorio({ transferirImplantacao = false } = {}) {
     if (formReadonly) return;
 
     const usuario = (currentUser || '').trim();
@@ -1230,16 +1231,19 @@
     const saveOptions = {
       payload,
       payloadTipo: PAYLOAD_TIPO.PROJETOS,
-      status: relatorioStatus || RELATORIO_STATUS.EM_ANALISE,
-      setorOrigem: SETOR_ORIGEM.PROJETOS
+      status: transferirImplantacao
+        ? RELATORIO_STATUS.EM_IMPLANTACAO
+        : relatorioStatus || RELATORIO_STATUS.EM_ANALISE,
+      setorOrigem: transferirImplantacao ? SETOR_ORIGEM.IMPLANTACAO : SETOR_ORIGEM.PROJETOS
     };
 
     if (relatorioSalvoId) {
-      await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
+      const atualizado = await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
+      relatorioStatus = atualizado.status || saveOptions.status;
     } else {
       const criado = await createRelatorioB2b(currentUser, saveOptions);
       relatorioSalvoId = criado.id;
-      relatorioStatus = criado.status || RELATORIO_STATUS.EM_ANALISE;
+      relatorioStatus = criado.status || saveOptions.status;
     }
 
     notifyRelatoriosB2bAtualizados();
@@ -1263,7 +1267,24 @@
     }
   }
 
-  async function handleGeneratePdf() {
+  function solicitarGerarPdf() {
+    if (!assetsReady) {
+      pdfError = 'Aguarde o carregamento dos recursos do PDF antes de gerar.';
+      return;
+    }
+    if (generatingPDF || savingPDF) return;
+
+    pdfError = '';
+
+    if (formReadonly || relatorioStatus === RELATORIO_STATUS.EM_IMPLANTACAO) {
+      void executarGerarPdf({ transferirImplantacao: false });
+      return;
+    }
+
+    gerarPdfDialogOpen = true;
+  }
+
+  async function executarGerarPdf({ transferirImplantacao = false } = {}) {
     if (!assetsReady) {
       pdfError = 'Aguarde o carregamento dos recursos do PDF antes de gerar.';
       return;
@@ -1275,8 +1296,12 @@
 
     try {
       if (!formReadonly) {
-        await persistRelatorio();
+        await persistRelatorio({ transferirImplantacao });
+        formSavedViaSalvarButton = true;
+        syncPersistedSnapshot();
       }
+
+      gerarPdfDialogOpen = false;
       await flushPreviewRefresh();
       const docTitle = getEngineeringPdfDocumentTitle(formData);
       const printHtml = buildFullPdfHtml(formData, {}, buildPreviewHtmlOptions());
@@ -1292,6 +1317,19 @@
     } finally {
       generatingPDF = false;
     }
+  }
+
+  function confirmGerarPdfSemImplantacao() {
+    void executarGerarPdf({ transferirImplantacao: false });
+  }
+
+  function confirmGerarPdfComImplantacao() {
+    void executarGerarPdf({ transferirImplantacao: true });
+  }
+
+  /** Impressão direta (ex.: menu Imprimir do dashboard) — salva e abre PDF sem diálogo. */
+  async function handleGeneratePdf() {
+    await executarGerarPdf({ transferirImplantacao: false });
   }
 
   onMount(async () => {
@@ -1846,7 +1884,7 @@
           <button
             type="button"
             class="btn-generate-pdf"
-            on:click={handleGeneratePdf}
+            on:click={solicitarGerarPdf}
             disabled={generatingPDF || savingPDF || !assetsReady}
           >
             {generatingPDF ? 'Abrindo impressão...' : 'Gerar PDF'}
@@ -1904,6 +1942,18 @@
     <Loading currentMessage={loadingMessage} />
   </div>
 {/if}
+
+<InfoDialog
+  open={gerarPdfDialogOpen}
+  title="Gerar PDF"
+  message="Deseja enviar o Relatório para Implantação?
+
+Você pode Gerar o PDF sem enviar para implantação."
+  secondaryLabel="Gerar PDF"
+  primaryLabel="Enviar para Implantação"
+  on:secondary={confirmGerarPdfSemImplantacao}
+  on:primary={confirmGerarPdfComImplantacao}
+/>
 
 <InfoDialog
   open={saveSuccessDialogOpen}
