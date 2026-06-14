@@ -1545,6 +1545,17 @@ export async function loadAssinaturaSupervisorDataUrl(baseUrl = '') {
   return stripSignatureLightBackground(raw);
 }
 
+/** Assinatura na Lista de Material Implantado — carrega e remove fundo claro */
+export async function loadAssinaturaSupervisorImplantacaoDataUrl(baseUrl = '') {
+  const paths = BRAND.assinaturaImplantacaoSupervisorPaths || [
+    '/images/assinatura-supervisor-implantacao.png',
+    '/images/assinatura-supervisor-implantacao.svg'
+  ];
+  const raw = await loadAssetDataUrl(paths, baseUrl);
+  if (!raw) return '';
+  return stripSignatureLightBackground(raw);
+}
+
 function getLogoUrl(options = {}) {
   if (options.logoDataUrl) return options.logoDataUrl;
   return resolveAssetUrl(BRAND.logoPath, options.baseUrl || '');
@@ -1558,6 +1569,22 @@ function getCapaOndasUrl(options = {}) {
 function getAssinaturaSupervisorUrl(options = {}) {
   if (options.assinaturaSupervisorDataUrl) return options.assinaturaSupervisorDataUrl;
   const paths = BRAND.assinaturaSupervisorPaths || ['/images/assinatura-supervisor.png'];
+  const baseUrl = options.baseUrl || '';
+  for (const path of paths) {
+    const url = resolveAssetUrl(path, baseUrl);
+    if (url) return url;
+  }
+  return '';
+}
+
+function getAssinaturaSupervisorImplantacaoUrl(options = {}) {
+  if (options.assinaturaSupervisorImplantacaoDataUrl) {
+    return options.assinaturaSupervisorImplantacaoDataUrl;
+  }
+  const paths = BRAND.assinaturaImplantacaoSupervisorPaths || [
+    '/images/assinatura-supervisor-implantacao.png',
+    '/images/assinatura-supervisor-implantacao.svg'
+  ];
   const baseUrl = options.baseUrl || '';
   for (const path of paths) {
     const url = resolveAssetUrl(path, baseUrl);
@@ -2938,10 +2965,19 @@ function buildPassoPagesHtml(passo, passoNumero, passoIndex, startPageNum, optio
 }
 
 function buildSupervisorAssinaturaHtml(options = {}) {
-  const assinaturaUrl = getAssinaturaSupervisorUrl(options);
-  const nome = (BRAND.assinaturaCoordenadorNome || '').trim();
-  const cargo = (BRAND.assinaturaCoordenadorCargo || BRAND.supervisorCargo || '').trim();
-  const processed = !!options.assinaturaSupervisorDataUrl;
+  const isImplantacao = options.assinaturaVariant === 'implantacao';
+  const assinaturaUrl = isImplantacao
+    ? getAssinaturaSupervisorImplantacaoUrl(options)
+    : getAssinaturaSupervisorUrl(options);
+  const nome = isImplantacao
+    ? (BRAND.assinaturaImplantacaoCoordenadorNome || '').trim()
+    : (BRAND.assinaturaCoordenadorNome || '').trim();
+  const cargo = isImplantacao
+    ? (BRAND.assinaturaImplantacaoCoordenadorCargo || '').trim()
+    : (BRAND.assinaturaCoordenadorCargo || BRAND.supervisorCargo || '').trim();
+  const processed = isImplantacao
+    ? !!options.assinaturaSupervisorImplantacaoDataUrl
+    : !!options.assinaturaSupervisorDataUrl;
   const imgHtml = assinaturaUrl
     ? `<div class="lista-material-assinatura-graphic">
         <img class="lista-material-assinatura-img${processed ? ' lista-material-assinatura-img--processed' : ''}" src="${attrUrl(assinaturaUrl)}" alt="" aria-hidden="true" />
@@ -3019,7 +3055,10 @@ function buildPageListaMaterial(formData, pageNum, options = {}, pageConfig = {}
             <div class="lista-material-body">
               ${buildListaMaterialConteudoHtml(material)}
             </div>
-            ${buildSupervisorAssinaturaHtml(options)}
+            ${buildSupervisorAssinaturaHtml({
+              ...options,
+              assinaturaVariant: pageConfig.assinaturaVariant
+            })}
           </div>
         </div>
         ${buildArtworkPageFooter(pageNum, options.totalPages)}
@@ -3126,7 +3165,8 @@ export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, m
   const listaMaterialImplantadoHtml = buildPageListaMaterial(resolutaFormData, pageNum + 1, buildOpts, {
     material: getListaMaterialImplantadoFromFormData(resolutaFormData),
     title: 'Lista de Material Implantado',
-    pdfSectionKey: 'lista-material-implantado'
+    pdfSectionKey: 'lista-material-implantado',
+    assinaturaVariant: 'implantacao'
   });
   pageNum += 1;
 
