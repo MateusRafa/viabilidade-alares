@@ -64,6 +64,7 @@
   let isTransitionLoading = false;
   let loadingMessage = '';
   let exitWithoutSaveDialogOpen = false;
+  let finalizarDialogOpen = false;
   /** Snapshot do formulário após Salvar PDF ou carregar — Gerar PDF não atualiza. */
   let lastPersistedFormJson = '';
   /** Só true após Salvar PDF ou ao abrir relatório já existente para edição. */
@@ -1229,8 +1230,8 @@
     }
   }
 
-  async function persistRelatorio() {
-    if (formReadonly) return;
+  async function persistRelatorio({ finalize = false } = {}) {
+    if (formReadonly && !finalize) return;
 
     const usuario = (currentUser || '').trim();
     if (!usuario) {
@@ -1241,16 +1242,21 @@
     const saveOptions = {
       payload,
       payloadTipo: PAYLOAD_TIPO.IMPLANTACAO,
-      status: relatorioStatus || RELATORIO_STATUS.EM_IMPLANTACAO,
+      status: finalize
+        ? RELATORIO_STATUS.FINALIZADO
+        : relatorioStatus || RELATORIO_STATUS.EM_IMPLANTACAO,
       setorOrigem: SETOR_ORIGEM.IMPLANTACAO
     };
 
     if (relatorioSalvoId) {
-      await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
+      const atualizado = await updateRelatorioB2b(currentUser, relatorioSalvoId, saveOptions);
+      if (finalize) {
+        relatorioStatus = atualizado.status || RELATORIO_STATUS.FINALIZADO;
+      }
     } else {
       const criado = await createRelatorioB2b(currentUser, saveOptions);
       relatorioSalvoId = criado.id;
-      relatorioStatus = criado.status || RELATORIO_STATUS.EM_ANALISE;
+      relatorioStatus = criado.status || (finalize ? RELATORIO_STATUS.FINALIZADO : RELATORIO_STATUS.EM_ANALISE);
     }
 
     notifyRelatoriosB2bAtualizados();
@@ -1271,6 +1277,57 @@
       pdfError = err?.message || 'Não foi possível salvar o relatório. Tente novamente.';
     } finally {
       savingPDF = false;
+    }
+  }
+
+  function solicitarFinalizar() {
+    if (!assetsReady) {
+      pdfError = 'Aguarde o carregamento dos recursos do PDF antes de finalizar.';
+      return;
+    }
+    if (generatingPDF || savingPDF) return;
+
+    if (formReadonly) {
+      void handleGeneratePdf();
+      return;
+    }
+
+    pdfError = '';
+    finalizarDialogOpen = true;
+  }
+
+  function closeFinalizarDialog() {
+    if (generatingPDF) return;
+    finalizarDialogOpen = false;
+  }
+
+  async function confirmFinalizarRelatorio() {
+    if (generatingPDF || savingPDF || formReadonly) return;
+
+    generatingPDF = true;
+    pdfError = '';
+
+    try {
+      await persistRelatorio({ finalize: true });
+      formReadonly = true;
+      formSavedViaSalvarButton = true;
+      syncPersistedSnapshot();
+      finalizarDialogOpen = false;
+
+      await flushPreviewRefresh();
+      const docTitle = getEngineeringPdfDocumentTitle(projetosFormData);
+      const printHtml = buildConstrucaoPreviewHtml();
+      const result = await printPdfHtmlNamed(printHtml, { title: docTitle });
+      if (!result.success) {
+        pdfError =
+          result.error === 'popup_blocked'
+            ? 'Relatório finalizado, mas não foi possível abrir a impressão. Permita pop-ups e tente de novo.'
+            : 'Relatório finalizado, mas não foi possível abrir a impressão. Tente novamente.';
+      }
+    } catch (err) {
+      pdfError = err?.message || 'Não foi possível finalizar o relatório. Tente novamente.';
+    } finally {
+      generatingPDF = false;
     }
   }
 
@@ -1594,7 +1651,7 @@
           <button
             type="button"
             class="btn-generate-pdf"
-            on:click={handleGeneratePdf}
+            on:click={solicitarFinalizar}
             disabled={generatingPDF || savingPDF || !assetsReady}
           >
             {generatingPDF ? 'Finalizando…' : 'Finalizar'}
@@ -1661,6 +1718,19 @@
   primaryLabel="Voltar ao Dashboard"
   on:secondary={() => (saveSuccessDialogOpen = false)}
   on:primary={() => executarVoltarParaDashboardImplantacao()}
+/>
+
+<ConfirmDialog
+  open={finalizarDialogOpen}
+  title="Finalizar Relatório"
+  message="Deseja Finalizar o Relatório?
+
+Após finalizar não será possível editar o Relatório."
+  confirmLabel="Finalizar"
+  cancelLabel="Cancelar"
+  loading={generatingPDF}
+  on:confirm={confirmFinalizarRelatorio}
+  on:cancel={closeFinalizarDialog}
 />
 
 <ConfirmDialog
