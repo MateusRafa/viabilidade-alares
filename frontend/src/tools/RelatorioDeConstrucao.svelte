@@ -1588,7 +1588,7 @@
               on:click={handleSalvarPdf}
               disabled={savingPDF || generatingPDF}
             >
-              {savingPDF ? 'Salvando…' : 'Salvar PDF'}
+              {savingPDF ? 'Salvando…' : 'Salvar Relatório'}
             </button>
           {/if}
           <button
@@ -1597,7 +1597,7 @@
             on:click={handleGeneratePdf}
             disabled={generatingPDF || savingPDF || !assetsReady}
           >
-            {generatingPDF ? 'Abrindo impressão...' : 'Gerar PDF'}
+            {generatingPDF ? 'Finalizando…' : 'Finalizar'}
           </button>
         </div>
       </footer>
