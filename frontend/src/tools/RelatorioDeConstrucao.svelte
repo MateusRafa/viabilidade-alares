@@ -11,6 +11,7 @@
     defaultFormData,
     normalizeFormData,
     emptyPasso,
+    emptyListaMaterial,
     defaultPassoLayout,
     measurePassoLayoutsFromDocument,
     getPassoLayoutWarnings,
@@ -154,7 +155,17 @@
     if (!primeiro.tituloPasso?.trim()) {
       primeiro.tituloPasso = RESOLUTA_TITULO_PASSO;
     }
-    return { ...base, passos: [primeiro] };
+
+    const listaMaterialImplantado = {
+      ...emptyListaMaterial(),
+      ...(base.listaMaterialImplantado || {})
+    };
+    const legacyListaMaterial = base.listaMaterial?.descricao?.trim();
+    if (!listaMaterialImplantado.descricao?.trim() && legacyListaMaterial) {
+      listaMaterialImplantado.descricao = base.listaMaterial.descricao;
+    }
+
+    return { ...base, passos: [primeiro], listaMaterialImplantado };
   }
 
   function createInitialFormData(user = '') {
@@ -286,7 +297,7 @@
           anexosPdf: (projetosFormData.anexosPdf || []).map((a) => [a.id, a.pageImages?.length || 0])
         },
         resoluta: formData.passos,
-        listaMaterialImplantado: formData.listaMaterialImplantado
+        listaMaterialImplantado: formData.listaMaterialImplantado?.descricao ?? ''
       })
     : '';
 
@@ -577,8 +588,13 @@
   function updateListaMaterialImplantado(patch) {
     formData = {
       ...formData,
-      listaMaterialImplantado: { ...formData.listaMaterialImplantado, ...patch }
+      listaMaterialImplantado: {
+        ...emptyListaMaterial(),
+        ...(formData.listaMaterialImplantado || {}),
+        ...patch
+      }
     };
+    schedulePreviewRefresh();
   }
 
   function updateListaMaterial(patch) {
@@ -916,7 +932,8 @@
   function syncMaterialImplantadoDescricaoEditor(el) {
     if (!el) return;
     const html = sanitizeRichHtml(el.innerHTML);
-    if (html !== formData.listaMaterialImplantado.descricao) {
+    const atual = formData.listaMaterialImplantado?.descricao ?? '';
+    if (html !== atual) {
       updateListaMaterialImplantado({ descricao: html });
     }
   }
@@ -1063,7 +1080,7 @@
     const el = descricaoEditorEls.materialImplantado;
     if (!el || isDescricaoEditorFocused('materialImplantado')) return;
 
-    const html = formData.listaMaterialImplantado.descricao || '';
+    const html = formData.listaMaterialImplantado?.descricao || '';
     if (!descricaoEditorReady.materialImplantado) {
       el.innerHTML = html;
       descricaoEditorReady.materialImplantado = true;
