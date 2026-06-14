@@ -1965,9 +1965,7 @@ Tem certeza que deseja sair sem salvar o arquivo?"
   }
 
   .form-box-resoluta {
-    flex: 1 1 auto;
-    min-height: 0;
-    flex-shrink: 1;
+    flex-shrink: 0;
   }
 
   .form-box-lista-implantado {
@@ -1983,6 +1981,8 @@ Tem certeza que deseja sair sem salvar o arquivo?"
   }
 
   .form-box-resoluta.expanded {
+    flex: 1 1 auto;
+    min-height: 0;
     max-height: none;
   }
 
