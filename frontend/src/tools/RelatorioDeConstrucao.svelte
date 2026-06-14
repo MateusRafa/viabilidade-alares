@@ -198,7 +198,8 @@
   let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
   let formReadonly = false;
   let expandedSections = {
-    [RESOLUTA_SECTION_ID]: true
+    [RESOLUTA_SECTION_ID]: true,
+    [LISTA_MATERIAL_IMPLANTADO_SECTION_ID]: false
   };
   let logoDataUrl = '';
   let capaOndasDataUrl = '';
@@ -1088,15 +1089,19 @@
     }
   }
 
-  /** Reidrata editores da Resoluta e da Lista de Material Implantado. */
-  $: if (formData.passos[0]) {
+  /** Reidrata editores ao expandir a Resoluta. */
+  $: if (expandedSections[RESOLUTA_SECTION_ID] && formData.passos[0]) {
     tick().then(() => {
       initDescricaoEditor(0);
-      initMaterialImplantadoDescricaoEditor();
       getPassoDescricoesAposImagem(formData.passos[0]).forEach((block) => {
         initDescricaoAposEditor(0, block.id);
       });
     });
+  }
+
+  /** Reidrata editor ao expandir a Lista de Material Implantado. */
+  $: if (expandedSections[LISTA_MATERIAL_IMPLANTADO_SECTION_ID]) {
+    tick().then(() => initMaterialImplantadoDescricaoEditor());
   }
 
   function removePassoImagem(passoIndex, imagemId) {
@@ -1193,6 +1198,10 @@
     }
 
     projetosPassoLayouts = (projetosFormData.passos || []).map((p) => defaultPassoLayout(p));
+    expandedSections = {
+      [RESOLUTA_SECTION_ID]: !formReadonly,
+      [LISTA_MATERIAL_IMPLANTADO_SECTION_ID]: !formReadonly
+    };
 
     applyPreviewHtml();
     schedulePassoLayoutMeasure(true);
@@ -1497,13 +1506,21 @@
           {@const editorKey = descricaoEditorKey(passoIndex)}
           {@const uploadCtx = { type: 'passo', index: passoIndex }}
           <section
-            class="form-box form-box-resoluta expanded"
+            class="form-box form-box-resoluta"
+            class:expanded={expandedSections[RESOLUTA_SECTION_ID]}
             data-preview-anchor="resoluta"
             data-passo-index={passoIndex}
           >
-            <div class="form-box-header form-box-header-static" role="heading" aria-level="2">
+            <button
+              type="button"
+              class="form-box-header"
+              on:click={() => toggleSection(RESOLUTA_SECTION_ID)}
+              aria-expanded={expandedSections[RESOLUTA_SECTION_ID]}
+            >
               <span class="form-box-title">Resoluta do Projeto</span>
-            </div>
+              <span class="chevron" class:open={expandedSections[RESOLUTA_SECTION_ID]}>▼</span>
+            </button>
+            {#if expandedSections[RESOLUTA_SECTION_ID]}
             <div class="form-box-body">
                 <label class="field field-descricao-resoluta">
                   <span>Descrição</span>
@@ -1681,15 +1698,24 @@
             {#each passoLayoutWarnings.filter((w) => w.passoIndex === passoIndex) as w (w.message)}
               <p class="passo-layout-warning" role="status">{w.message}</p>
             {/each}
+            {/if}
           </section>
 
           <section
-            class="form-box form-box-lista-implantado expanded"
+            class="form-box form-box-lista-implantado"
+            class:expanded={expandedSections[LISTA_MATERIAL_IMPLANTADO_SECTION_ID]}
             data-preview-anchor="listaMaterialImplantado"
           >
-            <div class="form-box-header form-box-header-static" role="heading" aria-level="2">
+            <button
+              type="button"
+              class="form-box-header"
+              on:click={() => toggleSection(LISTA_MATERIAL_IMPLANTADO_SECTION_ID)}
+              aria-expanded={expandedSections[LISTA_MATERIAL_IMPLANTADO_SECTION_ID]}
+            >
               <span class="form-box-title">Lista de Material Implantado</span>
-            </div>
+              <span class="chevron" class:open={expandedSections[LISTA_MATERIAL_IMPLANTADO_SECTION_ID]}>▼</span>
+            </button>
+            {#if expandedSections[LISTA_MATERIAL_IMPLANTADO_SECTION_ID]}
             <div class="form-box-body">
               <label class="field">
                 <span>Descrição</span>
@@ -1713,6 +1739,7 @@
                 ></div>
               </label>
             </div>
+            {/if}
           </section>
         {/if}
       </div>
