@@ -1123,7 +1123,7 @@
   function aplicarRelatorioApi(rel) {
     relatorioSalvoId = rel.id;
     relatorioStatus = rel.status || RELATORIO_STATUS.EM_ANALISE;
-    formReadonly = relatorioStatus !== RELATORIO_STATUS.EM_ANALISE;
+    formReadonly = relatorioStatus === RELATORIO_STATUS.FINALIZADO;
 
     if (rel.formData) {
       formData = normalizeFormData(rel.formData);
@@ -1829,7 +1829,11 @@
         {/if}
         {#if formReadonly}
           <p class="readonly-banner" role="status">
-            Este relatório não pode mais ser editado (transferido ou finalizado).
+            Este relatório não pode mais ser editado (finalizado).
+          </p>
+        {:else if relatorioStatus === RELATORIO_STATUS.EM_IMPLANTACAO}
+          <p class="readonly-banner readonly-banner--info" role="status">
+            Relatório em implantação — você pode editar apenas as seções de Projetos (capa, informações, passos, lista de material e anexos).
           </p>
         {/if}
         <div class="form-actions-buttons">
@@ -2475,6 +2479,12 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     background: #fffbeb;
     border: 1px solid #fcd34d;
     border-radius: 6px;
+  }
+
+  .readonly-banner--info {
+    color: #1d4ed8;
+    background: #eff6ff;
+    border-color: #93c5fd;
   }
 
   .btn-generate-pdf {
