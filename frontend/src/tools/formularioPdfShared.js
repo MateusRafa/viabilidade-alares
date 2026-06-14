@@ -310,6 +310,10 @@ export function normalizeFormData(data) {
     cabecalho: { ...base.cabecalho, ...data.cabecalho },
     passos,
     listaMaterial: { ...emptyListaMaterial(), ...data.listaMaterial },
+    listaMaterialImplantado: {
+      ...emptyListaMaterial(),
+      ...data.listaMaterialImplantado
+    },
     anexosPdf: normalizeAnexosPdf(data.anexosPdf)
   };
 }
@@ -337,6 +341,7 @@ export function defaultFormData() {
     cabecalho: emptyCabecalho(),
     passos: [emptyPasso()],
     listaMaterial: emptyListaMaterial(),
+    listaMaterialImplantado: emptyListaMaterial(),
     anexosPdf: []
   };
 }
@@ -2969,23 +2974,47 @@ function buildListaMaterialConteudoHtml(material) {
   return `<${tag} class="${valueClass}">${valueHtml}</${tag}>`;
 }
 
-function buildPageListaMaterial(formData, pageNum, options = {}) {
+function resolveListaMaterialFromFormData(formData, field = 'listaMaterial') {
+  const raw = formData?.[field];
+  return {
+    ...emptyListaMaterial(),
+    ...(raw && typeof raw === 'object' ? raw : {})
+  };
+}
+
+/** Material implantado no payload de construção (com fallback legado em listaMaterial). */
+export function getListaMaterialImplantadoFromFormData(formData) {
+  const implantado = resolveListaMaterialFromFormData(formData, 'listaMaterialImplantado');
+  const legacy = resolveListaMaterialFromFormData(formData, 'listaMaterial');
+  if (!implantado.descricao?.trim() && legacy.descricao?.trim()) {
+    return legacy;
+  }
+  return implantado;
+}
+
+function buildPageListaMaterial(formData, pageNum, options = {}, pageConfig = {}) {
   const logoUrl = getLogoUrl(options);
   const ondasUrl = getCapaOndasUrl(options);
-  const material = formData.listaMaterial || emptyListaMaterial();
+  const title = pageConfig.title ?? 'Lista de Material';
+  const pdfSectionKey = pageConfig.pdfSectionKey ?? 'lista-material';
+  const material =
+    pageConfig.material ??
+    (pageConfig.materialField === 'listaMaterialImplantado'
+      ? getListaMaterialImplantadoFromFormData(formData)
+      : resolveListaMaterialFromFormData(formData, pageConfig.materialField ?? 'listaMaterial'));
   const ondasImg = ondasUrl
     ? `<img class="capa-ondas-svg" src="${attrUrl(ondasUrl)}" alt="" aria-hidden="true" />`
     : '';
 
   return `
-    <div class="pdf-page pdf-page-lista-material" data-pdf-page="${pageNum}" data-pdf-section="lista-material">
+    <div class="pdf-page pdf-page-lista-material" data-pdf-page="${pageNum}" data-pdf-section="${pdfSectionKey}">
       ${ondasImg}
       <div class="page-shell-artwork">
         <div class="capa-logo-wrap">
           ${logoUrl ? `<img class="capa-logo" src="${attrUrl(logoUrl)}" alt="${escapeHtml(BRAND.nome)}" />` : ''}
         </div>
         <div class="page-body-inner page-body-artwork">
-          <h2 class="page-title">Lista de Material</h2>
+          <h2 class="page-title">${escapeHtml(title)}</h2>
           <div class="page-content page-content-lista-material">
             <div class="lista-material-body">
               ${buildListaMaterialConteudoHtml(material)}
@@ -3056,7 +3085,7 @@ export function getConstrucaoPdfPageCount(projetosFormData, resolutaFormData, op
   const resolutaPasso = resolutaFormData?.passos?.[0] || emptyPasso();
   const resolutaLayouts = options.resolutaPassoLayouts || [defaultPassoLayout(resolutaPasso)];
   passoPages += countPassoPages(resolutaLayouts[0] || defaultPassoLayout(resolutaPasso));
-  return 2 + passoPages + 1 + countAnexoPdfPages(projetosFormData);
+  return 2 + passoPages + 1 + 1 + countAnexoPdfPages(projetosFormData);
 }
 
 export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, meta = {}, options = {}) {
@@ -3094,6 +3123,13 @@ export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, m
   const resolutaHtml = resolutaBuilt.html;
   pageNum = resolutaBuilt.nextPageNum;
 
+  const listaMaterialImplantadoHtml = buildPageListaMaterial(resolutaFormData, pageNum + 1, buildOpts, {
+    material: getListaMaterialImplantadoFromFormData(resolutaFormData),
+    title: 'Lista de Material Implantado',
+    pdfSectionKey: 'lista-material-implantado'
+  });
+  pageNum += 1;
+
   let anexosHtml = '';
   (projetosFormData.anexosPdf || []).forEach((anexo) => {
     const images = anexo.pageImages || [];
@@ -3120,6 +3156,7 @@ export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, m
       ${projetosPassosHtml}
       ${listaMaterialHtml}
       ${resolutaHtml}
+      ${listaMaterialImplantadoHtml}
       ${anexosHtml}
     </div>
   `;
