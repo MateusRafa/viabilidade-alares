@@ -59,6 +59,7 @@
   const DASHBOARD_IMPLANTACAO_ID = 'dashboard-implantacao';
   const TRANSITION_LOADING_MS = 2000;
   const RESOLUTA_SECTION_ID = 'resoluta';
+  const LISTA_MATERIAL_IMPLANTADO_SECTION_ID = 'listaMaterialImplantado';
   const RESOLUTA_TITULO_PASSO = 'Resoluta do Projeto';
 
   let isTransitionLoading = false;
@@ -283,7 +284,8 @@
           listaMaterial: projetosFormData.listaMaterial,
           anexosPdf: (projetosFormData.anexosPdf || []).map((a) => [a.id, a.pageImages?.length || 0])
         },
-        resoluta: formData.passos
+        resoluta: formData.passos,
+        listaMaterialImplantado: formData.listaMaterialImplantado
       })
     : '';
 
@@ -318,6 +320,11 @@
     const editorApos = target.closest('.rich-editor[data-desc-apos-id]');
     if (editorApos) {
       previewFocusAnchor = 'resoluta';
+      return true;
+    }
+
+    if (target.closest('[data-editor="materialImplantado"]')) {
+      previewFocusAnchor = 'listaMaterialImplantado';
       return true;
     }
 
@@ -360,6 +367,12 @@
     }
     if (previewFocusAnchor === 'cabecalho') {
       return doc.querySelector('.pdf-page-cabecalho');
+    }
+    if (previewFocusAnchor === 'listaMaterialImplantado') {
+      return (
+        doc.querySelector('[data-pdf-section="lista-material-implantado"]') ||
+        doc.querySelector('.pdf-page-lista-material-implantado')
+      );
     }
     if (previewFocusAnchor === 'listaMaterial') {
       return (
@@ -557,6 +570,13 @@
     formData = {
       ...formData,
       passos: formData.passos.map((p, i) => (i === index ? { ...p, ...patch } : p))
+    };
+  }
+
+  function updateListaMaterialImplantado(patch) {
+    formData = {
+      ...formData,
+      listaMaterialImplantado: { ...formData.listaMaterialImplantado, ...patch }
     };
   }
 
@@ -892,6 +912,14 @@
     });
   }
 
+  function syncMaterialImplantadoDescricaoEditor(el) {
+    if (!el) return;
+    const html = sanitizeRichHtml(el.innerHTML);
+    if (html !== formData.listaMaterialImplantado.descricao) {
+      updateListaMaterialImplantado({ descricao: html });
+    }
+  }
+
   function syncMaterialDescricaoEditor(el) {
     if (!el) return;
     const html = sanitizeRichHtml(el.innerHTML);
@@ -914,7 +942,9 @@
       document.execCommand('insertText', false, plain);
     }
     const target = event.currentTarget;
-    if (target?.dataset?.editor === 'material') {
+    if (target?.dataset?.editor === 'materialImplantado') {
+      syncMaterialImplantadoDescricaoEditor(target);
+    } else if (target?.dataset?.editor === 'material') {
       syncMaterialDescricaoEditor(target);
     } else if (target?.dataset?.descAposId) {
       syncDescricaoAposEditor(
@@ -982,6 +1012,12 @@
     schedulePassoLayoutMeasure(true);
   }
 
+  function handleMaterialImplantadoDescricaoInput(event) {
+    previewFocusAnchor = 'listaMaterialImplantado';
+    previewPreferTailScroll = true;
+    syncMaterialImplantadoDescricaoEditor(event.currentTarget);
+  }
+
   function handleMaterialDescricaoInput(event) {
     previewPreferTailScroll = true;
     syncMaterialDescricaoEditor(event.currentTarget);
@@ -1022,6 +1058,21 @@
     }
   }
 
+  async function initMaterialImplantadoDescricaoEditor() {
+    const el = descricaoEditorEls.materialImplantado;
+    if (!el || isDescricaoEditorFocused('materialImplantado')) return;
+
+    const html = formData.listaMaterialImplantado.descricao || '';
+    if (!descricaoEditorReady.materialImplantado) {
+      el.innerHTML = html;
+      descricaoEditorReady.materialImplantado = true;
+      return;
+    }
+    if (!richHtmlEquivalent(el.innerHTML, html)) {
+      el.innerHTML = html;
+    }
+  }
+
   async function initMaterialDescricaoEditor() {
     const el = descricaoEditorEls.material;
     if (!el || isDescricaoEditorFocused('material')) return;
@@ -1037,10 +1088,11 @@
     }
   }
 
-  /** Reidrata editores da Resoluta — não a cada tecla na descrição. */
+  /** Reidrata editores da Resoluta e da Lista de Material Implantado. */
   $: if (formData.passos[0]) {
     tick().then(() => {
       initDescricaoEditor(0);
+      initMaterialImplantadoDescricaoEditor();
       getPassoDescricoesAposImagem(formData.passos[0]).forEach((block) => {
         initDescricaoAposEditor(0, block.id);
       });
@@ -1630,6 +1682,38 @@
               <p class="passo-layout-warning" role="status">{w.message}</p>
             {/each}
           </section>
+
+          <section
+            class="form-box form-box-lista-implantado expanded"
+            data-preview-anchor="listaMaterialImplantado"
+          >
+            <div class="form-box-header form-box-header-static" role="heading" aria-level="2">
+              <span class="form-box-title">Lista de Material Implantado</span>
+            </div>
+            <div class="form-box-body">
+              <label class="field">
+                <span>Descrição</span>
+                <div
+                  use:registerDescricaoEditor={{ key: 'materialImplantado' }}
+                  class="rich-editor rich-editor-lista-implantado"
+                  contenteditable="true"
+                  role="textbox"
+                  aria-multiline="true"
+                  data-editor="materialImplantado"
+                  data-placeholder="Descrição da lista de material implantado"
+                  on:focus={() => {
+                    focusedDescricaoEditorKey = 'materialImplantado';
+                  }}
+                  on:input={handleMaterialImplantadoDescricaoInput}
+                  on:paste={handleDescricaoPaste}
+                  on:blur={(e) => {
+                    focusedDescricaoEditorKey = null;
+                    syncMaterialImplantadoDescricaoEditor(e.currentTarget);
+                  }}
+                ></div>
+              </label>
+            </div>
+          </section>
         {/if}
       </div>
 
@@ -1820,12 +1904,12 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     min-height: 0;
     min-width: 0;
     width: 100%;
-    overflow: hidden;
+    overflow-y: auto;
     overflow-x: hidden;
     padding: 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: 0.75rem;
     overscroll-behavior: contain;
     box-sizing: border-box;
   }
@@ -1854,9 +1938,21 @@ Tem certeza que deseja sair sem salvar o arquivo?"
   }
 
   .form-box-resoluta {
-    flex: 1;
+    flex: 1 1 auto;
     min-height: 0;
     flex-shrink: 1;
+  }
+
+  .form-box-lista-implantado {
+    flex-shrink: 0;
+  }
+
+  .form-box-lista-implantado .rich-editor-lista-implantado {
+    resize: vertical;
+    overflow: auto;
+    min-height: 8rem;
+    height: 12rem;
+    max-height: 50vh;
   }
 
   .form-box-resoluta.expanded {
