@@ -193,7 +193,9 @@ export async function updateRelatorio(id, { usuario, payload, payloadTipo, statu
 
   if (payload && payloadTipo) {
     const column = payloadColumnForTipo(payloadTipo);
-    const canEditProjetosPayload = existing.status === RELATORIO_STATUS.EM_ANALISE;
+    const canEditProjetosPayload =
+      existing.status === RELATORIO_STATUS.EM_ANALISE ||
+      existing.status === RELATORIO_STATUS.EM_IMPLANTACAO;
     const canEditImplantacaoPayload =
       existing.status === RELATORIO_STATUS.EM_IMPLANTACAO &&
       payloadTipo === PAYLOAD_TIPO.IMPLANTACAO;
