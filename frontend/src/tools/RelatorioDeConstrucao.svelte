@@ -68,6 +68,7 @@
   let loadingMessage = '';
   let exitWithoutSaveDialogOpen = false;
   let finalizarDialogOpen = false;
+  let syncingProjetosData = false;
   /** Snapshot do formulário após Salvar PDF ou carregar — Gerar PDF não atualiza. */
   let lastPersistedFormJson = '';
   /** Só true após Salvar PDF ou ao abrir relatório já existente para edição. */
@@ -1202,22 +1203,40 @@
     }
   }
 
-  function aplicarRelatorioApi(rel) {
-    relatorioSalvoId = rel.id;
-    relatorioStatus = rel.status || RELATORIO_STATUS.EM_IMPLANTACAO;
-    formReadonly = relatorioStatus === RELATORIO_STATUS.FINALIZADO;
-
+  function aplicarDadosProjetosDoRelatorio(rel) {
     if (rel.formDataProjetos && Object.keys(rel.formDataProjetos).length) {
       projetosFormData = normalizeFormData(rel.formDataProjetos);
     } else if (rel.payloadProjetos && Object.keys(rel.payloadProjetos).length) {
       projetosFormData = normalizeFormData(rel.payloadProjetos);
     }
+    projetosPassoLayouts = (projetosFormData.passos || []).map((p) => defaultPassoLayout(p));
+  }
+
+  /** Busca no servidor as alterações feitas pelo setor de Projetos em paralelo. */
+  async function sincronizarDadosProjetos() {
+    const usuario = (currentUser || '').trim();
+    if (!usuario || !relatorioSalvoId) return;
+
+    const rel = await fetchRelatorioB2bById(usuario, relatorioSalvoId, {
+      payloadTipo: PAYLOAD_TIPO.IMPLANTACAO
+    });
+    aplicarDadosProjetosDoRelatorio(rel);
+    applyPreviewHtml();
+    schedulePassoLayoutMeasure(true);
+    await flushPreviewRefresh();
+  }
+
+  function aplicarRelatorioApi(rel) {
+    relatorioSalvoId = rel.id;
+    relatorioStatus = rel.status || RELATORIO_STATUS.EM_IMPLANTACAO;
+    formReadonly = relatorioStatus === RELATORIO_STATUS.FINALIZADO;
+
+    aplicarDadosProjetosDoRelatorio(rel);
     if (rel.formData) {
       formData = normalizeResolutaFormData(rel.formData);
       projetistaUserDefaultApplied = true;
     }
 
-    projetosPassoLayouts = (projetosFormData.passos || []).map((p) => defaultPassoLayout(p));
     expandedSections = {
       [RESOLUTA_SECTION_ID]: !formReadonly,
       [LISTA_MATERIAL_IMPLANTADO_SECTION_ID]: !formReadonly
@@ -1346,12 +1365,13 @@
   }
 
   async function handleSalvarPdf() {
-    if (savingPDF || formReadonly) return;
+    if (savingPDF || formReadonly || syncingProjetosData) return;
 
     savingPDF = true;
     pdfError = '';
 
     try {
+      await sincronizarDadosProjetos();
       await persistRelatorio();
       formSavedViaSalvarButton = true;
       syncPersistedSnapshot();
@@ -1363,20 +1383,30 @@
     }
   }
 
-  function solicitarFinalizar() {
+  async function solicitarFinalizar() {
     if (!assetsReady) {
       pdfError = 'Aguarde o carregamento dos recursos do PDF antes de finalizar.';
       return;
     }
-    if (generatingPDF || savingPDF) return;
+    if (generatingPDF || savingPDF || syncingProjetosData) return;
 
     if (formReadonly) {
       void handleGeneratePdf();
       return;
     }
 
+    syncingProjetosData = true;
     pdfError = '';
-    finalizarDialogOpen = true;
+
+    try {
+      await sincronizarDadosProjetos();
+      finalizarDialogOpen = true;
+    } catch (err) {
+      pdfError =
+        err?.message || 'Não foi possível atualizar os dados do projeto. Tente novamente.';
+    } finally {
+      syncingProjetosData = false;
+    }
   }
 
   function closeFinalizarDialog() {
@@ -1391,6 +1421,7 @@
     pdfError = '';
 
     try {
+      await sincronizarDadosProjetos();
       await persistRelatorio({ finalize: true });
       formReadonly = true;
       formSavedViaSalvarButton = true;
@@ -1776,7 +1807,7 @@
               type="button"
               class="btn-generate-pdf"
               on:click={handleSalvarPdf}
-              disabled={savingPDF || generatingPDF}
+              disabled={savingPDF || generatingPDF || syncingProjetosData}
             >
               {savingPDF ? 'Salvando…' : 'Salvar Relatório'}
             </button>
@@ -1785,9 +1816,9 @@
             type="button"
             class="btn-generate-pdf"
             on:click={solicitarFinalizar}
-            disabled={generatingPDF || savingPDF || !assetsReady}
+            disabled={generatingPDF || savingPDF || syncingProjetosData || !assetsReady}
           >
-            {generatingPDF ? 'Finalizando…' : 'Finalizar'}
+            {generatingPDF ? 'Finalizando…' : syncingProjetosData ? 'Atualizando…' : 'Finalizar'}
           </button>
         </div>
       </footer>
@@ -1861,7 +1892,7 @@
 Após finalizar não será possível editar o Relatório."
   confirmLabel="Finalizar"
   cancelLabel="Cancelar"
-  loading={generatingPDF}
+  loading={generatingPDF || syncingProjetosData}
   on:confirm={confirmFinalizarRelatorio}
   on:cancel={closeFinalizarDialog}
 />
