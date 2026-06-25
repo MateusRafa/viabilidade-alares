@@ -176,6 +176,7 @@
   let pdfError = '';
   let saveSuccessDialogOpen = false;
   let gerarPdfDialogOpen = false;
+  let syncingRelatorioData = false;
   let relatorioSalvoId = null;
   let relatorioStatus = RELATORIO_STATUS.EM_ANALISE;
   let formReadonly = false;
@@ -1121,6 +1122,53 @@
     }
   }
 
+  const FORM_DATA_SYNC_KEYS = ['capa', 'cabecalho', 'passos', 'listaMaterial', 'anexosPdf'];
+
+  function mergeFormDataPreservandoEdicoesLocais(local, server) {
+    let persisted = normalizeFormData(defaultFormData());
+    try {
+      if (lastPersistedFormJson) {
+        persisted = normalizeFormData(JSON.parse(lastPersistedFormJson));
+      }
+    } catch {
+      /* ignore */
+    }
+
+    const serverNorm = normalizeFormData(server);
+    const localNorm = normalizeFormData(local);
+    const merged = { ...serverNorm };
+
+    for (const key of FORM_DATA_SYNC_KEYS) {
+      const localChanged = JSON.stringify(localNorm[key]) !== JSON.stringify(persisted[key]);
+      if (localChanged) {
+        merged[key] = localNorm[key];
+      }
+    }
+
+    return normalizeFormData(merged);
+  }
+
+  /** Busca no servidor alterações feitas em paralelo (outro usuário ou outra aba). */
+  async function sincronizarDadosRelatorio() {
+    const usuario = (currentUser || '').trim();
+    if (!usuario || !relatorioSalvoId) return;
+
+    const rel = await fetchRelatorioB2bById(usuario, relatorioSalvoId, {
+      payloadTipo: PAYLOAD_TIPO.PROJETOS
+    });
+
+    relatorioStatus = rel.status || relatorioStatus;
+    formReadonly = relatorioStatus === RELATORIO_STATUS.FINALIZADO;
+
+    if (rel.formData && Object.keys(rel.formData).length) {
+      formData = mergeFormDataPreservandoEdicoesLocais(formData, rel.formData);
+    }
+
+    applyPreviewHtml();
+    schedulePassoLayoutMeasure(true);
+    await flushPreviewRefresh();
+  }
+
   function aplicarRelatorioApi(rel) {
     relatorioSalvoId = rel.id;
     relatorioStatus = rel.status || RELATORIO_STATUS.EM_ANALISE;
@@ -1250,12 +1298,17 @@
   }
 
   async function handleSalvarPdf() {
-    if (savingPDF || formReadonly) return;
+    if (savingPDF || formReadonly || syncingRelatorioData) return;
 
     savingPDF = true;
     pdfError = '';
 
     try {
+      await sincronizarDadosRelatorio();
+      if (formReadonly) {
+        pdfError = 'Este relatório foi finalizado e não pode mais ser editado.';
+        return;
+      }
       await persistRelatorio();
       formSavedViaSalvarButton = true;
       syncPersistedSnapshot();
@@ -1267,12 +1320,12 @@
     }
   }
 
-  function solicitarGerarPdf() {
+  async function solicitarGerarPdf() {
     if (!assetsReady) {
       pdfError = 'Aguarde o carregamento dos recursos do PDF antes de gerar.';
       return;
     }
-    if (generatingPDF || savingPDF) return;
+    if (generatingPDF || savingPDF || syncingRelatorioData) return;
 
     pdfError = '';
 
@@ -1281,7 +1334,20 @@
       return;
     }
 
-    gerarPdfDialogOpen = true;
+    syncingRelatorioData = true;
+    try {
+      await sincronizarDadosRelatorio();
+      if (formReadonly) {
+        pdfError = 'Este relatório foi finalizado e não pode mais ser editado.';
+        return;
+      }
+      gerarPdfDialogOpen = true;
+    } catch (err) {
+      pdfError =
+        err?.message || 'Não foi possível atualizar os dados do relatório. Tente novamente.';
+    } finally {
+      syncingRelatorioData = false;
+    }
   }
 
   async function executarGerarPdf({ transferirImplantacao = false } = {}) {
@@ -1289,13 +1355,18 @@
       pdfError = 'Aguarde o carregamento dos recursos do PDF antes de gerar.';
       return;
     }
-    if (generatingPDF || savingPDF) return;
+    if (generatingPDF || savingPDF || syncingRelatorioData) return;
 
     generatingPDF = true;
     pdfError = '';
 
     try {
       if (!formReadonly) {
+        await sincronizarDadosRelatorio();
+        if (formReadonly) {
+          pdfError = 'Este relatório foi finalizado e não pode mais ser editado.';
+          return;
+        }
         await persistRelatorio({ transferirImplantacao });
         formSavedViaSalvarButton = true;
         syncPersistedSnapshot();
@@ -1876,7 +1947,7 @@
               type="button"
               class="btn-generate-pdf"
               on:click={handleSalvarPdf}
-              disabled={savingPDF || generatingPDF}
+              disabled={savingPDF || generatingPDF || syncingRelatorioData}
             >
               {savingPDF ? 'Salvando…' : 'Salvar PDF'}
             </button>
@@ -1885,9 +1956,13 @@
             type="button"
             class="btn-generate-pdf"
             on:click={solicitarGerarPdf}
-            disabled={generatingPDF || savingPDF || !assetsReady}
+            disabled={generatingPDF || savingPDF || syncingRelatorioData || !assetsReady}
           >
-            {generatingPDF ? 'Abrindo impressão...' : 'Gerar PDF'}
+            {generatingPDF
+              ? 'Abrindo impressão...'
+              : syncingRelatorioData
+                ? 'Atualizando…'
+                : 'Gerar PDF'}
           </button>
         </div>
       </footer>
