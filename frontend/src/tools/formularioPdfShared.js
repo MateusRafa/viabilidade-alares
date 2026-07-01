@@ -104,10 +104,33 @@ export function createPassoDescricaoAposId() {
   return `desc-apos-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function isValidImagemAsset(img) {
+  return !!(img?.dataUrl?.trim() || img?.storagePath);
+}
+
+function normalizePassoImagemEntry(img) {
+  if (!isValidImagemAsset(img)) return null;
+  const dataUrl = (img.dataUrl || '').trim();
+  const storagePath = img.storagePath || '';
+  return {
+    id: img.id || createPassoImagemId(),
+    nome: img.nome || '',
+    ...(dataUrl ? { dataUrl } : {}),
+    ...(storagePath ? { storagePath } : {})
+  };
+}
+
+/** URL utilizável em img/src (data:, http ou objeto hidratado do storage). */
+export function resolveImageAssetUrl(image) {
+  if (typeof image === 'string') return image.trim();
+  if (image?.dataUrl?.trim()) return image.dataUrl.trim();
+  return '';
+}
+
 /** Lista de imagens válidas do passo */
 export function getPassoImagens(passo) {
   if (!passo || !Array.isArray(passo.imagens)) return [];
-  return passo.imagens.filter((img) => img?.dataUrl?.trim());
+  return passo.imagens.filter((img) => isValidImagemAsset(img));
 }
 
 export function hasPassoImagens(passo) {
@@ -131,20 +154,14 @@ export function getPassoDescricoesAposImagem(passo) {
     descricao: block?.descricao ?? '',
     tituloImagem: (block?.tituloImagem ?? emptyPassoBlocoApos().tituloImagem).trim() || 'Imagem',
     imagens: Array.isArray(block?.imagens)
-      ? block.imagens
-          .filter((img) => img?.dataUrl?.trim())
-          .map((img) => ({
-            id: img.id || createPassoImagemId(),
-            dataUrl: img.dataUrl.trim(),
-            nome: img.nome || ''
-          }))
+      ? block.imagens.map((img) => normalizePassoImagemEntry(img)).filter(Boolean)
       : []
   }));
 }
 
 export function getPassoBlocoImagens(block) {
   if (!block || !Array.isArray(block.imagens)) return [];
-  return block.imagens.filter((img) => img?.dataUrl?.trim());
+  return block.imagens.filter((img) => isValidImagemAsset(img));
 }
 
 export function hasPassoBlocoImagens(block) {
@@ -177,13 +194,7 @@ function normalizePassoImagens(passo) {
   let imagens = [];
 
   if (Array.isArray(base.imagens) && base.imagens.length) {
-    imagens = base.imagens
-      .filter((img) => img?.dataUrl?.trim())
-      .map((img) => ({
-        id: img.id || createPassoImagemId(),
-        dataUrl: img.dataUrl.trim(),
-        nome: img.nome || ''
-      }));
+    imagens = base.imagens.map((img) => normalizePassoImagemEntry(img)).filter(Boolean);
   } else if (base.imagemDataUrl?.trim()) {
     imagens = [
       {
@@ -318,13 +329,32 @@ export function normalizeFormData(data) {
   };
 }
 
+function normalizeAnexoPageImage(page) {
+  if (typeof page === 'string') {
+    const trimmed = page.trim();
+    if (trimmed.startsWith('data:') || trimmed.startsWith('http')) return trimmed;
+    return null;
+  }
+  if (page && typeof page === 'object') {
+    const storagePath = page.storagePath || '';
+    const dataUrl = (page.dataUrl || '').trim();
+    if (!storagePath && !dataUrl) return null;
+    if (dataUrl && !storagePath) return dataUrl;
+    return {
+      ...(storagePath ? { storagePath } : {}),
+      ...(dataUrl ? { dataUrl } : {})
+    };
+  }
+  return null;
+}
+
 function normalizeAnexosPdf(anexos) {
   if (!Array.isArray(anexos)) return [];
   return anexos.map((a) => ({
     id: a?.id || `anexo-${Date.now()}`,
     nome: a?.nome || '',
     pageImages: Array.isArray(a?.pageImages)
-      ? a.pageImages.filter((img) => typeof img === 'string' && img.startsWith('data:'))
+      ? a.pageImages.map((page) => normalizeAnexoPageImage(page)).filter(Boolean)
       : []
   }));
 }
@@ -2635,16 +2665,19 @@ function buildPassoImagesBlock(passo = {}, passoNumero = 1, { showLabel = true, 
   }
 
   const imgsHtml = subset
-    .map(
-      (img, idx) => `
+    .map((img, idx) => {
+      const src = resolveImageAssetUrl(img);
+      if (!src) return '';
+      return `
       <div class="passo-imagem-item">
         <img
           class="passo1-imagem"
-          src="${attrUrl(img.dataUrl)}"
+          src="${attrUrl(src)}"
           alt="${escapeHtml(img.nome || `${titulo} ${idx + 1} — passo ${passoNumero}`)}"
         />
-      </div>`
-    )
+      </div>`;
+    })
+    .filter(Boolean)
     .join('');
 
   return `
@@ -3091,7 +3124,9 @@ export function buildPdfBodyHtml(formData, meta = {}, options = {}) {
   (formData.anexosPdf || []).forEach((anexo) => {
     const images = anexo.pageImages || [];
     const pageTotal = images.length;
-    images.forEach((imageDataUrl, pageIndex) => {
+    images.forEach((page, pageIndex) => {
+      const imageDataUrl = resolveImageAssetUrl(page);
+      if (!imageDataUrl) return;
       pageNum += 1;
       anexosHtml += buildPageAnexoPdf({
         pageNum,
@@ -3179,7 +3214,9 @@ export function buildConstrucaoPdfBodyHtml(projetosFormData, resolutaFormData, m
   (projetosFormData.anexosPdf || []).forEach((anexo) => {
     const images = anexo.pageImages || [];
     const pageTotal = images.length;
-    images.forEach((imageDataUrl, pageIndex) => {
+    images.forEach((page, pageIndex) => {
+      const imageDataUrl = resolveImageAssetUrl(page);
+      if (!imageDataUrl) return;
       pageNum += 1;
       anexosHtml += buildPageAnexoPdf({
         pageNum,
