@@ -179,7 +179,11 @@ export async function hydrateFormPayloadAssets(supabase, formData) {
         const path = typeof page === 'string' ? null : page?.storagePath;
         if (!path) continue;
         const url = await signedUrlForPath(supabase, path);
-        if (url) pages.push(url);
+        if (!url) continue;
+        pages.push({
+          storagePath: path,
+          dataUrl: url
+        });
       }
       anexo.pageImages = pages;
     }
