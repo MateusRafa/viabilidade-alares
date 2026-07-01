@@ -28,7 +28,8 @@
     getPassoImagens,
     getPassoBlocoImagens,
     getPassoDescricoesAposImagem,
-    renderPdfFileToPageImages
+    renderPdfFileToPageImages,
+    resolveImageAssetUrl
   } from './formularioPdfShared.js';
   import {
     createRelatorioB2b,
@@ -1693,7 +1694,7 @@
                           <div class="upload-preview-wrap">
                             <img
                               class="upload-preview"
-                              src={img.dataUrl}
+                              src={resolveImageAssetUrl(img)}
                               alt="Prévia — {passo.tituloImagem || 'Imagem'} ({img.nome || 'sem nome'})"
                             />
                             {#if img.nome}
@@ -1783,7 +1784,7 @@
                               <div class="upload-preview-wrap">
                                 <img
                                   class="upload-preview"
-                                  src={img.dataUrl}
+                                  src={resolveImageAssetUrl(img)}
                                   alt="Prévia — {block.tituloImagem || 'Imagem'} ({img.nome || 'sem nome'})"
                                 />
                                 {#if img.nome}
