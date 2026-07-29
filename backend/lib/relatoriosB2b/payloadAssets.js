@@ -84,14 +84,54 @@ export async function persistFormPayloadAssets(supabase, relatorioId, formData) 
         const nextPages = [];
         for (let pageIndex = 0; pageIndex < anexo.pageImages.length; pageIndex++) {
           const page = anexo.pageImages[pageIndex];
+          const storageBase = `${relatorioId}/anexos/${anexoId}/page-${String(pageIndex + 1).padStart(3, '0')}`;
+
           if (typeof page === 'string' && page.startsWith('data:')) {
             const parsed = parseDataUrl(page);
             if (!parsed) continue;
-            const storagePath = `${relatorioId}/anexos/${anexoId}/page-${String(pageIndex + 1).padStart(3, '0')}.${extFromMime(parsed.mime)}`;
+            const storagePath = `${storageBase}.${extFromMime(parsed.mime)}`;
             await uploadBuffer(supabase, storagePath, parsed.buffer, parsed.mime);
             nextPages.push({ storagePath });
-          } else if (page && typeof page === 'object' && page.storagePath) {
+            continue;
+          }
+
+          if (page && typeof page === 'object' && page.storagePath && !page.dataUrl?.startsWith('data:')) {
             nextPages.push({ storagePath: page.storagePath });
+            continue;
+          }
+
+          if (page && typeof page === 'object' && page.dataUrl?.startsWith('data:')) {
+            const parsed = parseDataUrl(page.dataUrl);
+            if (!parsed) continue;
+            const storagePath = page.storagePath || `${storageBase}.${extFromMime(parsed.mime)}`;
+            await uploadBuffer(supabase, storagePath, parsed.buffer, parsed.mime);
+            nextPages.push({ storagePath });
+            continue;
+          }
+
+          const httpUrl =
+            typeof page === 'string' && page.startsWith('http')
+              ? page
+              : page?.dataUrl?.startsWith('http')
+                ? page.dataUrl
+                : '';
+          if (httpUrl) {
+            try {
+              const parsed = await bufferFromHttpUrl(httpUrl);
+              const storagePath =
+                (page && typeof page === 'object' && page.storagePath) ||
+                `${storageBase}.${extFromMime(parsed.mime)}`;
+              await uploadBuffer(supabase, storagePath, parsed.buffer, parsed.mime);
+              nextPages.push({ storagePath });
+            } catch (err) {
+              console.warn(
+                `⚠️ [RelatoriosB2B] Falha ao reenviar página de anexo (${anexoId}/${pageIndex}):`,
+                err?.message || err
+              );
+              if (page && typeof page === 'object' && page.storagePath) {
+                nextPages.push({ storagePath: page.storagePath });
+              }
+            }
           }
         }
         anexo.pageImages = nextPages;
@@ -102,33 +142,70 @@ export async function persistFormPayloadAssets(supabase, relatorioId, formData) 
   return payload;
 }
 
+async function bufferFromHttpUrl(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+  const mime = (res.headers.get('content-type') || 'image/png').split(';')[0].trim();
+  const buffer = Buffer.from(await res.arrayBuffer());
+  return { mime, buffer };
+}
+
 async function persistImagensList(supabase, relatorioId, prefix, imagens) {
   const out = [];
   for (const img of imagens || []) {
     if (!img) continue;
     const imgId = img.id || `img-${Date.now()}`;
+    const nome = img.nome || '';
 
+    // Já persistida no storage (URL assinada ou só path) — manter referência
     if (img.storagePath && !img.dataUrl?.startsWith('data:')) {
       out.push({
         id: imgId,
-        nome: img.nome || '',
+        nome,
         storagePath: img.storagePath
       });
       continue;
     }
 
-    if (!img.dataUrl?.startsWith('data:')) continue;
+    if (img.dataUrl?.startsWith('data:')) {
+      const parsed = parseDataUrl(img.dataUrl);
+      if (!parsed) continue;
 
-    const parsed = parseDataUrl(img.dataUrl);
-    if (!parsed) continue;
+      const storagePath = `${relatorioId}/${prefix}/${imgId}.${extFromMime(parsed.mime)}`;
+      await uploadBuffer(supabase, storagePath, parsed.buffer, parsed.mime);
+      out.push({
+        id: imgId,
+        nome,
+        storagePath
+      });
+      continue;
+    }
 
-    const storagePath = `${relatorioId}/${prefix}/${imgId}.${extFromMime(parsed.mime)}`;
-    await uploadBuffer(supabase, storagePath, parsed.buffer, parsed.mime);
-    out.push({
-      id: imgId,
-      nome: img.nome || '',
-      storagePath
-    });
+    // URL http sem storagePath (ex.: anexos/imagens hidratados só com URL) — reenviar ao storage
+    if (img.dataUrl?.startsWith('http')) {
+      try {
+        const parsed = await bufferFromHttpUrl(img.dataUrl);
+        const storagePath =
+          img.storagePath ||
+          `${relatorioId}/${prefix}/${imgId}.${extFromMime(parsed.mime)}`;
+        await uploadBuffer(supabase, storagePath, parsed.buffer, parsed.mime);
+        out.push({
+          id: imgId,
+          nome,
+          storagePath
+        });
+      } catch (err) {
+        console.warn(
+          `⚠️ [RelatoriosB2B] Falha ao reenviar imagem http (${imgId}):`,
+          err?.message || err
+        );
+        if (img.storagePath) {
+          out.push({ id: imgId, nome, storagePath: img.storagePath });
+        }
+      }
+    }
   }
   return out;
 }
@@ -177,12 +254,16 @@ export async function hydrateFormPayloadAssets(supabase, formData) {
           continue;
         }
         const path = typeof page === 'string' ? null : page?.storagePath;
-        if (!path) continue;
+        if (!path) {
+          if (page?.dataUrl?.startsWith('http') || page?.dataUrl?.startsWith('data:')) {
+            pages.push(page);
+          }
+          continue;
+        }
         const url = await signedUrlForPath(supabase, path);
-        if (!url) continue;
         pages.push({
           storagePath: path,
-          dataUrl: url
+          ...(url ? { dataUrl: url } : page?.dataUrl ? { dataUrl: page.dataUrl } : {})
         });
       }
       anexo.pageImages = pages;
@@ -196,18 +277,26 @@ async function hydrateImagensList(supabase, imagens) {
   const out = [];
   for (const img of imagens || []) {
     if (!img) continue;
-    if (img.dataUrl?.startsWith('data:') || img.dataUrl?.startsWith('http')) {
+    if (img.dataUrl?.startsWith('data:')) {
+      out.push(img);
+      continue;
+    }
+    if (img.dataUrl?.startsWith('http') && img.storagePath) {
+      out.push(img);
+      continue;
+    }
+    if (img.dataUrl?.startsWith('http') && !img.storagePath) {
       out.push(img);
       continue;
     }
     if (!img.storagePath) continue;
     const url = await signedUrlForPath(supabase, img.storagePath);
-    if (!url) continue;
+    // Sempre preservar storagePath — se a URL falhar, o próximo save não apaga a imagem
     out.push({
       id: img.id,
       nome: img.nome || '',
-      dataUrl: url,
-      storagePath: img.storagePath
+      storagePath: img.storagePath,
+      ...(url ? { dataUrl: url } : {})
     });
   }
   return out;
