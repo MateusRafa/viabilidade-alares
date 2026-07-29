@@ -32,7 +32,8 @@
     getPassoImagens,
     getPassoBlocoImagens,
     getPassoDescricoesAposImagem,
-    renderPdfFileToPageImages
+    renderPdfFileToPageImages,
+    resolveImageAssetUrl
   } from './formularioPdfShared.js';
   import {
     createRelatorioB2b,
@@ -1226,6 +1227,31 @@
     await flushPreviewRefresh();
   }
 
+  /**
+   * Após salvar/finalizar, recarrega a Resoluta hidratada (storagePath + URL assinada)
+   * para a prévia/impressão não perder imagens.
+   */
+  async function recarregarDadosImplantacao({ atualizarProjetos = false } = {}) {
+    const usuario = (currentUser || '').trim();
+    if (!usuario || !relatorioSalvoId) return;
+
+    const rel = await fetchRelatorioB2bById(usuario, relatorioSalvoId, {
+      payloadTipo: PAYLOAD_TIPO.IMPLANTACAO
+    });
+
+    if (atualizarProjetos) {
+      aplicarDadosProjetosDoRelatorio(rel);
+    }
+    if (rel.formData && Object.keys(rel.formData).length) {
+      formData = normalizeResolutaFormData(rel.formData);
+      projetistaUserDefaultApplied = true;
+    }
+
+    applyPreviewHtml();
+    schedulePassoLayoutMeasure(true);
+    await flushPreviewRefresh();
+  }
+
   function aplicarRelatorioApi(rel) {
     relatorioSalvoId = rel.id;
     relatorioStatus = rel.status || RELATORIO_STATUS.EM_IMPLANTACAO;
@@ -1373,6 +1399,7 @@
     try {
       await sincronizarDadosProjetos();
       await persistRelatorio();
+      await recarregarDadosImplantacao();
       formSavedViaSalvarButton = true;
       syncPersistedSnapshot();
       saveSuccessDialogOpen = true;
@@ -1423,6 +1450,7 @@
     try {
       await sincronizarDadosProjetos();
       await persistRelatorio({ finalize: true });
+      await recarregarDadosImplantacao({ atualizarProjetos: true });
       formReadonly = true;
       formSavedViaSalvarButton = true;
       syncPersistedSnapshot();
@@ -1458,6 +1486,9 @@
     try {
       if (!formReadonly) {
         await persistRelatorio();
+        await recarregarDadosImplantacao({ atualizarProjetos: true });
+        formSavedViaSalvarButton = true;
+        syncPersistedSnapshot();
       }
       await flushPreviewRefresh();
       const docTitle = getEngineeringPdfDocumentTitle(projetosFormData);
@@ -1624,7 +1655,7 @@
                           <div class="upload-preview-wrap">
                             <img
                               class="upload-preview"
-                              src={img.dataUrl}
+                              src={resolveImageAssetUrl(img)}
                               alt="Prévia — {passo.tituloImagem || 'Imagem'} ({img.nome || 'sem nome'})"
                             />
                             {#if img.nome}
@@ -1704,7 +1735,7 @@
                               <div class="upload-preview-wrap">
                                 <img
                                   class="upload-preview"
-                                  src={img.dataUrl}
+                                  src={resolveImageAssetUrl(img)}
                                   alt="Prévia — {block.tituloImagem || 'Imagem'} ({img.nome || 'sem nome'})"
                                 />
                                 {#if img.nome}
