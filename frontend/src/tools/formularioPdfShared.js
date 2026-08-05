@@ -755,6 +755,12 @@ function splitRichHtmlByMaxHeight(innerHtml, maxHeightPx, doc, splitOptions = {}
   return chunks.length ? chunks : [contentHtml];
 }
 
+function probeImagesReady(root) {
+  const imgs = Array.from(root?.querySelectorAll?.('img') || []);
+  if (!imgs.length) return true;
+  return imgs.every((img) => img.complete && img.naturalHeight > 0);
+}
+
 function measurePassoImagesBlockHeight(
   imagePasso,
   passoNumero,
@@ -762,9 +768,9 @@ function measurePassoImagesBlockHeight(
   { imageIndices = null, showLabel = true, imagePageOnly = false, contentWidth = null } = {}
 ) {
   const probe = doc.createElement('div');
-  probe.className = imagePageOnly
-    ? 'pdf-page-passo-imagem passo-imagem-apos-texto'
-    : 'passo-imagem-apos-texto';
+  // Não misturar com .passo-imagem-apos-texto em páginas só de imagem —
+  // essa classe força max-height: 120mm e a medição fica menor que o PDF real (200mm).
+  probe.className = imagePageOnly ? 'pdf-page-passo-imagem' : 'passo-imagem-apos-texto';
   const widthPart = contentWidth ? `width:${contentWidth}px;max-width:${contentWidth}px;` : '';
   probe.style.cssText = `${PASSO_DESC_PROBE_STYLE}${widthPart}`;
   doc.body.appendChild(probe);
@@ -772,7 +778,14 @@ function measurePassoImagesBlockHeight(
   probe.querySelectorAll('img').forEach((img) => {
     void img.offsetHeight;
   });
-  const h = probe.scrollHeight;
+  let h = probe.scrollHeight;
+  const count =
+    imageIndices == null ? getPassoImagens(imagePasso).length : imageIndices.length;
+  if (imagePageOnly && count > 0 && !probeImagesReady(probe)) {
+    // Imagens ainda sem dimensão → estimar altura alta (foto vertical) para forçar quebra
+    const perImage = Math.round(PDF_PASSO_PAGE_CONTENT_PX * 0.78);
+    h = Math.max(h, count * perImage);
+  }
   probe.remove();
   return h;
 }
@@ -878,7 +891,11 @@ function measurePassoBlockWithImagesOnPage(
 
   if (indices.length) {
     const probe = doc.createElement('div');
-    probe.className = 'passo-imagem-apos-texto passo-imagem-inline-probe';
+    // Em página só de imagem, evitar .passo-imagem-apos-texto (max-height 120mm)
+    probe.className =
+      layoutMode === 'image-only-page'
+        ? 'passo-imagem-page-probe passo-imagem-inline-probe'
+        : 'passo-imagem-apos-texto passo-imagem-inline-probe';
     probe.innerHTML = buildPassoImagesBlock(imagePasso, passoNumero, {
       showLabel: layoutMode === 'inline',
       imageIndices: indices
@@ -890,8 +907,17 @@ function measurePassoBlockWithImagesOnPage(
     });
   }
 
-  const totalH = block.scrollHeight;
+  let totalH = block.scrollHeight;
   const available = getPassoContentAreaHeight(pageEl);
+
+  if (
+    layoutMode === 'image-only-page' &&
+    indices.length > 0 &&
+    !probeImagesReady(block)
+  ) {
+    const perImage = Math.round(available * 0.78);
+    totalH = Math.max(totalH, indices.length * perImage);
+  }
 
   block.querySelector('.passo-imagem-inline-probe')?.remove();
   if (descValueEl && saved.descHtml != null) descValueEl.innerHTML = saved.descHtml;
@@ -979,6 +1005,44 @@ function splitImageIndicesIntoPageGroups(
   const imgs = getPassoImagens(imagePasso);
   const pool = indices ?? imgs.map((_, idx) => idx);
   if (!pool.length) return [];
+
+  // Páginas só de imagem: fotos verticais (ex.: Timemark) quase nunca cabem 2 por folha.
+  // Preferir 1 por página; só agrupar se a medição real mostrar que cabe com folga.
+  if (imagePageOnly && pool.length > 1) {
+    const groups = [];
+    let current = [];
+
+    for (const i of pool) {
+      const trial = [...current, i];
+      const h = measureImageGroupHeight(
+        pageEl,
+        imagePasso,
+        passoNumero,
+        availableHeight,
+        doc,
+        trial,
+        { contentWidth, imagePageOnly: true }
+      );
+
+      if (current.length && h > availableHeight - 24) {
+        groups.push(current);
+        current = [i];
+      } else if (current.length === 0) {
+        current = [i];
+      } else {
+        // Só mantém 2+ na mesma página se couber com folga confortável
+        if (h <= availableHeight - 40) {
+          current = trial;
+        } else {
+          groups.push(current);
+          current = [i];
+        }
+      }
+    }
+
+    if (current.length) groups.push(current);
+    return groups.length ? groups : pool.map((i) => [i]);
+  }
 
   const groups = [];
   let current = [];
@@ -2335,8 +2399,11 @@ export const FORMULARIO_PDF_STYLES = `
     border-radius: 4px;
     background: #fff;
   }
-  .pdf-page-passo-imagem .passo1-imagem {
-    max-height: 200mm;
+  /* Página só de imagem: uma foto grande por folha (titulo + rodapé reservados) */
+  .pdf-page-passo-imagem .passo1-imagem,
+  .pdf-page-passo-imagem .passo-imagem-apos-texto .passo1-imagem,
+  .pdf-page-passo-imagem .passo-imagem-page-probe .passo1-imagem {
+    max-height: 185mm;
   }
   .passo-subtitulo-imagem {
     font-size: 12px;
@@ -2367,10 +2434,14 @@ export const FORMULARIO_PDF_STYLES = `
     margin-top: 10px;
     flex-shrink: 0;
   }
+  .pdf-page-passo-texto .passo-imagem-apos-texto .passo1-imagem,
   .passo-imagem-apos-texto .passo1-imagem {
     max-width: 100%;
     max-height: 120mm;
     object-fit: contain;
+  }
+  .pdf-page-passo-imagem .passo-imagem-apos-texto .passo1-imagem {
+    max-height: 185mm;
   }
 
   /* —— Capa —— */
@@ -2521,8 +2592,9 @@ export const FORMULARIO_PDF_STYLES = `
     .passo1-imagem {
       max-height: 140mm !important;
     }
-    .pdf-page-passo-imagem .passo1-imagem {
-      max-height: 200mm !important;
+    .pdf-page-passo-imagem .passo1-imagem,
+    .pdf-page-passo-imagem .passo-imagem-apos-texto .passo1-imagem {
+      max-height: 185mm !important;
     }
     .pdf-watermark-text span { opacity: 0.04; }
     .pdf-watermark-logo { opacity: 0.05; }
@@ -3289,14 +3361,13 @@ export function buildFullPdfHtml(formData, meta = {}, options = {}) {
 }
 
 export function waitForPrintImages(doc, timeoutMs = 12000) {
-  const pending = Array.from(doc.querySelectorAll('img')).filter((img) => !img.complete);
+  const images = Array.from(doc.querySelectorAll('img'));
 
-  if (!pending.length) {
+  if (!images.length) {
     return Promise.resolve();
   }
 
   return new Promise((resolve) => {
-    let done = 0;
     let settled = false;
     const finishAll = () => {
       if (settled) return;
@@ -3304,16 +3375,31 @@ export function waitForPrintImages(doc, timeoutMs = 12000) {
       clearTimeout(timer);
       resolve();
     };
-    const finishOne = () => {
-      done += 1;
-      if (done >= pending.length) finishAll();
-    };
     const timer = setTimeout(finishAll, timeoutMs);
 
-    pending.forEach((img) => {
-      img.onload = finishOne;
-      img.onerror = finishOne;
-    });
+    Promise.all(
+      images.map((img) => {
+        if (img.complete && img.naturalHeight > 0) {
+          return Promise.resolve();
+        }
+        if (typeof img.decode === 'function') {
+          return img.decode().catch(() => {
+            return new Promise((res) => {
+              img.addEventListener('load', res, { once: true });
+              img.addEventListener('error', res, { once: true });
+            });
+          });
+        }
+        return new Promise((res) => {
+          if (img.complete) {
+            res();
+            return;
+          }
+          img.addEventListener('load', res, { once: true });
+          img.addEventListener('error', res, { once: true });
+        });
+      })
+    ).then(finishAll);
   });
 }
 
