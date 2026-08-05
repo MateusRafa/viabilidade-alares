@@ -9,7 +9,6 @@
     emptyPasso,
     defaultPassoLayout,
     measurePassoLayoutsFromDocument,
-    getPassoLayoutWarnings,
     CABECALHO_FIELDS,
     getCabecalhoFieldsForDisplay,
     buildFullPdfHtml,
@@ -223,7 +222,6 @@
   $: formColumnWidthStyle = `${formColumnWidth}px`;
 
   let passoLayouts = [];
-  let passoLayoutWarnings = [];
   let measureDebounceTimer = null;
   let previewDebounceTimer = null;
   /** HTML aplicado no iframe visível (atualização com debounce) */
@@ -472,8 +470,6 @@
       await tick();
       return;
     }
-
-    passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoLayouts);
   }
 
   function schedulePassoLayoutMeasure(immediate = false) {
@@ -513,7 +509,6 @@
     if (gen !== previewApplyGeneration) return;
 
     scrollPreviewToFocusAnchor(gen);
-    passoLayoutWarnings = getPassoLayoutWarnings(formData.passos, passoLayouts);
   }
 
   $: if (measurePassoKey) {
@@ -1828,9 +1823,6 @@
                   + Adicionar descrição abaixo das imagens
                 </button>
               </div>
-              {#each passoLayoutWarnings.filter((w) => w.passoIndex === passoIndex) as w (w.message)}
-                <p class="passo-layout-warning" role="status">{w.message}</p>
-              {/each}
             {/if}
           </section>
         {/each}
@@ -2629,17 +2621,6 @@ Tem certeza que deseja sair sem salvar o arquivo?"
     margin: 0 0 0.5rem;
     font-size: 0.8rem;
     color: #b91c1c;
-  }
-
-  .passo-layout-warning {
-    margin: 0.65rem 1rem 0;
-    padding: 0.5rem 0.65rem;
-    font-size: 0.75rem;
-    line-height: 1.4;
-    color: #92400e;
-    background: #fffbeb;
-    border: 1px solid #fcd34d;
-    border-radius: 6px;
   }
 
   .preview-column {
