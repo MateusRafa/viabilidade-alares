@@ -1,12 +1,18 @@
 [phases.setup]
 nixPkgs = ["nodejs_18", "npm-9_x"]
 
+[variables]
+PLAYWRIGHT_BROWSERS_PATH = "/app/ms-playwright"
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "0"
+
 [phases.install]
 cmds = [
-  "npm install",
-  "npx playwright install chromium",
-  "npx playwright install-deps chromium || true"
+  "npm install --include=dev",
+  "mkdir -p /app/ms-playwright",
+  "PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright npx --yes playwright install chromium",
+  "PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright npx --yes playwright install-deps chromium || true",
+  "ls -la /app/ms-playwright || true"
 ]
 
 [start]
-cmd = "npm start"
+cmd = "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/app/ms-playwright} npm start"
