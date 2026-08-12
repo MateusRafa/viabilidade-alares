@@ -15,4 +15,4 @@ cmds = [
 ]
 
 [start]
-cmd = "PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/app/ms-playwright} npm start"
+cmd = "npm start"
