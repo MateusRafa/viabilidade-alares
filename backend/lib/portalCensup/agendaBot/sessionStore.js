@@ -59,17 +59,35 @@ export function parseSessionPayload(rawJson) {
     if (!cookie.domain) {
       throw new Error(`Cookie "${cookie.name}" sem domain`);
     }
-    if (!cookie.path) cookie.path = '/';
+
+    // Cookie-Editor / Chrome às vezes omitem path
+    if (typeof cookie.path !== 'string' || !cookie.path) {
+      cookie.path = '/';
+    }
+
     if (cookie.expires == null && cookie.expirationDate != null) {
       cookie.expires = Math.floor(Number(cookie.expirationDate));
     }
     if (cookie.expires == null && cookie.session) {
       cookie.expires = -1;
     }
-    if (cookie.expires == null) cookie.expires = -1;
+    if (cookie.expires == null || Number.isNaN(Number(cookie.expires))) {
+      cookie.expires = -1;
+    }
+
     if (cookie.httpOnly == null) cookie.httpOnly = false;
     if (cookie.secure == null) cookie.secure = true;
-    if (!cookie.sameSite) cookie.sameSite = 'Lax';
+
+    // Playwright só aceita Strict | Lax | None
+    const sameSiteRaw = String(cookie.sameSite || 'Lax').toLowerCase();
+    if (sameSiteRaw === 'no_restriction' || sameSiteRaw === 'none') {
+      cookie.sameSite = 'None';
+      cookie.secure = true;
+    } else if (sameSiteRaw === 'strict') {
+      cookie.sameSite = 'Strict';
+    } else {
+      cookie.sameSite = 'Lax';
+    }
 
     delete cookie.expirationDate;
     delete cookie.hostOnly;
@@ -81,6 +99,7 @@ export function parseSessionPayload(rawJson) {
 }
 
 export async function sessionFileExists(sessionFile) {
+  if (typeof sessionFile !== 'string' || !sessionFile) return false;
   try {
     await fs.access(sessionFile);
     return true;
@@ -90,6 +109,9 @@ export async function sessionFileExists(sessionFile) {
 }
 
 export async function writeSessionFile(sessionFile, storageState) {
+  if (typeof sessionFile !== 'string' || !sessionFile) {
+    throw new Error('Caminho da sessão inválido (undefined). Verifique DATA_DIR=/data');
+  }
   await fs.mkdir(path.dirname(sessionFile), { recursive: true });
   await fs.writeFile(sessionFile, JSON.stringify(storageState, null, 2), 'utf8');
 }
