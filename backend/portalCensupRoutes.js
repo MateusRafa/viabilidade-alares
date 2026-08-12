@@ -9,6 +9,7 @@ import {
 } from './lib/portalCensup/chamadosService.js';
 import {
   getAgendaBotStatus,
+  importAgendaSession,
   startAgendaBot,
   stopAgendaBot,
   syncAgendaBotOnce
@@ -160,6 +161,29 @@ export function registerPortalCensupRoutes(app) {
       res.json({ success: true, status });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST agenda-bot/stop:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/agenda-bot/session', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const { session } = req.body || {};
+      if (!session) {
+        return res.status(400).json({ success: false, error: 'Campo session é obrigatório' });
+      }
+
+      const saved = await importAgendaSession(
+        typeof session === 'string' ? session : JSON.stringify(session)
+      );
+      const status = await getAgendaBotStatus();
+      res.json({ success: true, saved, status });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST agenda-bot/session:', err);
       sendError(res, err);
     }
   });
