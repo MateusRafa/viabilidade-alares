@@ -39,3 +39,7 @@ desktop.ini
 *.tmp
 *.temp
 .cache/
+
+# Bot da Agenda (sessão Playwright — não versionar)
+backend/data/agenda-bot-session.json
+backend/data/agenda-bot-state.json
