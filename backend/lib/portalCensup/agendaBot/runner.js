@@ -7,8 +7,8 @@ import { getAgendaBotState, patchAgendaBotState, markPedidoProcessed } from './s
 import {
   buildChamadoPayload,
   clickAtualizar,
-  isLikelyLoginPage,
   openDetailFromRow,
+  readPageAuthSignals,
   scrapeDetailFields,
   scrapeListRows,
   waitForListTable
@@ -124,18 +124,27 @@ async function runSingleCycle() {
 
     console.log(`🔄 [AgendaBot] Atualizando fila: ${config.listUrl}`);
     await activePage.goto(config.listUrl, { waitUntil: 'domcontentloaded' });
-    await activePage.waitForTimeout(800);
+    await activePage.waitForTimeout(1200);
 
-    const currentUrl = activePage.url();
-    const title = await activePage.title();
+    const auth = await readPageAuthSignals(activePage);
+    console.log(`🔎 [AgendaBot] URL atual: ${auth.url} | title: ${auth.title}`);
 
-    if (isLikelyLoginPage(currentUrl, title)) {
+    if (auth.isLogin) {
+      const tip =
+        'A sessão não autenticou no servidor (comum no Akamai Access quando o IP do Railway é diferente do seu Chrome). ' +
+        'Exporte TODOS os cookies do Cookie-Editor (JSON) com a Agenda já aberta e cole de novo. ' +
+        `URL vista pelo bot: ${auth.url}`;
       await patchAgendaBotState({
         authRequired: true,
         sessionReady: false,
-        lastError:
-          'Sessão expirada. Faça login na Agenda no Chrome, exporte com Cookie-Editor e cole de novo em Portal CENSUP → Salvar sessão.',
-        lastErrorAt: new Date().toISOString()
+        lastError: tip,
+        lastErrorAt: new Date().toISOString(),
+        lastAuthProbe: {
+          url: auth.url,
+          title: auth.title,
+          bodyPreview: auth.bodyPreview,
+          at: new Date().toISOString()
+        }
       });
       await closeBrowser();
       await stopAgendaBot();
@@ -280,6 +289,7 @@ export async function getAgendaBotStatus() {
     lastError: state.lastError,
     lastErrorAt: state.lastErrorAt,
     lastCycle: state.lastCycle,
+    lastAuthProbe: state.lastAuthProbe || null,
     processedCount: (state.processedPedidos || []).length
   };
 }
