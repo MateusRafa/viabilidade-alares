@@ -1,6 +1,7 @@
 export {
   bootstrapAgendaBotIfEnabled,
   getAgendaBotStatus,
+  importAgendaSession,
   startAgendaBot,
   stopAgendaBot,
   syncAgendaBotOnce
