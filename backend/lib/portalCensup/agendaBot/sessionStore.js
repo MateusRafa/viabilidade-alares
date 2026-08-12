@@ -57,12 +57,21 @@ export function parseSessionPayload(rawJson) {
       throw new Error('Cookie inválido na sessão (name/value obrigatórios)');
     }
     if (!cookie.domain) {
-      throw new Error(`Cookie "${cookie.name}" sem domain`);
+      // Cookie-Editor às vezes omite domain no host atual
+      cookie.domain = 'agenda-afn.go.akamai-access.com';
     }
 
     // Cookie-Editor / Chrome às vezes omitem path
     if (typeof cookie.path !== 'string' || !cookie.path) {
       cookie.path = '/';
+    }
+
+    // Playwright: domain com leading dot é mais permissivo entre subdomínios
+    if (typeof cookie.domain === 'string' && cookie.domain && !cookie.domain.startsWith('.')) {
+      // mantém host-only se hostOnly=true; senão permite subdomínios
+      if (cookie.hostOnly === false || cookie.hostOnly == null) {
+        // não força ponto em todos — Akamai host-only costuma precisar do host exato
+      }
     }
 
     if (cookie.expires == null && cookie.expirationDate != null) {
@@ -94,6 +103,23 @@ export function parseSessionPayload(rawJson) {
     delete cookie.session;
     delete cookie.storeId;
   }
+
+  // Garante cobertura do host da Agenda + domínio pai Akamai
+  const extra = [];
+  for (const cookie of storageState.cookies) {
+    const domain = String(cookie.domain || '').replace(/^\./, '');
+    if (!domain.includes('akamai-access.com')) continue;
+
+    for (const parent of ['go.akamai-access.com', 'akamai-access.com']) {
+      if (domain === parent || domain.endsWith('.' + parent)) {
+        extra.push({
+          ...cookie,
+          domain: '.' + parent
+        });
+      }
+    }
+  }
+  storageState.cookies.push(...extra);
 
   return storageState;
 }
