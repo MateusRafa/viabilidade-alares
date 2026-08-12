@@ -11,9 +11,9 @@ import {
   openDetailFromRow,
   scrapeDetailFields,
   scrapeListRows,
-  sessionFileExists,
   waitForListTable
 } from './scraper.js';
+import { ensureAgendaSessionFile, saveSessionFromPayload, sessionFileExists as sessionExistsOnDisk } from './sessionStore.js';
 import { findChamadoByPedidoOrCode, upsertChamadoFromAgenda } from '../chamadosService.js';
 
 let browser = null;
@@ -37,13 +37,15 @@ async function closeBrowser() {
 
 async function ensureBrowser() {
   const config = getAgendaBotConfig();
-  const hasSession = await sessionFileExists(config.sessionFile);
+  await ensureAgendaSessionFile();
+  const hasSession = await sessionExistsOnDisk(config.sessionFile);
 
   if (!hasSession) {
     await patchAgendaBotState({
       sessionReady: false,
       authRequired: true,
-      lastError: 'Sessão da Agenda não configurada. Execute: npm run agenda-bot:login',
+      lastError:
+        'Sessão da Agenda não configurada. Cole a sessão no Portal CENSUP ou defina AGENDA_BOT_SESSION_JSON no Railway.',
       lastErrorAt: new Date().toISOString()
     });
     throw new Error('Sessão da Agenda não encontrada');
@@ -234,13 +236,15 @@ export async function syncAgendaBotOnce() {
 export async function getAgendaBotStatus() {
   const config = getAgendaBotConfig();
   const state = await getAgendaBotState();
-  const hasSession = await sessionFileExists(config.sessionFile);
+  const sessionInfo = await ensureAgendaSessionFile();
+  const hasSession = sessionInfo.ready;
 
   return {
     enabled: config.enabled,
     running: shouldRun || state.running,
     sessionReady: hasSession,
     authRequired: state.authRequired || !hasSession,
+    sessionSource: sessionInfo.envHydration?.source || (hasSession ? 'file' : null),
     pollIntervalMs: config.pollMs,
     listUrl: config.listUrl,
     lastPollAt: state.lastPollAt,
@@ -259,17 +263,31 @@ export async function bootstrapAgendaBotIfEnabled() {
     return null;
   }
 
-  const hasSession = await sessionFileExists(config.sessionFile);
-  if (!hasSession) {
+  const sessionInfo = await ensureAgendaSessionFile();
+  if (sessionInfo.envHydration?.hydrated) {
+    console.log(`✅ [AgendaBot] Sessão carregada de ${sessionInfo.envHydration.source}`);
+  }
+
+  if (!sessionInfo.ready) {
     console.warn('⚠️ [AgendaBot] AGENDA_BOT_ENABLED=true mas sessão não encontrada.');
-    console.warn('⚠️ [AgendaBot] Execute: cd backend && npm run agenda-bot:login');
+    console.warn('⚠️ [AgendaBot] Faça login no Chrome e cole a sessão no Portal CENSUP ou no Railway (AGENDA_BOT_SESSION_JSON).');
     await patchAgendaBotState({
       authRequired: true,
       sessionReady: false,
-      lastError: 'Configure a sessão com npm run agenda-bot:login'
+      lastError: 'Configure a sessão da Agenda (Portal CENSUP ou variável AGENDA_BOT_SESSION_JSON)'
     });
     return getAgendaBotStatus();
   }
 
   return startAgendaBot({ runImmediately: true });
+}
+
+export async function importAgendaSession(rawJson) {
+  const result = await saveSessionFromPayload(rawJson);
+  await patchAgendaBotState({
+    sessionReady: true,
+    authRequired: false,
+    lastError: null
+  });
+  return result;
 }
