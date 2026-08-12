@@ -270,6 +270,52 @@ export async function getChamadoById(id) {
   };
 }
 
+export async function findChamadoByPedidoOrCode({ pedido, agendaCode } = {}) {
+  const store = await readStore();
+  return (
+    store.chamados.find((item) => {
+      if (agendaCode && item.agendaCode === agendaCode) return true;
+      if (pedido && String(item.pedido) === String(pedido)) return true;
+      return false;
+    }) || null
+  );
+}
+
+const TABULACAO_PRESERVE_FIELDS = [
+  'tabulacaoFinal',
+  'tabulacaoConfianca',
+  'tabulacaoStatus',
+  'viabilidadeResumo',
+  'analiseIa'
+];
+
+export async function upsertChamadoFromAgenda(payload) {
+  const existing = await findChamadoByPedidoOrCode({
+    pedido: payload.pedido,
+    agendaCode: payload.agendaCode || payload.id
+  });
+
+  const id = payload.id || payload.agendaCode || existing?.id;
+  const merged = { ...payload, id };
+
+  if (existing) {
+    const preserveTabulacao =
+      existing.tabulacaoFinal &&
+      existing.tabulacaoStatus &&
+      existing.tabulacaoStatus !== 'aguardando_analise';
+
+    if (preserveTabulacao) {
+      for (const field of TABULACAO_PRESERVE_FIELDS) {
+        if (existing[field] !== undefined && existing[field] !== null) {
+          merged[field] = existing[field];
+        }
+      }
+    }
+  }
+
+  return upsertChamado(merged);
+}
+
 export async function upsertChamado(payload) {
   const store = await readStore();
   const id = payload.id || crypto.randomUUID();
