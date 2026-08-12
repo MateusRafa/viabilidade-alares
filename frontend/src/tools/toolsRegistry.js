@@ -99,6 +99,15 @@ const portalToolsMeta = [
     icon: '📐',
     color: '#0D9488',
     available: true
+  },
+  {
+    id: 'portal-censup',
+    title: 'Portal CENSUP',
+    description:
+      'Fila de chamados da Agenda com tabulação automática via Viabilidade e revisão com IA',
+    icon: '📥',
+    color: '#6366F1',
+    available: true
   }
 ];
 
@@ -116,7 +125,8 @@ const TOOL_COMPONENT_FILES = {
   'relatorio-de-construcao': './RelatorioDeConstrucao.svelte',
   'dashboard-projetos': './DashboardProjetos.svelte',
   'dashboard-implantacao': './DashboardImplantacao.svelte',
-  'ia-auditoria-diagramacao': './IaAuditoriaDiagramacao.svelte'
+  'ia-auditoria-diagramacao': './IaAuditoriaDiagramacao.svelte',
+  'portal-censup': './PortalCensup.svelte'
 };
 
 const FAVICON_BY_TOOL = {
@@ -150,6 +160,32 @@ export function mergePermissionsWithRegistry(permissions = {}) {
     }
   });
   return merged;
+}
+
+/** Ferramentas internas acessíveis quando o dashboard pai está habilitado */
+const TOOL_ACCESS_VIA_PARENT = {
+  'relatorio-de-construcao': ['dashboard-implantacao'],
+  'formulario-engenharia-implantacao': ['dashboard-implantacao'],
+  'formulario-engenharia': ['dashboard-projetos']
+};
+
+/**
+ * Verifica se o usuário pode acessar uma ferramenta.
+ * Admin: sempre. Demais: flag explícita ou acesso via dashboard pai.
+ */
+export function canAccessTool(toolId, permissions = {}, { userTipo = 'user' } = {}) {
+  if ((userTipo || '').toLowerCase() === 'admin') return true;
+
+  const merged = mergePermissionsWithRegistry(permissions);
+
+  if (merged[toolId] === true) return true;
+
+  const parentIds = TOOL_ACCESS_VIA_PARENT[toolId];
+  if (parentIds?.some((parentId) => merged[parentId] === true)) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
