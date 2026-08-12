@@ -486,7 +486,7 @@
               <textarea
                 bind:value={sessionJsonInput}
                 rows="6"
-                placeholder='Cole aqui o JSON exportado (lista de cookies ou {"cookies":[...],"origins":[]})'
+                placeholder="Cole aqui o JSON exportado da extensão Cookie-Editor"
                 disabled={sessionSaving}
               ></textarea>
               <button type="button" class="btn-primary" on:click={handleSaveSession} disabled={sessionSaving}>
