@@ -12,6 +12,7 @@ import { union as martinezUnion } from 'martinez-polygon-clipping';
 import supabase, { testSupabaseConnection, checkTables, isSupabaseAvailable } from './supabase.js';
 import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
+import { bootstrapAgendaBotIfEnabled } from './lib/portalCensup/agendaBot/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9173,6 +9174,12 @@ try {
         console.log('⚠️ [Startup] O servidor continuará funcionando, mas Supabase pode não estar disponível');
       }
     })();
+
+    try {
+      await bootstrapAgendaBotIfEnabled();
+    } catch (err) {
+      console.error('❌ [AgendaBot] Falha ao iniciar bot:', err.message);
+    }
   });
   
   // Configurar timeout do servidor (2 minutos para uploads grandes)
