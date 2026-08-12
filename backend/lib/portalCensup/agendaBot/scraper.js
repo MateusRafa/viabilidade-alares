@@ -47,17 +47,47 @@ export async function sessionFileExists(sessionFile) {
   }
 }
 
-export function isLikelyLoginPage(url, title = '') {
+export function isLikelyLoginPage(url, title = '', bodyText = '') {
   const u = (url || '').toLowerCase();
   const t = (title || '').toLowerCase();
+  const b = (bodyText || '').toLowerCase();
+
+  // Se a fila da Agenda está visível, não é login
+  if (
+    b.includes('arrastadinhas') ||
+    b.includes('sem dados na tabela') ||
+    (b.includes('pedido') && b.includes('cidade') && b.includes('motivo'))
+  ) {
+    return false;
+  }
+
   return (
-    u.includes('login') ||
+    u.includes('/login') ||
     u.includes('signin') ||
-    u.includes('sso') ||
-    u.includes('akamai') && u.includes('access') && !u.includes('arrastadinhas') ||
+    u.includes('/sso') ||
+    u.includes('oauth') ||
     t.includes('sign in') ||
-    t.includes('entrar')
+    t.includes('entrar') ||
+    t.includes('login') ||
+    b.includes('sign in') ||
+    b.includes('senha') && b.includes('usuário') ||
+    b.includes('authenticate')
   );
+}
+
+export async function readPageAuthSignals(page) {
+  const url = page.url();
+  const title = await page.title().catch(() => '');
+  const bodyText = await page
+    .locator('body')
+    .innerText({ timeout: 5000 })
+    .catch(() => '');
+  return {
+    url,
+    title,
+    bodyPreview: (bodyText || '').slice(0, 500),
+    isLogin: isLikelyLoginPage(url, title, bodyText)
+  };
 }
 
 export async function clickAtualizar(page) {
