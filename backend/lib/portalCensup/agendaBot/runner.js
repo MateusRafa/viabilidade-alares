@@ -58,6 +58,10 @@ async function launchChromium(headless) {
 
 async function ensureBrowser() {
   const config = getAgendaBotConfig();
+  if (typeof config.sessionFile !== 'string' || !config.sessionFile) {
+    throw new Error('sessionFile inválido. Defina DATA_DIR=/data no Railway.');
+  }
+
   await ensureAgendaSessionFile();
   const hasSession = await sessionExistsOnDisk(config.sessionFile);
 
