@@ -11,6 +11,7 @@ import * as turf from '@turf/turf';
 import { union as martinezUnion } from 'martinez-polygon-clipping';
 import supabase, { testSupabaseConnection, checkTables, isSupabaseAvailable } from './supabase.js';
 import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
+import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -6227,7 +6228,7 @@ async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallbac
   let batchNumber = 0;
   const startTime = Date.now();
 
-  const UPDATE_CONCURRENCY = 40; // Paralelismo dentro de cada lote (id_cto não tem UNIQUE → sem upsert)
+  const UPDATE_CONCURRENCY = 20; // Paralelismo moderado (evita sobrecarga no Railway/Supabase)
 
   const buildUpdateRecord = (cto) => ({
     cid_rede: cto.cid_rede,
@@ -9070,6 +9071,13 @@ try {
   console.log('✅ [RelatoriosB2B] Rotas registradas (/api/relatorios-b2b/*)');
 } catch (err) {
   console.error('❌ [RelatoriosB2B] Não foi possível registrar rotas:', err.message);
+}
+
+try {
+  registerPortalCensupRoutes(app);
+  console.log('✅ [PortalCENSUP] Rotas registradas (/api/portal-censup/*)');
+} catch (err) {
+  console.error('❌ [PortalCENSUP] Não foi possível registrar rotas:', err.message);
 }
 
 try {
