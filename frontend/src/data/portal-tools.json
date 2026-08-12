@@ -70,5 +70,13 @@
     "icon": "📐",
     "color": "#0D9488",
     "available": true
+  },
+  {
+    "id": "portal-censup",
+    "title": "Portal CENSUP",
+    "description": "Fila de chamados da Agenda com tabulação automática via Viabilidade e revisão com IA",
+    "icon": "📥",
+    "color": "#6366F1",
+    "available": true
   }
 ]
