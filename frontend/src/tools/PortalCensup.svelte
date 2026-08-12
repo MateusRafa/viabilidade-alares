@@ -5,7 +5,11 @@
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
     sendPortalCensupFeedback,
-    fetchTabulacoesList
+    fetchTabulacoesList,
+    fetchAgendaBotStatus,
+    startAgendaBot,
+    stopAgendaBot,
+    syncAgendaBot
   } from './portalCensupApi.js';
 
   export let currentUser = '';
@@ -37,6 +41,11 @@
   let showCorrectionForm = false;
   let submittingFeedback = false;
   let feedbackMessage = '';
+
+  let botStatus = null;
+  let botLoading = false;
+  let botError = '';
+  let botStatusInterval = null;
 
   $: showingDetail = !!selectedChamado;
   $: pageLabelStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
@@ -75,10 +84,65 @@
     if (isRefreshing) return;
     isRefreshing = true;
     try {
-      await carregarChamados();
+      await Promise.all([carregarChamados(), carregarBotStatus()]);
     } finally {
       isRefreshing = false;
     }
+  }
+
+  async function carregarBotStatus() {
+    if (!(currentUser || '').trim()) return;
+    try {
+      botStatus = await fetchAgendaBotStatus(currentUser);
+      botError = botStatus.lastError || (botStatus.authRequired ? 'Sessão da Agenda não configurada no servidor.' : '');
+    } catch (err) {
+      botError = err?.message || 'Não foi possível consultar o bot da Agenda.';
+    }
+  }
+
+  async function handleBotStart() {
+    botLoading = true;
+    try {
+      botStatus = await startAgendaBot(currentUser);
+      botError = botStatus.lastError || '';
+      await carregarChamados({ silent: true });
+    } catch (err) {
+      botError = err?.message || 'Erro ao iniciar bot.';
+    } finally {
+      botLoading = false;
+    }
+  }
+
+  async function handleBotStop() {
+    botLoading = true;
+    try {
+      botStatus = await stopAgendaBot(currentUser);
+      botError = botStatus.lastError || '';
+    } catch (err) {
+      botError = err?.message || 'Erro ao parar bot.';
+    } finally {
+      botLoading = false;
+    }
+  }
+
+  async function handleBotSync() {
+    botLoading = true;
+    try {
+      botStatus = await syncAgendaBot(currentUser);
+      botError = botStatus.lastError || '';
+      await carregarChamados();
+    } catch (err) {
+      botError = err?.message || 'Erro ao sincronizar Agenda.';
+    } finally {
+      botLoading = false;
+    }
+  }
+
+  function botStatusText(status) {
+    if (!status) return 'Consultando…';
+    if (status.authRequired) return 'Aguardando login na Agenda';
+    if (status.running) return `Bot ativo — poll a cada ${Math.round((status.pollIntervalMs || 30000) / 1000)}s`;
+    return 'Bot parado';
   }
 
   async function abrirChamado(item) {
@@ -175,6 +239,7 @@
   function statusLabel(status) {
     if (status === 'aprovada') return 'Aprovada';
     if (status === 'corrigida') return 'Corrigida';
+    if (status === 'aguardando_analise') return 'Aguardando análise';
     return 'Pendente revisão';
   }
 
@@ -187,15 +252,20 @@
     }
 
     tabulacoesList = await fetchTabulacoesList();
-    await carregarChamados();
+    await Promise.all([carregarChamados(), carregarBotStatus()]);
 
     refreshInterval = setInterval(() => {
       carregarChamados({ silent: true });
+    }, REFRESH_INTERVAL_MS);
+
+    botStatusInterval = setInterval(() => {
+      carregarBotStatus();
     }, REFRESH_INTERVAL_MS);
   });
 
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
+    if (botStatusInterval) clearInterval(botStatusInterval);
   });
 </script>
 
@@ -236,7 +306,7 @@
               </div>
               <div class="info-item">
                 <span class="label">Tabulação sugerida</span>
-                <span class="value highlight">{selectedChamado.tabulacaoFinal}</span>
+                <span class="value highlight">{selectedChamado.tabulacaoFinal || '—'}</span>
               </div>
               <div class="info-item">
                 <span class="label">Status</span>
@@ -316,17 +386,57 @@
             </span>
           {/if}
         </div>
-        <button
-          type="button"
-          class="btn-primary btn-refresh"
-          on:click={handleAtualizar}
-          disabled={isRefreshing}
-          aria-busy={isRefreshing}
-        >
-          <span class="refresh-icon" class:spinning={isRefreshing}>↻</span>
-          Atualizar
-        </button>
+        <div class="queue-header-actions">
+          <button
+            type="button"
+            class="btn-primary btn-refresh"
+            on:click={handleAtualizar}
+            disabled={isRefreshing}
+            aria-busy={isRefreshing}
+          >
+            <span class="refresh-icon" class:spinning={isRefreshing}>↻</span>
+            Atualizar
+          </button>
+        </div>
       </header>
+
+      <section class="bot-panel" aria-label="Status do bot da Agenda">
+        <div class="bot-panel-main">
+          <span
+            class="bot-indicator"
+            class:bot-indicator--running={botStatus?.running}
+            class:bot-indicator--warn={botStatus?.authRequired}
+          ></span>
+          <div>
+            <strong>Bot da Agenda</strong>
+            <p>{botStatusText(botStatus)}</p>
+            {#if botStatus?.lastCycle}
+              <p class="bot-meta">
+                Último ciclo: {botStatus.lastCycle.rowsFound} na fila,
+                {botStatus.lastCycle.newChamados} novo(s),
+                {botStatus.lastCycle.updatedChamados} atualizado(s)
+              </p>
+            {/if}
+          </div>
+        </div>
+        <div class="bot-panel-actions">
+          {#if botStatus?.running}
+            <button type="button" class="btn-secondary" on:click={handleBotStop} disabled={botLoading}>
+              Parar bot
+            </button>
+          {:else}
+            <button type="button" class="btn-secondary" on:click={handleBotStart} disabled={botLoading}>
+              Iniciar bot
+            </button>
+          {/if}
+          <button type="button" class="btn-primary" on:click={handleBotSync} disabled={botLoading}>
+            Sincronizar agora
+          </button>
+        </div>
+        {#if botError}
+          <p class="bot-error" role="alert">{botError}</p>
+        {/if}
+      </section>
 
       <div class="table-controls">
         <label class="page-size-control">
@@ -460,6 +570,82 @@
     justify-content: space-between;
     gap: 1rem;
     flex-shrink: 0;
+  }
+
+  .queue-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+  }
+
+  .bot-panel {
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
+    flex-shrink: 0;
+  }
+
+  .bot-panel-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .bot-panel-main strong {
+    display: block;
+    color: #374151;
+    margin-bottom: 0.15rem;
+  }
+
+  .bot-panel-main p {
+    margin: 0;
+    font-size: 0.88rem;
+    color: #6b7280;
+  }
+
+  .bot-meta {
+    margin-top: 0.25rem !important;
+    font-size: 0.8rem !important;
+  }
+
+  .bot-panel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .bot-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-top: 0.35rem;
+    background: #9ca3af;
+    flex-shrink: 0;
+  }
+
+  .bot-indicator--running {
+    background: #10b981;
+    box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.2);
+  }
+
+  .bot-indicator--warn {
+    background: #f59e0b;
+    box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.2);
+  }
+
+  .bot-error {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #b45309;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 8px;
+    padding: 0.55rem 0.75rem;
   }
 
   .queue-header-left {
@@ -763,6 +949,11 @@
   .status-badge--pendente {
     background: #fef3c7;
     color: #92400e;
+  }
+
+  .status-badge--aguardando_analise {
+    background: #dbeafe;
+    color: #1d4ed8;
   }
 
   .status-badge--aprovada {
