@@ -116,3 +116,16 @@ export async function syncAgendaBot(usuario) {
   }
   return data.status;
 }
+
+export async function uploadAgendaBotSession(usuario, session) {
+  const response = await fetch(getApiUrl('/api/portal-censup/agenda-bot/session'), {
+    method: 'POST',
+    headers: authHeaders(usuario),
+    body: JSON.stringify({ session })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Erro ao salvar sessão (${response.status})`);
+  }
+  return data;
+}
