@@ -14,6 +14,7 @@ import {
   waitForListTable
 } from './scraper.js';
 import { ensureAgendaSessionFile, saveSessionFromPayload, sessionFileExists as sessionExistsOnDisk } from './sessionStore.js';
+import { ensurePlaywrightBrowsers } from './playwrightEnsure.js';
 import { findChamadoByPedidoOrCode, upsertChamadoFromAgenda } from '../chamadosService.js';
 
 let browser = null;
@@ -35,6 +36,26 @@ async function closeBrowser() {
   }
 }
 
+async function launchChromium(headless) {
+  const launchOptions = {
+    headless,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  };
+
+  try {
+    return await chromium.launch(launchOptions);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (!/Executable doesn't exist|browserType\.launch/i.test(msg)) {
+      throw err;
+    }
+
+    console.warn('⚠️ [AgendaBot] Chromium ausente — tentando instalar no Volume…');
+    await ensurePlaywrightBrowsers();
+    return chromium.launch(launchOptions);
+  }
+}
+
 async function ensureBrowser() {
   const config = getAgendaBotConfig();
   await ensureAgendaSessionFile();
@@ -53,7 +74,9 @@ async function ensureBrowser() {
 
   if (browser && context && page) return { browser, context, page, config };
 
-  browser = await chromium.launch({ headless: config.headless });
+  await ensurePlaywrightBrowsers();
+
+  browser = await launchChromium(config.headless);
   context = await browser.newContext({
     storageState: config.sessionFile,
     viewport: { width: 1440, height: 900 },
