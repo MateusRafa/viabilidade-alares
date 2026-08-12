@@ -69,3 +69,50 @@ export async function fetchTabulacoesList() {
   }
   return data.tabulacoes || [];
 }
+
+export async function fetchAgendaBotStatus(usuario) {
+  const response = await fetch(getApiUrl('/api/portal-censup/agenda-bot/status'), {
+    headers: authHeaders(usuario)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Erro ao consultar bot (${response.status})`);
+  }
+  return data.status;
+}
+
+export async function startAgendaBot(usuario) {
+  const response = await fetch(getApiUrl('/api/portal-censup/agenda-bot/start'), {
+    method: 'POST',
+    headers: authHeaders(usuario)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Erro ao iniciar bot (${response.status})`);
+  }
+  return data.status;
+}
+
+export async function stopAgendaBot(usuario) {
+  const response = await fetch(getApiUrl('/api/portal-censup/agenda-bot/stop'), {
+    method: 'POST',
+    headers: authHeaders(usuario)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Erro ao parar bot (${response.status})`);
+  }
+  return data.status;
+}
+
+export async function syncAgendaBot(usuario) {
+  const response = await fetch(getApiUrl('/api/portal-censup/agenda-bot/sync'), {
+    method: 'POST',
+    headers: authHeaders(usuario)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Erro ao sincronizar bot (${response.status})`);
+  }
+  return data.status;
+}
