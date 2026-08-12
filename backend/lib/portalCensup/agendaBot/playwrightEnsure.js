@@ -12,7 +12,8 @@ const execFileAsync = promisify(execFile);
 let ensurePromise = null;
 
 function looksLikeBrowserInstalled(browsersPath) {
-  if (!browsersPath || !fs.existsSync(browsersPath)) return false;
+  if (typeof browsersPath !== 'string' || !browsersPath) return false;
+  if (!fs.existsSync(browsersPath)) return false;
   try {
     const entries = fs.readdirSync(browsersPath);
     return entries.some(
@@ -26,14 +27,19 @@ function looksLikeBrowserInstalled(browsersPath) {
 }
 
 export function resolvePlaywrightBrowsersPath() {
-  const { dataDir } = getAgendaBotConfig();
+  const config = getAgendaBotConfig();
+  const fallback = config.browsersPath || path.join(config.dataDir || '/data', 'ms-playwright');
+
   const candidates = [
     process.env.PLAYWRIGHT_BROWSERS_PATH,
-    process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'ms-playwright') : null,
-    path.join(dataDir, 'ms-playwright'),
-    path.join(process.cwd(), 'ms-playwright'),
-    '/app/ms-playwright'
-  ].filter(Boolean);
+    config.browsersPath,
+    process.env.DATA_DIR && !/^[a-z][a-z0-9+.-]*:\/\//i.test(process.env.DATA_DIR)
+      ? path.join(process.env.DATA_DIR, 'ms-playwright')
+      : null,
+    path.join(process.cwd() || '/app', 'ms-playwright'),
+    '/app/ms-playwright',
+    fallback
+  ].filter((p) => typeof p === 'string' && p.trim() !== '');
 
   for (const candidate of candidates) {
     if (looksLikeBrowserInstalled(candidate)) {
@@ -41,14 +47,14 @@ export function resolvePlaywrightBrowsersPath() {
     }
   }
 
-  // Instalação nova: preferir Volume persistente
-  if (process.env.DATA_DIR) {
-    return path.join(process.env.DATA_DIR, 'ms-playwright');
-  }
-  return candidates[0] || path.join(dataDir, 'ms-playwright');
+  return candidates[0] || fallback;
 }
 
 async function runPlaywrightInstall(browsersPath) {
+  if (typeof browsersPath !== 'string' || !browsersPath) {
+    throw new Error('Caminho do Playwright inválido (undefined)');
+  }
+
   fs.mkdirSync(browsersPath, { recursive: true });
   console.log(`📥 [AgendaBot] Baixando Chromium do Playwright em ${browsersPath}…`);
 
@@ -62,7 +68,7 @@ async function runPlaywrightInstall(browsersPath) {
 
   await execFileAsync(npxBin, ['--yes', 'playwright', 'install', 'chromium'], {
     env,
-    cwd: process.cwd(),
+    cwd: process.cwd() || '/app',
     maxBuffer: 20 * 1024 * 1024,
     timeout: 10 * 60 * 1000
   });
@@ -77,6 +83,10 @@ export async function ensurePlaywrightBrowsers() {
   if (!ensurePromise) {
     ensurePromise = (async () => {
       const browsersPath = resolvePlaywrightBrowsersPath();
+      if (typeof browsersPath !== 'string' || !browsersPath) {
+        throw new Error('Não foi possível resolver PLAYWRIGHT_BROWSERS_PATH');
+      }
+
       process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
       if (!process.env.PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL) {
         process.env.PLAYWRIGHT_CHROMIUM_USE_HEADLESS_SHELL = '0';
