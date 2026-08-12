@@ -9,7 +9,8 @@
     fetchAgendaBotStatus,
     startAgendaBot,
     stopAgendaBot,
-    syncAgendaBot
+    syncAgendaBot,
+    uploadAgendaBotSession
   } from './portalCensupApi.js';
 
   export let currentUser = '';
@@ -46,6 +47,10 @@
   let botLoading = false;
   let botError = '';
   let botStatusInterval = null;
+  let showSessionPanel = false;
+  let sessionJsonInput = '';
+  let sessionSaveMessage = '';
+  let sessionSaving = false;
 
   $: showingDetail = !!selectedChamado;
   $: pageLabelStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
@@ -140,9 +145,29 @@
 
   function botStatusText(status) {
     if (!status) return 'Consultando…';
-    if (status.authRequired) return 'Aguardando login na Agenda';
+    if (status.authRequired) return 'Aguardando sessão da Agenda';
     if (status.running) return `Bot ativo — poll a cada ${Math.round((status.pollIntervalMs || 30000) / 1000)}s`;
     return 'Bot parado';
+  }
+
+  async function handleSaveSession() {
+    if (!(sessionJsonInput || '').trim()) {
+      sessionSaveMessage = 'Cole o JSON da sessão antes de salvar.';
+      return;
+    }
+    sessionSaving = true;
+    sessionSaveMessage = '';
+    try {
+      const result = await uploadAgendaBotSession(currentUser, sessionJsonInput.trim());
+      botStatus = result.status;
+      botError = '';
+      sessionSaveMessage = `Sessão salva (${result.saved?.cookieCount || 0} cookies).`;
+      showSessionPanel = false;
+    } catch (err) {
+      sessionSaveMessage = err?.message || 'Erro ao salvar sessão.';
+    } finally {
+      sessionSaving = false;
+    }
   }
 
   async function abrirChamado(item) {
@@ -436,6 +461,43 @@
         {#if botError}
           <p class="bot-error" role="alert">{botError}</p>
         {/if}
+
+        <div class="session-setup">
+          <button
+            type="button"
+            class="btn-link"
+            on:click={() => { showSessionPanel = !showSessionPanel; sessionSaveMessage = ''; }}
+          >
+            {showSessionPanel ? 'Ocultar' : 'Como conectar login da Agenda (sem instalar nada)'}
+          </button>
+
+          {#if showSessionPanel}
+            <div class="session-help">
+              <ol>
+                <li>Abra a Agenda no <strong>Chrome</strong> e faça login normalmente.</li>
+                <li>Instale a extensão gratuita <strong>Cookie-Editor</strong> (Chrome Web Store).</li>
+                <li>Na página <code>/arrastadinhas</code>, clique na extensão → <strong>Export</strong> → JSON.</li>
+                <li>Cole o JSON abaixo e clique em <strong>Salvar sessão</strong>.</li>
+              </ol>
+              <p class="session-note">
+                Alternativa no Railway: variável <code>AGENDA_BOT_SESSION_JSON</code> ou
+                <code>AGENDA_BOT_SESSION_B64</code> (JSON em base64).
+              </p>
+              <textarea
+                bind:value={sessionJsonInput}
+                rows="6"
+                placeholder='Cole aqui o JSON exportado (lista de cookies ou {"cookies":[...],"origins":[]})'
+                disabled={sessionSaving}
+              ></textarea>
+              <button type="button" class="btn-primary" on:click={handleSaveSession} disabled={sessionSaving}>
+                Salvar sessão
+              </button>
+              {#if sessionSaveMessage}
+                <p class="session-message" role="status">{sessionSaveMessage}</p>
+              {/if}
+            </div>
+          {/if}
+        </div>
       </section>
 
       <div class="table-controls">
@@ -646,6 +708,64 @@
     border: 1px solid #fde68a;
     border-radius: 8px;
     padding: 0.55rem 0.75rem;
+  }
+
+  .session-setup {
+    border-top: 1px solid #eef2f7;
+    padding-top: 0.65rem;
+  }
+
+  .btn-link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: #7b68ee;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .btn-link:hover {
+    text-decoration: underline;
+  }
+
+  .session-help {
+    margin-top: 0.65rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .session-help ol {
+    margin: 0;
+    padding-left: 1.2rem;
+    font-size: 0.85rem;
+    color: #4b5563;
+    line-height: 1.5;
+  }
+
+  .session-note {
+    margin: 0;
+    font-size: 0.8rem;
+    color: #6b7280;
+  }
+
+  .session-help textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 0.65rem;
+    font-family: ui-monospace, monospace;
+    font-size: 0.78rem;
+    resize: vertical;
+  }
+
+  .session-message {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #059669;
   }
 
   .queue-header-left {
