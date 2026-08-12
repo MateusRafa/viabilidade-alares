@@ -7,6 +7,12 @@ import {
   registerFeedback,
   upsertChamado
 } from './lib/portalCensup/chamadosService.js';
+import {
+  getAgendaBotStatus,
+  startAgendaBot,
+  stopAgendaBot,
+  syncAgendaBotOnce
+} from './lib/portalCensup/agendaBot/index.js';
 
 function getUsuarioFromRequest(req) {
   const headerKeys = Object.keys(req.headers || {});
@@ -109,6 +115,66 @@ export function registerPortalCensupRoutes(app) {
       res.json({ success: true, chamado });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST chamado:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.get('/api/portal-censup/agenda-bot/status', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const status = await getAgendaBotStatus();
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET agenda-bot/status:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/agenda-bot/start', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const status = await startAgendaBot({ runImmediately: true });
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST agenda-bot/start:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/agenda-bot/stop', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const status = await stopAgendaBot();
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST agenda-bot/stop:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/agenda-bot/sync', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const status = await syncAgendaBotOnce();
+      res.json({ success: true, status });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST agenda-bot/sync:', err);
       sendError(res, err);
     }
   });
