@@ -133,7 +133,8 @@ async function runSingleCycle() {
       await patchAgendaBotState({
         authRequired: true,
         sessionReady: false,
-        lastError: 'Sessão expirada. Execute novamente: npm run agenda-bot:login',
+        lastError:
+          'Sessão expirada. Faça login na Agenda no Chrome, exporte com Cookie-Editor e cole de novo em Portal CENSUP → Salvar sessão.',
         lastErrorAt: new Date().toISOString()
       });
       await closeBrowser();
