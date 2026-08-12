@@ -480,8 +480,10 @@
                 <li>Cole o JSON abaixo e clique em <strong>Salvar sessão</strong>.</li>
               </ol>
               <p class="session-note">
-                Alternativa no Railway: variável <code>AGENDA_BOT_SESSION_JSON</code> ou
-                <code>AGENDA_BOT_SESSION_B64</code> (JSON em base64).
+                Se o bot disser que a sessão expirou mesmo com JSON novo: o
+                <strong> Akamai Access</strong> muitas vezes bloqueia o IP do Railway
+                (diferente do seu Chrome). Nesse caso cookies sozinhos não bastam —
+                avise para avaliarmos o bot rodando na rede da empresa.
               </p>
               <textarea
                 bind:value={sessionJsonInput}
