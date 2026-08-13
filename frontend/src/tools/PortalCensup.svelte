@@ -16,13 +16,12 @@
   export let onSettingsHover = null;
 
   const REFRESH_INTERVAL_MS = 30000;
-  const PAGE_SIZE_OPTIONS = [10, 25, 50];
+  const pageSize = 50;
 
   let chamados = [];
   let total = 0;
   let totalPages = 1;
   let page = 1;
-  let pageSize = 10;
   let searchQuery = '';
   let loadingList = false;
   let listError = '';
@@ -42,8 +41,6 @@
   let showExtensionHelp = false;
 
   $: showingDetail = !!selectedChamado;
-  $: pageLabelStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  $: pageLabelEnd = Math.min(page * pageSize, total);
   $: apiBaseHint = (() => {
     try {
       const url = getApiUrl('/api/portal-censup/chamados');
@@ -171,11 +168,6 @@
   }
 
   function handleSearchInput() {
-    page = 1;
-    carregarChamados();
-  }
-
-  function handlePageSizeChange() {
     page = 1;
     carregarChamados();
   }
@@ -382,16 +374,6 @@
       </section>
 
       <div class="table-controls">
-        <label class="page-size-control">
-          Exibir
-          <select bind:value={pageSize} on:change={handlePageSizeChange}>
-            {#each PAGE_SIZE_OPTIONS as size}
-              <option value={size}>{size}</option>
-            {/each}
-          </select>
-          entradas
-        </label>
-
         <label class="search-control">
           Procurar:
           <input
@@ -465,7 +447,6 @@
       </div>
 
       <footer class="table-footer">
-        <span>Mostrando {pageLabelStart} até {pageLabelEnd} de {total} entradas</span>
         <div class="pagination">
           <button type="button" class="btn-page" on:click={() => goToPage(page - 1)} disabled={page <= 1}>
             Anterior
@@ -683,12 +664,11 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-end;
     gap: 1rem;
     flex-shrink: 0;
   }
 
-  .page-size-control,
   .search-control {
     display: inline-flex;
     align-items: center;
@@ -697,7 +677,6 @@
     color: #374151;
   }
 
-  .page-size-control select,
   .search-control input,
   .correction-form select {
     padding: 0.45rem 0.65rem;
@@ -786,7 +765,7 @@
   .table-footer {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-end;
     gap: 1rem;
     flex-shrink: 0;
     font-size: 0.88rem;
