@@ -1,16 +1,12 @@
 <script>
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import Loading from '../Loading.svelte';
+  import { getApiUrl } from '../config.js';
   import {
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
     sendPortalCensupFeedback,
-    fetchTabulacoesList,
-    fetchAgendaBotStatus,
-    startAgendaBot,
-    stopAgendaBot,
-    syncAgendaBot,
-    uploadAgendaBotSession
+    fetchTabulacoesList
   } from './portalCensupApi.js';
 
   export let currentUser = '';
@@ -43,18 +39,22 @@
   let submittingFeedback = false;
   let feedbackMessage = '';
 
-  let botStatus = null;
-  let botLoading = false;
-  let botError = '';
-  let botStatusInterval = null;
-  let showSessionPanel = false;
-  let sessionJsonInput = '';
-  let sessionSaveMessage = '';
-  let sessionSaving = false;
+  let showExtensionHelp = false;
 
   $: showingDetail = !!selectedChamado;
   $: pageLabelStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
   $: pageLabelEnd = Math.min(page * pageSize, total);
+  $: apiBaseHint = (() => {
+    try {
+      const url = getApiUrl('/api/portal-censup/chamados');
+      if (url.startsWith('http://') || url.startsWith('https://')) {
+        return new URL(url).origin;
+      }
+    } catch {
+      // ignore
+    }
+    return 'URL do backend Railway (mesmo do Portal)';
+  })();
 
   async function carregarChamados({ silent = false } = {}) {
     if (!(currentUser || '').trim()) {
@@ -89,84 +89,9 @@
     if (isRefreshing) return;
     isRefreshing = true;
     try {
-      await Promise.all([carregarChamados(), carregarBotStatus()]);
+      await carregarChamados();
     } finally {
       isRefreshing = false;
-    }
-  }
-
-  async function carregarBotStatus() {
-    if (!(currentUser || '').trim()) return;
-    try {
-      botStatus = await fetchAgendaBotStatus(currentUser);
-      botError = botStatus.lastError || (botStatus.authRequired ? 'Sessão da Agenda não configurada no servidor.' : '');
-    } catch (err) {
-      botError = err?.message || 'Não foi possível consultar o bot da Agenda.';
-    }
-  }
-
-  async function handleBotStart() {
-    botLoading = true;
-    try {
-      botStatus = await startAgendaBot(currentUser);
-      botError = botStatus.lastError || '';
-      await carregarChamados({ silent: true });
-    } catch (err) {
-      botError = err?.message || 'Erro ao iniciar bot.';
-    } finally {
-      botLoading = false;
-    }
-  }
-
-  async function handleBotStop() {
-    botLoading = true;
-    try {
-      botStatus = await stopAgendaBot(currentUser);
-      botError = botStatus.lastError || '';
-    } catch (err) {
-      botError = err?.message || 'Erro ao parar bot.';
-    } finally {
-      botLoading = false;
-    }
-  }
-
-  async function handleBotSync() {
-    botLoading = true;
-    try {
-      botStatus = await syncAgendaBot(currentUser);
-      botError = botStatus.lastError || '';
-      await carregarChamados();
-    } catch (err) {
-      botError = err?.message || 'Erro ao sincronizar Agenda.';
-    } finally {
-      botLoading = false;
-    }
-  }
-
-  function botStatusText(status) {
-    if (!status) return 'Consultando…';
-    if (status.authRequired) return 'Aguardando sessão da Agenda';
-    if (status.running) return `Bot ativo — poll a cada ${Math.round((status.pollIntervalMs || 30000) / 1000)}s`;
-    return 'Bot parado';
-  }
-
-  async function handleSaveSession() {
-    if (!(sessionJsonInput || '').trim()) {
-      sessionSaveMessage = 'Cole o JSON da sessão antes de salvar.';
-      return;
-    }
-    sessionSaving = true;
-    sessionSaveMessage = '';
-    try {
-      const result = await uploadAgendaBotSession(currentUser, sessionJsonInput.trim());
-      botStatus = result.status;
-      botError = '';
-      sessionSaveMessage = `Sessão salva (${result.saved?.cookieCount || 0} cookies).`;
-      showSessionPanel = false;
-    } catch (err) {
-      sessionSaveMessage = err?.message || 'Erro ao salvar sessão.';
-    } finally {
-      sessionSaving = false;
     }
   }
 
@@ -277,20 +202,15 @@
     }
 
     tabulacoesList = await fetchTabulacoesList();
-    await Promise.all([carregarChamados(), carregarBotStatus()]);
+    await carregarChamados();
 
     refreshInterval = setInterval(() => {
       carregarChamados({ silent: true });
-    }, REFRESH_INTERVAL_MS);
-
-    botStatusInterval = setInterval(() => {
-      carregarBotStatus();
     }, REFRESH_INTERVAL_MS);
   });
 
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
-    if (botStatusInterval) clearInterval(botStatusInterval);
   });
 </script>
 
@@ -425,81 +345,40 @@
         </div>
       </header>
 
-      <section class="bot-panel" aria-label="Status do bot da Agenda">
-        <div class="bot-panel-main">
-          <span
-            class="bot-indicator"
-            class:bot-indicator--running={botStatus?.running}
-            class:bot-indicator--warn={botStatus?.authRequired}
-          ></span>
+      <section class="extension-panel" aria-label="Extensão Chrome da Agenda">
+        <div class="extension-panel-main">
           <div>
-            <strong>Bot da Agenda</strong>
-            <p>{botStatusText(botStatus)}</p>
-            {#if botStatus?.lastCycle}
-              <p class="bot-meta">
-                Último ciclo: {botStatus.lastCycle.rowsFound} na fila,
-                {botStatus.lastCycle.newChamados} novo(s),
-                {botStatus.lastCycle.updatedChamados} atualizado(s)
-              </p>
-            {/if}
+            <strong>Entrada pela extensão Chrome</strong>
+            <p>
+              Os chamados chegam pela extensão <strong>Portal CENSUP — Assistente Agenda</strong>,
+              rodando na Agenda já logada no seu Chrome. Este portal só lista e tabula.
+            </p>
           </div>
         </div>
-        <div class="bot-panel-actions">
-          {#if botStatus?.running}
-            <button type="button" class="btn-secondary" on:click={handleBotStop} disabled={botLoading}>
-              Parar bot
-            </button>
-          {:else}
-            <button type="button" class="btn-secondary" on:click={handleBotStart} disabled={botLoading}>
-              Iniciar bot
-            </button>
-          {/if}
-          <button type="button" class="btn-primary" on:click={handleBotSync} disabled={botLoading}>
-            Sincronizar agora
-          </button>
-        </div>
-        {#if botError}
-          <p class="bot-error" role="alert">{botError}</p>
+
+        <button
+          type="button"
+          class="btn-link"
+          on:click={() => { showExtensionHelp = !showExtensionHelp; }}
+        >
+          {showExtensionHelp ? 'Ocultar instruções' : 'Como usar a extensão'}
+        </button>
+
+        {#if showExtensionHelp}
+          <div class="extension-help">
+            <ol>
+              <li>Abra a Agenda logada em <code>/arrastadinhas</code> e deixe a aba aberta.</li>
+              <li>Clique no ícone da extensão no Chrome.</li>
+              <li>
+                Em <strong>URL da API</strong>, use:
+                <code class="api-hint">{apiBaseHint}</code>
+              </li>
+              <li>Em <strong>Usuário</strong>, use o mesmo login deste portal.</li>
+              <li>Clique em <strong>Ligar PoC</strong> (ou <strong>Agora</strong> para um ciclo).</li>
+              <li>Volte aqui e clique em <strong>Atualizar</strong> para ver os chamados novos.</li>
+            </ol>
+          </div>
         {/if}
-
-        <div class="session-setup">
-          <button
-            type="button"
-            class="btn-link"
-            on:click={() => { showSessionPanel = !showSessionPanel; sessionSaveMessage = ''; }}
-          >
-            {showSessionPanel ? 'Ocultar' : 'Como conectar login da Agenda (sem instalar nada)'}
-          </button>
-
-          {#if showSessionPanel}
-            <div class="session-help">
-              <ol>
-                <li>Abra a Agenda no <strong>Chrome</strong> e faça login normalmente.</li>
-                <li>Instale a extensão gratuita <strong>Cookie-Editor</strong> (Chrome Web Store).</li>
-                <li>Na página <code>/arrastadinhas</code>, clique na extensão → <strong>Export</strong> → JSON.</li>
-                <li>Cole o JSON abaixo e clique em <strong>Salvar sessão</strong>.</li>
-              </ol>
-              <p class="session-note">
-                Se o bot disser que a sessão expirou mesmo com JSON novo: o
-                <strong> Akamai Access</strong> muitas vezes bloqueia o IP do Railway
-                (diferente do seu Chrome). Nesse caso cookies sozinhos não bastam —
-                avise para avaliarmos o bot rodando na rede da empresa.
-              </p>
-              <textarea
-                bind:value={sessionJsonInput}
-                rows="6"
-                placeholder="Cole aqui o JSON exportado da extensão Cookie-Editor"
-                disabled={sessionSaving}
-              ></textarea>
-              <button type="button" class="btn-primary" on:click={handleSaveSession} disabled={sessionSaving}>
-                Salvar sessão
-              </button>
-              {#if sessionSaveMessage}
-                <p class="session-message" role="status">{sessionSaveMessage}</p>
-              {/if}
-            </div>
-          {/if}
-        </div>
       </section>
 
       <div class="table-controls">
@@ -642,7 +521,7 @@
     gap: 0.65rem;
   }
 
-  .bot-panel {
+  .extension-panel {
     background: white;
     border: 1px solid #e5e7eb;
     border-radius: 10px;
@@ -654,67 +533,17 @@
     flex-shrink: 0;
   }
 
-  .bot-panel-main {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.75rem;
-  }
-
-  .bot-panel-main strong {
+  .extension-panel-main strong {
     display: block;
     color: #374151;
     margin-bottom: 0.15rem;
   }
 
-  .bot-panel-main p {
+  .extension-panel-main p {
     margin: 0;
     font-size: 0.88rem;
     color: #6b7280;
-  }
-
-  .bot-meta {
-    margin-top: 0.25rem !important;
-    font-size: 0.8rem !important;
-  }
-
-  .bot-panel-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-
-  .bot-indicator {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    margin-top: 0.35rem;
-    background: #9ca3af;
-    flex-shrink: 0;
-  }
-
-  .bot-indicator--running {
-    background: #10b981;
-    box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.2);
-  }
-
-  .bot-indicator--warn {
-    background: #f59e0b;
-    box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.2);
-  }
-
-  .bot-error {
-    margin: 0;
-    font-size: 0.85rem;
-    color: #b45309;
-    background: #fffbeb;
-    border: 1px solid #fde68a;
-    border-radius: 8px;
-    padding: 0.55rem 0.75rem;
-  }
-
-  .session-setup {
-    border-top: 1px solid #eef2f7;
-    padding-top: 0.65rem;
+    line-height: 1.45;
   }
 
   .btn-link {
@@ -726,48 +555,32 @@
     font-weight: 600;
     cursor: pointer;
     text-align: left;
+    width: fit-content;
   }
 
   .btn-link:hover {
     text-decoration: underline;
   }
 
-  .session-help {
-    margin-top: 0.65rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-  }
-
-  .session-help ol {
+  .extension-help ol {
     margin: 0;
     padding-left: 1.2rem;
     font-size: 0.85rem;
     color: #4b5563;
-    line-height: 1.5;
+    line-height: 1.55;
   }
 
-  .session-note {
-    margin: 0;
+  .extension-help code {
     font-size: 0.8rem;
-    color: #6b7280;
+    background: #f3f4f6;
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
   }
 
-  .session-help textarea {
-    width: 100%;
-    box-sizing: border-box;
-    border: 1px solid #d1d5db;
-    border-radius: 8px;
-    padding: 0.65rem;
-    font-family: ui-monospace, monospace;
-    font-size: 0.78rem;
-    resize: vertical;
-  }
-
-  .session-message {
-    margin: 0;
-    font-size: 0.85rem;
-    color: #059669;
+  .api-hint {
+    display: inline-block;
+    margin-top: 0.2rem;
+    word-break: break-all;
   }
 
   .queue-header-left {
