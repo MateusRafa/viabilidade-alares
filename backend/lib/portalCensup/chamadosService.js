@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
+import { analisarLocalizacaoChamado } from './analiseLocalizacao.js';
 
 const DATA_FILE = path.join(process.cwd(), 'data', 'portal-censup-chamados.json');
 
@@ -318,15 +319,42 @@ export async function upsertChamadoFromAgenda(payload) {
 
 export async function upsertChamado(payload) {
   const store = await readStore();
-  const id = payload.id || crypto.randomUUID();
-  const existingIndex = store.chamados.findIndex((item) => item.id === id);
+  const pedidoKey = payload.pedido != null ? String(payload.pedido) : null;
+  let existingIndex = -1;
+
+  if (payload.id) {
+    existingIndex = store.chamados.findIndex((item) => item.id === payload.id);
+  }
+  if (existingIndex < 0 && payload.agendaCode) {
+    existingIndex = store.chamados.findIndex((item) => item.agendaCode === payload.agendaCode);
+  }
+  if (existingIndex < 0 && pedidoKey) {
+    existingIndex = store.chamados.findIndex((item) => String(item.pedido) === pedidoKey);
+  }
+
+  const id =
+    payload.id ||
+    (existingIndex >= 0 ? store.chamados[existingIndex].id : null) ||
+    payload.agendaCode ||
+    crypto.randomUUID();
+
   const now = new Date().toISOString();
+  const previous = existingIndex >= 0 ? store.chamados[existingIndex] : {};
   const next = {
-    ...(existingIndex >= 0 ? store.chamados[existingIndex] : {}),
+    ...previous,
     ...payload,
     id,
+    endereco: {
+      ...(previous.endereco || {}),
+      ...(payload.endereco || {})
+    },
+    mapaReferencias:
+      payload.mapaReferencias?.length > 0
+        ? payload.mapaReferencias
+        : previous.mapaReferencias || [],
+    mapaCoords: payload.mapaCoords || previous.mapaCoords || null,
     updatedAt: now,
-    createdAt: existingIndex >= 0 ? store.chamados[existingIndex].createdAt || now : now
+    createdAt: previous.createdAt || now
   };
 
   if (existingIndex >= 0) {
@@ -337,6 +365,90 @@ export async function upsertChamado(payload) {
 
   await writeStore(store);
   return next;
+}
+
+export async function analisarChamadoById(id, { force = false } = {}) {
+  const store = await readStore();
+  const index = store.chamados.findIndex((item) => item.id === id);
+  if (index < 0) {
+    const err = new Error('Chamado não encontrado');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const chamado = store.chamados[index];
+  const jaRevisado =
+    chamado.tabulacaoStatus === 'aprovada' || chamado.tabulacaoStatus === 'corrigida';
+
+  if (jaRevisado && !force) {
+    return {
+      chamado: await getChamadoById(id),
+      skipped: true,
+      reason: 'Tabulação já revisada pelo usuário'
+    };
+  }
+
+  store.chamados[index] = {
+    ...chamado,
+    analiseStatus: 'processando',
+    updatedAt: new Date().toISOString()
+  };
+  await writeStore(store);
+
+  try {
+    const result = await analisarLocalizacaoChamado(store.chamados[index]);
+    const updated = {
+      ...store.chamados[index],
+      analiseStatus: result.analiseStatus,
+      localizacao: result.localizacao,
+      passosAnalise: result.passos,
+      viabilidadeResumo: result.viabilidadeResumo,
+      tabulacaoFinal: result.tabulacaoFinal ?? store.chamados[index].tabulacaoFinal,
+      tabulacaoConfianca: result.tabulacaoConfianca ?? store.chamados[index].tabulacaoConfianca,
+      tabulacaoStatus: result.tabulacaoStatus || store.chamados[index].tabulacaoStatus,
+      analiseIa: result.analiseIa,
+      updatedAt: new Date().toISOString()
+    };
+
+    // re-read in case of concurrent writes
+    const fresh = await readStore();
+    const idx = fresh.chamados.findIndex((item) => item.id === id);
+    if (idx >= 0) {
+      fresh.chamados[idx] = { ...fresh.chamados[idx], ...updated };
+      await writeStore(fresh);
+    }
+
+    return {
+      chamado: await getChamadoById(id),
+      skipped: false,
+      result
+    };
+  } catch (err) {
+    const fresh = await readStore();
+    const idx = fresh.chamados.findIndex((item) => item.id === id);
+    if (idx >= 0) {
+      fresh.chamados[idx] = {
+        ...fresh.chamados[idx],
+        analiseStatus: 'falhou',
+        analiseIa: {
+          modelo: 'cascata-localizacao-v1',
+          motivoSugestao: err.message || 'Falha ao analisar localização'
+        },
+        updatedAt: new Date().toISOString()
+      };
+      await writeStore(fresh);
+    }
+    throw err;
+  }
+}
+
+/** Dispara análise sem bloquear a resposta do upsert (best-effort). */
+export function analisarChamadoEmBackground(id) {
+  setTimeout(() => {
+    analisarChamadoById(id).catch((err) => {
+      console.error('❌ [PortalCENSUP] Análise em background:', err.message || err);
+    });
+  }, 50);
 }
 
 export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigida = null }) {
