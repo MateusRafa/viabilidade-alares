@@ -54,6 +54,24 @@ export async function sendPortalCensupFeedback(usuario, id, { correto, tabulacao
   return data;
 }
 
+export async function analisarPortalCensupChamado(usuario, id, { force = false } = {}) {
+  const response = await fetch(
+    getApiUrl(`/api/portal-censup/chamados/${encodeURIComponent(id)}/analisar`),
+    {
+      method: 'POST',
+      headers: authHeaders(usuario),
+      body: JSON.stringify({ force })
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || `Erro ao analisar chamado (${response.status})`);
+  }
+
+  return data;
+}
+
 export async function fetchTabulacoesList() {
   const response = await fetch(getApiUrl('/api/tabulacoes'));
   const data = await response.json().catch(() => ({}));
