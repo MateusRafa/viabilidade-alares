@@ -2,6 +2,8 @@
  * API REST — Portal CENSUP (fila de chamados + tabulação IA)
  */
 import {
+  analisarChamadoById,
+  analisarChamadoEmBackground,
   getChamadoById,
   listChamados,
   registerFeedback,
@@ -104,7 +106,7 @@ export function registerPortalCensupRoutes(app) {
     }
   });
 
-  /** Endpoint interno para o bot da Agenda inserir/atualizar chamados */
+  /** Endpoint interno para a extensão / bot inserir/atualizar chamados */
   app.post('/api/portal-censup/chamados', async (req, res) => {
     try {
       const usuario = getUsuarioFromRequest(req);
@@ -112,10 +114,35 @@ export function registerPortalCensupRoutes(app) {
         return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
       }
 
-      const chamado = await upsertChamado(req.body || {});
+      const body = req.body || {};
+      const chamado = await upsertChamado({
+        ...body,
+        analiseStatus: body.analiseStatus || 'aguardando_analise',
+        tabulacaoStatus: body.tabulacaoStatus || 'aguardando_analise'
+      });
+
+      // Cascata endereço → referência → cobertura (não bloqueia a extensão)
+      analisarChamadoEmBackground(chamado.id);
+
       res.json({ success: true, chamado });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST chamado:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/chamados/:id/analisar', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const force = req.body?.force === true || req.query?.force === '1';
+      const result = await analisarChamadoById(req.params.id, { force });
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST analisar:', err);
       sendError(res, err);
     }
   });
