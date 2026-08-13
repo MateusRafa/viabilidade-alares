@@ -239,8 +239,24 @@
               </div>
               <div class="info-item full">
                 <span class="label">Endereço</span>
-                <span class="value">{selectedChamado.endereco?.completo}</span>
+                <span class="value">{selectedChamado.endereco?.completo || '—'}</span>
               </div>
+              {#if selectedChamado.endereco?.bairro || selectedChamado.endereco?.cep}
+                <div class="info-item">
+                  <span class="label">Bairro</span>
+                  <span class="value">{selectedChamado.endereco?.bairro || '—'}</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">CEP</span>
+                  <span class="value">{selectedChamado.endereco?.cep || '—'}</span>
+                </div>
+              {/if}
+              {#if selectedChamado.mapaReferencias?.length}
+                <div class="info-item full">
+                  <span class="label">Referências no mapa</span>
+                  <span class="value">{selectedChamado.mapaReferencias.join(' · ')}</span>
+                </div>
+              {/if}
               <div class="info-item">
                 <span class="label">Tabulação sugerida</span>
                 <span class="value highlight">{selectedChamado.tabulacaoFinal || '—'}</span>
