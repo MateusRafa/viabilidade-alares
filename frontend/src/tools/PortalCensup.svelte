@@ -6,7 +6,8 @@
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
     sendPortalCensupFeedback,
-    fetchTabulacoesList
+    fetchTabulacoesList,
+    analisarPortalCensupChamado
   } from './portalCensupApi.js';
 
   export let currentUser = '';
@@ -37,6 +38,8 @@
   let showCorrectionForm = false;
   let submittingFeedback = false;
   let feedbackMessage = '';
+  let analyzing = false;
+  let analyzeError = '';
 
   let showExtensionHelp = false;
 
@@ -97,11 +100,22 @@
     loadingDetail = true;
     detailError = '';
     feedbackMessage = '';
+    analyzeError = '';
     showCorrectionForm = false;
     tabulacaoCorrigida = '';
 
     try {
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
+      const precisaAnalise =
+        !selectedChamado?.tabulacaoFinal ||
+        selectedChamado?.analiseStatus === 'aguardando_analise' ||
+        selectedChamado?.analiseStatus === 'processando' ||
+        selectedChamado?.analiseStatus === 'falhou' ||
+        selectedChamado?.tabulacaoStatus === 'aguardando_analise';
+
+      if (precisaAnalise) {
+        await executarAnalise({ silent: true });
+      }
     } catch (err) {
       detailError = err?.message || 'Não foi possível abrir o chamado.';
       selectedChamado = null;
@@ -110,10 +124,30 @@
     }
   }
 
+  async function executarAnalise({ silent = false, force = false } = {}) {
+    if (!selectedChamado?.id || analyzing) return;
+    analyzing = true;
+    analyzeError = '';
+    try {
+      const result = await analisarPortalCensupChamado(currentUser, selectedChamado.id, { force });
+      selectedChamado = result.chamado;
+      if (!silent && result.skipped) {
+        feedbackMessage = result.reason || 'Análise não refeita.';
+      }
+      await carregarChamados({ silent: true });
+    } catch (err) {
+      analyzeError = err?.message || 'Falha ao analisar localização.';
+      if (!silent) feedbackMessage = analyzeError;
+    } finally {
+      analyzing = false;
+    }
+  }
+
   function fecharDetalhe() {
     selectedChamado = null;
     detailError = '';
     feedbackMessage = '';
+    analyzeError = '';
     showCorrectionForm = false;
     tabulacaoCorrigida = '';
   }
@@ -183,6 +217,21 @@
     if (status === 'corrigida') return 'Corrigida';
     if (status === 'aguardando_analise') return 'Aguardando análise';
     return 'Pendente revisão';
+  }
+
+  function metodoLocalizacaoLabel(loc) {
+    if (!loc?.metodo) return '—';
+    if (loc.metodo === 'referencia_mapa') return `Referência: ${loc.referencia || 'mapa'}`;
+    if (loc.metodo === 'coords_agenda') return 'Coordenadas da Agenda';
+    if (loc.metodo === 'endereco' || loc.metodo === 'endereco_baixa_precisao') return 'Endereço geocodificado';
+    return loc.metodo;
+  }
+
+  function formatDistanciaCobertura(metros) {
+    if (metros == null || Number.isNaN(Number(metros))) return '—';
+    const n = Number(metros);
+    if (n >= 1000) return `${(n / 1000).toFixed(2)} km`;
+    return `${Math.round(n)} m`;
   }
 
   onMount(async () => {
@@ -258,6 +307,30 @@
                 </div>
               {/if}
               <div class="info-item">
+                <span class="label">Local resolvido por</span>
+                <span class="value">{metodoLocalizacaoLabel(selectedChamado.localizacao)}</span>
+              </div>
+              <div class="info-item">
+                <span class="label">Cobertura</span>
+                <span class="value">
+                  {#if selectedChamado.viabilidadeResumo?.dentroCobertura === true}
+                    Dentro da área
+                  {:else if selectedChamado.viabilidadeResumo?.dentroCobertura === false}
+                    Fora da área ({formatDistanciaCobertura(selectedChamado.viabilidadeResumo?.distanciaCoberturaMetros)})
+                  {:else}
+                    —
+                  {/if}
+                </span>
+              </div>
+              {#if selectedChamado.localizacao?.lat != null}
+                <div class="info-item full">
+                  <span class="label">Coordenadas</span>
+                  <span class="value mono">
+                    {selectedChamado.localizacao.lat}, {selectedChamado.localizacao.lng}
+                  </span>
+                </div>
+              {/if}
+              <div class="info-item">
                 <span class="label">Tabulação sugerida</span>
                 <span class="value highlight">{selectedChamado.tabulacaoFinal || '—'}</span>
               </div>
@@ -271,17 +344,29 @@
 
             {#if selectedChamado.analiseIa?.motivoSugestao}
               <div class="ia-box">
-                <strong>Análise da IA</strong>
+                <strong>Análise automática</strong>
                 <p>{selectedChamado.analiseIa.motivoSugestao}</p>
               </div>
+            {/if}
+
+            {#if analyzeError}
+              <p class="load-error" role="alert">{analyzeError}</p>
             {/if}
 
             <div class="feedback-actions">
               <button
                 type="button"
+                class="btn-primary"
+                on:click={() => executarAnalise({ force: true })}
+                disabled={analyzing || loadingDetail}
+              >
+                {analyzing ? 'Analisando…' : 'Analisar localização'}
+              </button>
+              <button
+                type="button"
                 class="btn-success"
                 on:click={confirmarTabulacaoCorreta}
-                disabled={submittingFeedback || selectedChamado.tabulacaoStatus === 'aprovada'}
+                disabled={submittingFeedback || analyzing || selectedChamado.tabulacaoStatus === 'aprovada'}
               >
                 Tabulação correta
               </button>
@@ -289,7 +374,7 @@
                 type="button"
                 class="btn-warning"
                 on:click={iniciarCorrecao}
-                disabled={submittingFeedback}
+                disabled={submittingFeedback || analyzing}
               >
                 Tabulação errada
               </button>
@@ -359,7 +444,8 @@
             <strong>Entrada pela extensão Chrome</strong>
             <p>
               Os chamados chegam pela extensão <strong>Portal CENSUP — Assistente Agenda</strong>,
-              rodando na Agenda já logada no seu Chrome. Este portal só lista e tabula.
+              rodando na Agenda já logada. Ao abrir um chamado, o portal tenta localizar o ponto
+              (endereço → referência do mapa → cobertura) e sugere a tabulação.
             </p>
           </div>
         </div>
@@ -865,6 +951,12 @@
 
   .value.highlight {
     color: #7b68ee;
+  }
+
+  .value.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    word-break: break-all;
   }
 
   .status-badge {
