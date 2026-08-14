@@ -9,8 +9,12 @@ export const toolShellBackHandler = writable(null);
 /** Botão à direita do header (substitui configurações quando definido). */
 export const toolShellHeaderAction = writable(null);
 
+/** Busca no header (botão lupa que abre o input). */
+export const toolShellSearch = writable(null);
+
 export function clearToolShell() {
   toolShellTitle.set(null);
   toolShellBackHandler.set(null);
   toolShellHeaderAction.set(null);
+  toolShellSearch.set(null);
 }
