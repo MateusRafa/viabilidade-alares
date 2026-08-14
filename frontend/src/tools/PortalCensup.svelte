@@ -15,6 +15,8 @@
   export let onBackToDashboard = () => {};
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
+  export let onBackRequest = null;
+  export let onTitleRequest = null;
 
   const REFRESH_INTERVAL_MS = 30000;
   const pageSize = 50;
@@ -103,9 +105,17 @@
     analyzeError = '';
     showCorrectionForm = false;
     tabulacaoCorrigida = '';
+    selectedChamado = {
+      id: item.id,
+      pedido: item.pedido,
+      endereco: item.endereco || {},
+      cidade: item.cidade
+    };
+    syncShellChrome();
 
     try {
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
+      syncShellChrome();
       const precisaAnalise =
         !selectedChamado?.tabulacaoFinal ||
         selectedChamado?.analiseStatus === 'aguardando_analise' ||
@@ -119,6 +129,7 @@
     } catch (err) {
       detailError = err?.message || 'Não foi possível abrir o chamado.';
       selectedChamado = null;
+      syncShellChrome();
     } finally {
       loadingDetail = false;
     }
@@ -131,6 +142,7 @@
     try {
       const result = await analisarPortalCensupChamado(currentUser, selectedChamado.id, { force });
       selectedChamado = result.chamado;
+      syncShellChrome();
       if (!silent && result.skipped) {
         feedbackMessage = result.reason || 'Análise não refeita.';
       }
@@ -150,6 +162,19 @@
     analyzeError = '';
     showCorrectionForm = false;
     tabulacaoCorrigida = '';
+    syncShellChrome();
+  }
+
+  function syncShellChrome() {
+    const inDetail = !!selectedChamado;
+    const pedido = selectedChamado?.pedido;
+
+    if (typeof onBackRequest === 'function') {
+      onBackRequest(inDetail ? () => fecharDetalhe() : null);
+    }
+    if (typeof onTitleRequest === 'function') {
+      onTitleRequest(inDetail && pedido ? `ALA-${pedido}` : null);
+    }
   }
 
   async function confirmarTabulacaoCorreta() {
@@ -252,22 +277,14 @@
 
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
+    if (typeof onBackRequest === 'function') onBackRequest(null);
+    if (typeof onTitleRequest === 'function') onTitleRequest(null);
   });
 </script>
 
 <div class="portal-censup">
   {#if showingDetail}
     <div class="detail-view">
-      <header class="detail-header">
-        <button type="button" class="btn-secondary" on:click={fecharDetalhe}>
-          ← Voltar para a fila
-        </button>
-        <div class="detail-title">
-          <h2>Pedido {selectedChamado?.pedido || '—'}</h2>
-          <span class="detail-subtitle">{selectedChamado?.endereco?.completo || '—'}</span>
-        </div>
-      </header>
-
       {#if loadingDetail}
         <div class="detail-loading"><Loading currentMessage="Abrindo tabulação…" /></div>
       {:else if detailError}
@@ -589,8 +606,7 @@
     gap: 1rem;
   }
 
-  .queue-header,
-  .detail-header {
+  .queue-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -672,15 +688,13 @@
     gap: 0.25rem;
   }
 
-  .queue-header h2,
-  .detail-title h2 {
+  .queue-header h2 {
     margin: 0;
     font-size: 1.35rem;
     color: #374151;
   }
 
-  .last-update,
-  .detail-subtitle {
+  .last-update {
     font-size: 0.85rem;
     color: #6b7280;
   }
