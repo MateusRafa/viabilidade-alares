@@ -1073,7 +1073,7 @@
   .pdf-frame {
     width: 100%;
     height: 100%;
-    min-height: 480px;
+    min-height: 640px;
     border: none;
     background: white;
   }
