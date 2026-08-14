@@ -2,6 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { Loader } from '@googlemaps/js-api-loader';
   import { getApiUrl } from '../config.js';
+  import { theme } from '../themeStore.js';
 
   export let lat = null;
   export let lng = null;
@@ -28,6 +29,7 @@
   let markers = [];
   let polylines = [];
   let clientMarker = null;
+  $: isDark = $theme === 'dark';
   let coverageCircle = null;
   let lastSearchKey = '';
 
@@ -269,7 +271,7 @@
   }
 </script>
 
-<div class="viab-map-panel">
+<div class="viab-map-panel" class:theme-dark={isDark}>
   <div class="map-toolbar">
     <strong>Mapa</strong>
     <span class="map-meta">
@@ -475,5 +477,53 @@
     color: #6b7280;
     padding: 1rem;
     white-space: normal;
+  }
+
+  .viab-map-panel.theme-dark {
+    background: #1a1f33;
+    border-color: #2d3550;
+  }
+
+  .theme-dark .map-canvas-wrap {
+    background: #111827;
+  }
+
+  .theme-dark .map-overlay {
+    background: rgba(15, 18, 32, 0.78);
+    color: #e5e7eb;
+  }
+
+  .theme-dark .map-empty {
+    background: #1a1f33;
+    color: #9ca3af;
+  }
+
+  .theme-dark .map-error {
+    background: #422006;
+    color: #fdba74;
+  }
+
+  .theme-dark .cto-table th,
+  .theme-dark .cto-table td {
+    border-bottom-color: #2d3550;
+    color: #e5e7eb;
+  }
+
+  .theme-dark .cto-table thead th {
+    background: #232a42;
+    color: #e5e7eb;
+  }
+
+  .theme-dark .cto-table tbody tr:nth-child(even) {
+    background: #151a2b;
+  }
+
+  .theme-dark .cto-table tr.sem-porta td,
+  .theme-dark .cto-table tr.fora-limite td {
+    color: #f87171;
+  }
+
+  .theme-dark .cto-table .empty {
+    color: #9ca3af;
   }
 </style>
