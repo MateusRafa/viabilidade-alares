@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import Loading from '../Loading.svelte';
-  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellTitle } from '../toolShellStore.js';
+  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellSearch, toolShellTitle } from '../toolShellStore.js';
   import PortalCensupViabilidadeMap from './PortalCensupViabilidadeMap.svelte';
   import {
     fetchPortalCensupChamados,
@@ -24,6 +24,7 @@
   let totalPages = 1;
   let page = 1;
   let searchQuery = '';
+  let searchTimer = null;
   let loadingList = false;
   let listError = '';
   let refreshInterval = null;
@@ -49,6 +50,27 @@
       disabled: isRefreshing,
       onClick: handleAtualizar
     });
+  }
+
+  function syncHeaderSearch({ enabled = true } = {}) {
+    if (!enabled) {
+      toolShellSearch.set(null);
+      return;
+    }
+    toolShellSearch.update((current) => ({
+      enabled: true,
+      open: current?.open || false,
+      value: searchQuery,
+      placeholder: 'Pedido, cidade, motivo, projetista…',
+      onInput: (value) => {
+        searchQuery = value;
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+          page = 1;
+          carregarChamados();
+        }, 280);
+      }
+    }));
   }
 
   $: isRefreshing, syncHeaderRefresh();
@@ -166,12 +188,14 @@
     if (inDetail && pedido) {
       toolShellTitle.set(`ALA-${pedido}`);
       toolShellBackHandler.set(() => fecharDetalhe());
+      syncHeaderSearch({ enabled: false });
       if (typeof document !== 'undefined') {
         document.title = `ALA-${pedido}`;
       }
     } else {
       toolShellTitle.set(null);
       toolShellBackHandler.set(null);
+      syncHeaderSearch({ enabled: true });
       if (typeof document !== 'undefined') {
         document.title = 'Portal CENSUP';
       }
@@ -232,11 +256,6 @@
     }
   }
 
-  function handleSearchInput() {
-    page = 1;
-    carregarChamados();
-  }
-
   function goToPage(nextPage) {
     if (nextPage < 1 || nextPage > totalPages) return;
     page = nextPage;
@@ -267,6 +286,7 @@
 
   onMount(async () => {
     syncHeaderRefresh();
+    syncHeaderSearch({ enabled: true });
     tabulacoesList = await fetchTabulacoesList();
     await carregarChamados();
 
@@ -277,6 +297,7 @@
 
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
+    if (searchTimer) clearTimeout(searchTimer);
     clearToolShell();
     if (typeof onBackRequest === 'function') onBackRequest(null);
   });
@@ -429,19 +450,6 @@
     </div>
   {:else}
     <div class="queue-view">
-      <div class="table-controls">
-        <label class="search-control">
-          Procurar:
-          <input
-            type="search"
-            bind:value={searchQuery}
-            on:input={handleSearchInput}
-            placeholder="Pedido, cidade, motivo…"
-            autocomplete="off"
-          />
-        </label>
-      </div>
-
       {#if listError}
         <p class="load-error" role="alert">{listError}</p>
       {/if}
@@ -713,24 +721,6 @@
     }
   }
 
-  .table-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 1rem;
-    flex-shrink: 0;
-  }
-
-  .search-control {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.9rem;
-    color: #374151;
-  }
-
-  .search-control input,
   .correction-form select {
     padding: 0.45rem 0.65rem;
     border: 1px solid #d1d5db;
@@ -738,10 +728,6 @@
     font-family: inherit;
     font-size: 0.9rem;
     background: white;
-  }
-
-  .search-control input {
-    min-width: 220px;
   }
 
   .table-wrap {
