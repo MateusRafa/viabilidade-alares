@@ -12,9 +12,13 @@ export const toolShellHeaderAction = writable(null);
 /** Busca no header (botão lupa que abre o input). */
 export const toolShellSearch = writable(null);
 
+/** Mostra botão de tema claro/escuro no header. */
+export const toolShellThemeToggle = writable(false);
+
 export function clearToolShell() {
   toolShellTitle.set(null);
   toolShellBackHandler.set(null);
   toolShellHeaderAction.set(null);
   toolShellSearch.set(null);
+  toolShellThemeToggle.set(false);
 }
