@@ -4,7 +4,8 @@
   import LogoutLoading from './LogoutLoading.svelte';
   import Dashboard from './Dashboard.svelte';
   import ToolWrapper from './components/ToolWrapper.svelte';
-  import { getToolById } from './tools/toolsRegistry.js';
+  import { clearToolShell, toolShellBackHandler, toolShellTitle } from './toolShellStore.js';
+  import { getToolById, canAccessTool, mergePermissionsWithRegistry } from './tools/toolsRegistry.js';
   import { getLockedBrowserTabTitle } from './tools/formularioPdfShared.js';
   import { subscribeRelatoriosB2bAtualizados } from './tools/relatoriosB2bApi.js';
 
@@ -95,7 +96,7 @@
   let relatoriosDashboardRefreshKey = 0;
   /** Força remount limpo do formulário PDF a cada abertura (evita estado travado). */
   let formToolSessionKey = 0;
-  /** Voltar do header — registrado pelo formulário de relatório. */
+  /** Voltar do header — registrado pelo formulário de relatório / ferramentas. */
   let toolBackHandler = null;
 
   const DASHBOARD_RELATORIOS_TOOL_IDS = ['dashboard-projetos', 'dashboard-implantacao'];
@@ -122,6 +123,9 @@
   function registerToolBackHandler(handler) {
     toolBackHandler = typeof handler === 'function' ? handler : null;
   }
+
+  $: shellTitle = $toolShellTitle;
+  $: shellBack = $toolShellBackHandler;
 
   function bumpRelatoriosDashboardRefresh() {
     relatoriosDashboardRefreshKey += 1;
@@ -287,7 +291,7 @@
     } else if (currentView === 'tool' && currentTool) {
       const tool = getToolById(currentTool);
       if (tool) {
-        document.title = tool.title;
+        document.title = $toolShellTitle || tool.title;
         // Sempre usar imagem alares.png como favicon para todas as ferramentas
         createFaviconFromImage('/favicons/alares.png');
       } else {
@@ -535,18 +539,18 @@
       if (response.ok) {
         const data = await response.json();
         if (data.success && data.permissions) {
-          userToolPermissions = data.permissions;
+          userToolPermissions = mergePermissionsWithRegistry(data.permissions);
           console.log('✅ [App] Permissões carregadas:', userToolPermissions);
         } else {
-          userToolPermissions = {};
+          userToolPermissions = mergePermissionsWithRegistry({});
         }
       } else {
         console.warn('⚠️ [App] Erro ao carregar permissões (status:', response.status, ')');
-        userToolPermissions = {};
+        userToolPermissions = mergePermissionsWithRegistry({});
       }
     } catch (err) {
       console.error('❌ [App] Erro ao carregar permissões de ferramentas:', err);
-      userToolPermissions = {};
+      userToolPermissions = mergePermissionsWithRegistry({});
     } finally {
       permissionsLoaded = true;
     }
@@ -554,12 +558,7 @@
 
   // Função para verificar se o usuário tem permissão para acessar uma ferramenta
   function hasToolPermission(toolId) {
-    // Admin tem acesso a todas as ferramentas
-    if (userTipo === 'admin') {
-      return true;
-    }
-    // Verificar se a ferramenta está explicitamente habilitada (true)
-    return userToolPermissions[toolId] === true;
+    return canAccessTool(toolId, userToolPermissions, { userTipo });
   }
 
   // Função para selecionar uma ferramenta do Dashboard
@@ -593,7 +592,9 @@
    * @param {string} toolId
    * @param {{ returnTo?: string, relatorioId?: string, mode?: 'edit'|'print' }} [options]
    */
-  function handleOpenTool(toolId, options = {}) {
+  async function handleOpenTool(toolId, options = {}) {
+    await loadUserToolPermissions();
+
     const tool = getToolById(toolId);
 
     if (!tool || !tool.available) {
@@ -619,6 +620,7 @@
     toolOpenOptions = buildToolOpenOptionsForNavigation(toolId, options);
 
     toolBackHandler = null;
+    clearToolShell();
     if (FORM_RELATORIO_TOOL_IDS.includes(toolId)) {
       formToolSessionKey += 1;
     }
@@ -631,6 +633,10 @@
 
   // Função para voltar ao Dashboard
   async function handleBackToDashboard() {
+    if (typeof shellBack === 'function') {
+      shellBack();
+      return;
+    }
     if (typeof toolBackHandler === 'function') {
       toolBackHandler();
       return;
@@ -707,6 +713,7 @@
       toolReturnTo = null;
       toolOpenOptions = null;
       toolBackHandler = null;
+      clearToolShell();
       // Comportamento normal: voltar ao Dashboard na mesma aba
       currentView = 'dashboard';
       currentTool = null;
@@ -1035,7 +1042,7 @@
     {#if tool && tool.component}
       <!-- Todas as ferramentas são renderizadas da mesma forma -->
       <ToolWrapper
-        toolTitle={tool.title}
+        toolTitle={shellTitle || tool.title}
         onBackToDashboard={handleBackToDashboard}
         onOpenSettings={handleOpenSettings}
         onSettingsHover={handleSettingsHover}
