@@ -1,5 +1,6 @@
 <script>
-  import { toolShellHeaderAction, toolShellSearch } from '../toolShellStore.js';
+  import { toolShellHeaderAction, toolShellSearch, toolShellThemeToggle } from '../toolShellStore.js';
+  import { theme } from '../themeStore.js';
 
   export let toolTitle = 'Ferramenta';
   export let onBackToDashboard = () => {};
@@ -11,6 +12,8 @@
 
   $: headerAction = $toolShellHeaderAction;
   $: searchConfig = $toolShellSearch;
+  $: showThemeToggle = $toolShellThemeToggle;
+  $: isDark = $theme === 'dark';
 
   function toggleSearch() {
     if (!searchConfig?.enabled) return;
@@ -45,7 +48,7 @@
   }
 </script>
 
-<div class="app-container">
+<div class="app-container" class:theme-dark={isDark}>
   <header>
     <div class="header-left">
       <button
@@ -91,6 +94,37 @@
             </svg>
           </button>
         </div>
+      {/if}
+
+      {#if showThemeToggle}
+        <button
+          class="header-action-button theme-toggle"
+          on:click|stopPropagation={() => theme.toggle()}
+          aria-label={isDark ? 'Mudar para tema claro' : 'Mudar para tema escuro'}
+          title={isDark ? 'Tema claro' : 'Tema escuro'}
+          type="button"
+        >
+          {#if isDark}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2.2" />
+              <path
+                d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.05 5.05l1.55 1.55M17.4 17.4l1.55 1.55M5.05 18.95l1.55-1.55M17.4 6.6l1.55-1.55"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linecap="round"
+              />
+            </svg>
+          {:else}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M20.2 14.2A7.8 7.8 0 0 1 9.8 3.8 7.9 7.9 0 1 0 20.2 14.2Z"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linejoin="round"
+              />
+            </svg>
+          {/if}
+        </button>
       {/if}
 
       {#if headerAction?.onClick}
@@ -283,6 +317,20 @@
     overflow: hidden;
     display: flex;
     position: relative;
+    background: transparent;
+  }
+
+  .app-container.theme-dark .main-content {
+    background: #0f1220;
+  }
+
+  .app-container.theme-dark .header-search-input {
+    background: #1a1f33;
+    color: #e5e7eb;
+  }
+
+  .app-container.theme-dark .header-search-input::placeholder {
+    color: #6b7280;
   }
 
   @media (max-width: 768px) {
