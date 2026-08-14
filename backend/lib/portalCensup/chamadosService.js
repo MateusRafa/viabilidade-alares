@@ -85,132 +85,425 @@ function formatDataSituacao(iso) {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function getMapsApiKey() {
+  return (
+    process.env.GOOGLE_MAPS_API_KEY ||
+    process.env.VITE_GOOGLE_MAPS_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    ''
+  ).trim();
+}
+
+function formatCep(cep) {
+  const digits = String(cep || '').replace(/\D/g, '');
+  if (digits.length === 8) return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+  return cep || '—';
+}
+
+function buildStaticMapUrl(lat, lng) {
+  const key = getMapsApiKey();
+  if (!key || lat == null || lng == null) return null;
+  const params = new URLSearchParams({
+    center: `${lat},${lng}`,
+    zoom: '17',
+    size: '640x400',
+    scale: '2',
+    maptype: 'hybrid',
+    markers: `color:0xEA4335|${lat},${lng}`,
+    key
+  });
+  return `https://maps.googleapis.com/maps/api/staticmap?${params.toString()}`;
+}
+
 export function buildChamadoPdfHtml(chamado) {
   const end = chamado.endereco || {};
   const resumo = chamado.viabilidadeResumo || {};
-  const geradoEm = formatDataSituacao(new Date().toISOString());
-  const distancia =
-    resumo.distanciaCtoMetros != null
-      ? resumo.distanciaCtoMetros >= 1000
-        ? `${(resumo.distanciaCtoMetros / 1000).toFixed(2)} km`
-        : `${Math.round(resumo.distanciaCtoMetros)} m`
+  const loc = chamado.localizacao || chamado.mapaCoords || {};
+  const lat = loc.lat != null ? Number(loc.lat) : null;
+  const lng = loc.lng != null ? Number(loc.lng) : null;
+  const pedido = chamado.pedido || '—';
+  const alaNumber = `ALA-${pedido}`;
+  const viAla =
+    chamado.viAla ||
+    `VI ALA-${String(pedido).replace(/\D/g, '').padStart(7, '0') || '0000000'}`;
+
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('pt-BR');
+  const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+  const cidade = end.cidade || chamado.cidade || '—';
+  const enderecoCompleto =
+    end.completo ||
+    [end.logradouro, end.numero, end.bairro, cidade, end.uf, end.cep ? `CEP ${formatCep(end.cep)}` : '']
+      .filter(Boolean)
+      .join(', ') ||
+    '—';
+  const numeroEndereco = end.numero || '—';
+  const cep = formatCep(end.cep);
+  const tabulacao = chamado.tabulacaoFinal || '—';
+  const projetista =
+    resumo.projetista || chamado.analiseIa?.modelo || currentUserFallback(chamado) || 'Portal CENSUP';
+
+  const ctos = Array.isArray(chamado.ctos) ? chamado.ctos : [];
+  const totalCtos = resumo.ctosEncontradas ?? ctos.length;
+  const totalPortas =
+    resumo.portasDisponiveis ??
+    ctos.reduce((sum, cto) => {
+      const total = Number(cto.vagas_total ?? cto.totalPortas ?? 0);
+      const conectadas = Number(cto.clientes_conectados ?? cto.portasConectadas ?? 0);
+      return sum + Math.max(0, total - conectadas);
+    }, 0);
+
+  const foraCobertura = resumo.dentroCobertura === false;
+  const distCobertura = resumo.distanciaCoberturaMetros;
+  let totalEquipamentosTexto = '';
+  if (foraCobertura) {
+    const distTxt =
+      distCobertura != null
+        ? distCobertura >= 1000
+          ? `${(distCobertura / 1000).toFixed(2)} km`
+          : `${Math.round(distCobertura)} m`
+        : null;
+    totalEquipamentosTexto = distTxt
+      ? `<p><strong style="font-weight: bold; color: #F44336;">Fora da área de cobertura:</strong> cerca de <strong style="color:#F44336;">${escapeHtml(distTxt)}</strong> até a mancha mais próxima.</p>`
+      : `<p><strong style="font-weight: bold; color: #F44336;">Fora da área de cobertura.</strong></p>`;
+  } else if (totalCtos != null && totalCtos > 0) {
+    totalEquipamentosTexto = `<p><strong>Total:</strong> <span style="font-weight: bold; color: #000000;">${escapeHtml(totalCtos)}</span> <strong style="font-weight: bold; color: #000000;">${Number(totalCtos) === 1 ? 'Equipamento encontrado' : 'Equipamentos encontrados'} dentro de 250m</strong></p>`;
+  } else {
+    totalEquipamentosTexto = `<p><strong>Total:</strong> <span style="font-weight: bold; color: #000000;">0</span> <strong style="font-weight: bold; color: #000000;">Equipamentos encontrados dentro de 250m</strong></p>`;
+  }
+
+  const mapUrl = buildStaticMapUrl(lat, lng);
+  const coordsTxt =
+    lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)
+      ? `${lat.toFixed(6)}, ${lng.toFixed(6)}`
       : '—';
+
+  const ctoRows =
+    ctos.length > 0
+      ? ctos
+          .map((cto, index) => {
+            const total = Number(cto.vagas_total ?? cto.totalPortas ?? 0);
+            const conectadas = Number(cto.clientes_conectados ?? cto.portasConectadas ?? 0);
+            const disponiveis = Math.max(0, total - conectadas);
+            const distM = Number(cto.distancia_metros ?? cto.distanciaMetros ?? 0);
+            const distKm = (distM / 1000).toFixed(3);
+            const semPortas = disponiveis === 0;
+            const styleColor = semPortas ? ' style="color: #F44336;"' : '';
+            return `
+          <tr${styleColor}>
+            <td${styleColor}>${index + 1}</td>
+            <td${styleColor}>${escapeHtml(cto.cidade || cidade)}</td>
+            <td${styleColor}>${escapeHtml(cto.pop || '—')}</td>
+            <td${styleColor}>${escapeHtml(cto.nome || cto.name || '—')}</td>
+            <td${styleColor}>${escapeHtml(cto.id || '—')}</td>
+            <td${styleColor}>${escapeHtml(total)}</td>
+            <td${styleColor}>${escapeHtml(conectadas)}</td>
+            <td${styleColor}>${escapeHtml(disponiveis)}</td>
+            <td${styleColor}>${escapeHtml(distM)}m (${escapeHtml(distKm)}km)</td>
+          </tr>`;
+          })
+          .join('')
+      : `
+          <tr>
+            <td colspan="9" style="text-align:center; color:#6b7280; padding: 14px;">
+              Nenhum equipamento CTO listado nesta análise ainda.
+            </td>
+          </tr>`;
+
+  const mapSection = mapUrl
+    ? `
+              <div class="map-section">
+                <h2>Visualização do Mapa</h2>
+                <div class="map-wrapper">
+                  <div class="map-image-container">
+                    <img src="${escapeHtml(mapUrl)}" alt="Mapa com localização do cliente" class="map-image" />
+                  </div>
+                </div>
+              </div>`
+    : `
+              <div class="map-section">
+                <h2>Visualização do Mapa</h2>
+                <div class="map-placeholder">
+                  Mapa indisponível — execute <strong>Analisar localização</strong> para obter coordenadas.
+                </div>
+              </div>`;
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <title>Relatório Pedido ${chamado.pedido || ''}</title>
+  <title>Relatório de Análise de Viabilidade Técnica - ${escapeHtml(viAla)}</title>
   <style>
-    * { box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; margin: 0; padding: 24px; color: #1f2937; background: #fff; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+      padding: 8px;
+      background: white !important;
+      font-size: 13px;
+      line-height: 1.4;
+      color: #333;
+    }
     .pdf-header {
       background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
       color: white;
-      padding: 20px 24px;
-      border-radius: 8px;
-      margin-bottom: 24px;
+      padding: 10px 14px;
+      border-radius: 4px 4px 0 0;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 6px rgba(123, 104, 238, 0.3);
+      gap: 12px;
     }
-    .pdf-header h1 { margin: 0 0 8px; font-size: 20px; }
-    .pdf-header .sub { opacity: 0.92; font-size: 14px; }
-    .section { margin-bottom: 24px; }
-    .section h2 {
-      font-size: 16px;
+    .pdf-header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0;
+      color: white;
+      line-height: 1.35;
+    }
+    .pdf-header .date-info {
+      font-size: 11px;
+      opacity: 0.95;
+      text-align: right;
+      font-weight: 500;
+      line-height: 1.4;
+      flex-shrink: 0;
+    }
+    .report-container {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      align-items: stretch;
+    }
+    .report-header {
+      background: linear-gradient(to bottom, #f8f9fa 0%, #ffffff 100%);
+      padding: 8px;
+      border-radius: 4px;
+      border: 1px solid #e0e0e0;
+      flex: 0 0 40%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      display: flex;
+      flex-direction: column;
+    }
+    .report-header h2,
+    .map-section h2,
+    .table-container h2 {
       color: #7B68EE;
+      margin: 0 0 5px;
+      font-size: 14px;
+      font-weight: 700;
+      padding-bottom: 3px;
       border-bottom: 2px solid #7B68EE;
-      padding-bottom: 6px;
-      margin: 0 0 12px;
+      line-height: 1.3;
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px 20px;
+    .map-section h2 { text-align: center; width: 100%; }
+    .report-info { display: grid; gap: 3px; margin-bottom: 5px; flex: 1; }
+    .report-info-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 3px 0;
+      border-bottom: 1px solid #f0f0f0;
     }
-    .item label {
-      display: block;
+    .report-info-item:last-child { border-bottom: none; }
+    .report-info-label {
+      font-weight: 600;
+      color: #666;
       font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.2px;
+    }
+    .report-info-value {
+      color: #333;
+      font-size: 12px;
+      font-weight: 500;
+      word-break: break-word;
+    }
+    .summary-stats {
+      margin-top: auto;
+      padding-top: 5px;
+      border-top: 2px solid #7B68EE;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .summary-stats p { margin: 0; font-size: 11px; color: #333; line-height: 1.35; }
+    .summary-stats strong { color: #7B68EE; font-weight: 700; }
+    .map-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 0;
+    }
+    .map-wrapper {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      width: 100%;
+      max-width: 100%;
+    }
+    .map-image-container {
+      display: block;
+      width: 100%;
+      border: 2px solid #7B68EE;
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px rgba(123, 104, 238, 0.2);
+      line-height: 0;
+      background: #f3f4f6;
+    }
+    .map-image {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 340px;
+      object-fit: contain;
+    }
+    .map-placeholder {
+      width: 100%;
+      min-height: 220px;
+      border: 2px dashed #c4b5fd;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 16px;
       color: #6b7280;
-      margin-bottom: 4px;
+      background: #faf5ff;
+      font-size: 12px;
     }
-    .item span { font-size: 14px; font-weight: 600; }
-    .highlight {
-      background: #f5f3ff;
-      border: 1px solid #ddd6fe;
-      border-radius: 8px;
-      padding: 14px 16px;
+    .table-container {
+      margin-top: 6px;
+      overflow-x: auto;
+      background: white;
+      border-radius: 4px;
+      padding: 6px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
     }
-    .stats { display: flex; flex-wrap: wrap; gap: 12px; }
-    .stat {
-      flex: 1 1 140px;
-      background: #f9fafb;
-      border: 1px solid #e5e7eb;
-      border-radius: 8px;
-      padding: 12px;
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
     }
-    .stat strong { display: block; font-size: 22px; color: #7B68EE; }
-    .stat span { font-size: 12px; color: #6b7280; }
-    .footer { font-size: 11px; color: #9ca3af; margin-top: 24px; }
+    thead {
+      background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
+      color: white;
+    }
+    th, td {
+      padding: 6px 5px;
+      text-align: left;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    th { font-weight: 700; white-space: nowrap; }
+    tbody tr:nth-child(even) { background: #f9fafb; }
+    .watermark {
+      margin-top: 14px;
+      text-align: center;
+      font-size: 13px;
+      color: #333;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
   <div class="pdf-header">
-    <h1>Relatório de Análise de Viabilidade Técnica</h1>
-    <div class="sub">Alares Engenharia — Pedido ${chamado.pedido || '—'}</div>
-    <div class="sub">Gerado em: ${geradoEm}</div>
-  </div>
-
-  <div class="section">
-    <h2>Informações do Chamado</h2>
-    <div class="grid">
-      <div class="item"><label>Pedido</label><span>${chamado.pedido || '—'}</span></div>
-      <div class="item"><label>Sistema</label><span>${chamado.sistema || '—'}</span></div>
-      <div class="item"><label>Cidade</label><span>${end.cidade || chamado.cidade || '—'}</span></div>
-      <div class="item"><label>UF</label><span>${end.uf || chamado.uf || '—'}</span></div>
-      <div class="item" style="grid-column: 1 / -1"><label>Endereço</label><span>${end.completo || '—'}</span></div>
-      <div class="item"><label>Bairro</label><span>${end.bairro || '—'}</span></div>
-      <div class="item"><label>CEP</label><span>${end.cep || '—'}</span></div>
-      <div class="item"><label>Motivo</label><span>${chamado.motivo || '—'}</span></div>
-      <div class="item"><label>PDV</label><span>${chamado.pdv || '—'}</span></div>
+    <h1>
+      Relatório de Análise de Viabilidade Técnica - ${escapeHtml(viAla)}<br>
+      <span style="font-size: 14px; font-weight: 500; opacity: 0.95;">Alares Engenharia - ${escapeHtml(alaNumber)}</span>
+    </h1>
+    <div class="date-info">
+      <div style="margin-bottom: 3px;">Gerado em: ${escapeHtml(dateStr)} às ${escapeHtml(timeStr)}</div>
+      <div style="font-size: 10px; opacity: 0.85;">Sistema de Viabilidade Técnica</div>
     </div>
   </div>
 
-  <div class="section highlight">
-    <h2>Tabulação Final</h2>
-    <div class="item"><label>Sugestão da IA</label><span>${chamado.tabulacaoFinal || '—'}</span></div>
-    ${
-      chamado.analiseIa?.motivoSugestao
-        ? `<p style="margin: 12px 0 0; font-size: 13px; color: #4b5563;">${chamado.analiseIa.motivoSugestao}</p>`
-        : ''
-    }
-  </div>
-
-  <div class="section">
-    <h2>Resumo da Viabilidade</h2>
-    <div class="stats">
-      <div class="stat">
-        <strong>${resumo.dentroCobertura ? 'Sim' : 'Não'}</strong>
-        <span>Dentro da cobertura</span>
+  <div class="report-container">
+    <div class="report-header">
+      <h2>Informações do Relatório</h2>
+      <div class="report-info">
+        <div class="report-info-item">
+          <span class="report-info-label">Número do ALA</span>
+          <span class="report-info-value">${escapeHtml(alaNumber)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">Cidade</span>
+          <span class="report-info-value">${escapeHtml(cidade)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">Endereço Completo</span>
+          <span class="report-info-value">${escapeHtml(enderecoCompleto)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">Número do Endereço</span>
+          <span class="report-info-value">${escapeHtml(numeroEndereco)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">CEP do Endereço</span>
+          <span class="report-info-value">${escapeHtml(cep)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">Latitude e Longitude</span>
+          <span class="report-info-value">${escapeHtml(coordsTxt)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">Tabulação Final</span>
+          <span class="report-info-value">${escapeHtml(tabulacao)}</span>
+        </div>
+        <div class="report-info-item">
+          <span class="report-info-label">Projetista</span>
+          <span class="report-info-value">${escapeHtml(projetista)}</span>
+        </div>
       </div>
-      <div class="stat">
-        <strong>${resumo.ctosEncontradas ?? '—'}</strong>
-        <span>CTOs em 250m</span>
-      </div>
-      <div class="stat">
-        <strong>${resumo.portasDisponiveis ?? '—'}</strong>
-        <span>Portas disponíveis</span>
-      </div>
-      <div class="stat">
-        <strong>${distancia}</strong>
-        <span>Distância CTO mais próxima</span>
+      <div class="summary-stats">
+        ${totalEquipamentosTexto}
+        <p><strong>Total de Portas Disponíveis:</strong> <span style="font-weight: bold; color: #000000;">${escapeHtml(totalPortas ?? 0)}</span> <strong style="font-weight: bold; color: #000000;">portas</strong></p>
       </div>
     </div>
+    ${mapSection}
   </div>
 
-  <div class="footer">Portal CENSUP — prévia do relatório de tabulação automática.</div>
+  <div class="table-container">
+    <h2>Equipamentos CTO Encontrados</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Cidade</th>
+          <th>POP</th>
+          <th>Nome</th>
+          <th>ID</th>
+          <th>Total de Portas</th>
+          <th>Portas Conectadas</th>
+          <th>Portas Disponíveis</th>
+          <th>Distância</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${ctoRows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="watermark">Setor de Planejamento e Projetos - Engenharia Alares</div>
 </body>
 </html>`;
+}
+
+function currentUserFallback(chamado) {
+  return chamado.projetista || chamado.usuarioAnalise || null;
 }
 
 function filterChamados(chamados, { q = '' } = {}) {
