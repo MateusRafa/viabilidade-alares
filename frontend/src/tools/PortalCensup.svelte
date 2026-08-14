@@ -1,7 +1,8 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import Loading from '../Loading.svelte';
-  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellSearch, toolShellTitle } from '../toolShellStore.js';
+  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellSearch, toolShellThemeToggle, toolShellTitle } from '../toolShellStore.js';
+  import { theme } from '../themeStore.js';
   import PortalCensupViabilidadeMap from './PortalCensupViabilidadeMap.svelte';
   import {
     fetchPortalCensupChamados,
@@ -42,6 +43,7 @@
   let analyzeError = '';
 
   $: showingDetail = !!selectedChamado;
+  $: isDark = $theme === 'dark';
 
   function syncHeaderRefresh() {
     toolShellHeaderAction.set({
@@ -287,6 +289,7 @@
   onMount(async () => {
     syncHeaderRefresh();
     syncHeaderSearch({ enabled: true });
+    toolShellThemeToggle.set(true);
     tabulacoesList = await fetchTabulacoesList();
     await carregarChamados();
 
@@ -303,7 +306,7 @@
   });
 </script>
 
-<div class="portal-censup">
+<div class="portal-censup" class:theme-dark={isDark}>
   {#if showingDetail}
     <div class="detail-view">
       {#if loadingDetail}
@@ -1006,5 +1009,104 @@
     .detail-grid {
       grid-template-columns: 1fr;
     }
+  }
+
+  .portal-censup.theme-dark {
+    background: #0f1220;
+    color: #e5e7eb;
+  }
+
+  .theme-dark .table-wrap,
+  .theme-dark .panel,
+  .theme-dark .extension-panel {
+    background: #1a1f33;
+    border-color: #2d3550;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  }
+
+  .theme-dark .chamados-table tbody tr:hover {
+    background: #232a42;
+  }
+
+  .theme-dark .chamados-table th,
+  .theme-dark .chamados-table td {
+    border-bottom-color: #2d3550;
+    color: #e5e7eb;
+  }
+
+  .theme-dark .empty-cell,
+  .theme-dark .table-footer,
+  .theme-dark .last-update,
+  .theme-dark .extension-panel-main p,
+  .theme-dark .ia-box p {
+    color: #9ca3af;
+  }
+
+  .theme-dark .queue-header h2,
+  .theme-dark .extension-panel-main strong,
+  .theme-dark .value,
+  .theme-dark .correction-form label {
+    color: #f3f4f6;
+  }
+
+  .theme-dark .btn-secondary,
+  .theme-dark .btn-page {
+    background: #232a42;
+    color: #c4b5fd;
+    border-color: #4c3d99;
+  }
+
+  .theme-dark .correction-form select {
+    background: #232a42;
+    color: #e5e7eb;
+    border-color: #3b4566;
+  }
+
+  .theme-dark .ia-box {
+    background: #221d3d;
+    border-color: #4c3d99;
+  }
+
+  .theme-dark .ia-box strong {
+    color: #c4b5fd;
+  }
+
+  .theme-dark .status-badge--pendente_revisao,
+  .theme-dark .status-badge--pendente {
+    background: #422006;
+    color: #fde68a;
+  }
+
+  .theme-dark .status-badge--aguardando_analise {
+    background: #1e3a5f;
+    color: #93c5fd;
+  }
+
+  .theme-dark .status-badge--aprovada {
+    background: #064e3b;
+    color: #6ee7b7;
+  }
+
+  .theme-dark .status-badge--corrigida {
+    background: #2e1065;
+    color: #ddd6fe;
+  }
+
+  .theme-dark .load-error {
+    background: #3f1515;
+    color: #fca5a5;
+    border-color: #7f1d1d;
+  }
+
+  .theme-dark .feedback-message {
+    color: #34d399;
+  }
+
+  .theme-dark .page-indicator {
+    color: #a78bfa;
+  }
+
+  .theme-dark .extension-help code {
+    background: #232a42;
   }
 </style>
