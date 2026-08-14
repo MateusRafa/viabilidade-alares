@@ -1,16 +1,13 @@
 <script>
-  // ============================================
-  // ToolWrapper - Wrapper comum para todas as ferramentas
-  // ============================================
-  // Este componente fornece o header e estrutura comum
-  // para todas as ferramentas do portal
-  // ============================================
-  
+  import { toolShellHeaderAction } from '../toolShellStore.js';
+
   export let toolTitle = 'Ferramenta';
   export let onBackToDashboard = () => {};
   export let onOpenSettings = () => {};
-  export let onSettingsHover = () => {}; // Função chamada quando o mouse passa sobre a engrenagem
+  export let onSettingsHover = () => {};
   export let showSettingsButton = true;
+
+  $: headerAction = $toolShellHeaderAction;
 </script>
 
 <div class="app-container">
@@ -29,7 +26,18 @@
       </button>
       <h1>{toolTitle}</h1>
     </div>
-    {#if showSettingsButton}
+    {#if headerAction?.onClick}
+      <button
+        class="header-action-button"
+        on:click|stopPropagation={headerAction.onClick}
+        disabled={headerAction.disabled || headerAction.spinning}
+        aria-label={headerAction.label || 'Atualizar'}
+        title={headerAction.label || 'Atualizar'}
+        type="button"
+      >
+        <span class="header-refresh-icon" class:spinning={headerAction.spinning}>↻</span>
+      </button>
+    {:else if showSettingsButton}
       <button 
         class="settings-button" 
         on:click|stopPropagation={onOpenSettings}
@@ -104,7 +112,8 @@
     color: white;
   }
 
-  .settings-button {
+  .settings-button,
+  .header-action-button {
     background: none;
     border: none;
     color: white;
@@ -117,6 +126,38 @@
     transition: transform 0.3s ease;
     position: relative;
     z-index: 1001;
+  }
+
+  .header-action-button {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.2);
+    font-size: 1.25rem;
+  }
+
+  .header-action-button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .header-action-button:disabled {
+    opacity: 0.65;
+    cursor: default;
+  }
+
+  .header-refresh-icon {
+    display: inline-block;
+    line-height: 1;
+  }
+
+  .header-refresh-icon.spinning {
+    animation: headerSpin 0.8s linear infinite;
+  }
+
+  @keyframes headerSpin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   /* Gira quando o usuário passar o mouse ou clicar */
@@ -157,3 +198,4 @@
     }
   }
 </style>
+
