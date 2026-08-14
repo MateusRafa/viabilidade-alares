@@ -1,8 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import Loading from '../Loading.svelte';
-  import { getApiUrl } from '../config.js';
-  import { clearToolShell, toolShellBackHandler, toolShellTitle } from '../toolShellStore.js';
+  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellTitle } from '../toolShellStore.js';
   import PortalCensupViabilidadeMap from './PortalCensupViabilidadeMap.svelte';
   import {
     fetchPortalCensupChamados,
@@ -15,8 +14,6 @@
   export let currentUser = '';
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
-  export let onSettingsRequest = null;
-  export let onSettingsHover = null;
   export let onBackRequest = null;
 
   const REFRESH_INTERVAL_MS = 30000;
@@ -29,7 +26,6 @@
   let searchQuery = '';
   let loadingList = false;
   let listError = '';
-  let lastUpdatedAt = null;
   let refreshInterval = null;
   let isRefreshing = false;
 
@@ -44,20 +40,18 @@
   let analyzing = false;
   let analyzeError = '';
 
-  let showExtensionHelp = false;
-
   $: showingDetail = !!selectedChamado;
-  $: apiBaseHint = (() => {
-    try {
-      const url = getApiUrl('/api/portal-censup/chamados');
-      if (url.startsWith('http://') || url.startsWith('https://')) {
-        return new URL(url).origin;
-      }
-    } catch {
-      // ignore
-    }
-    return 'URL do backend Railway (mesmo do Portal)';
-  })();
+
+  function syncHeaderRefresh() {
+    toolShellHeaderAction.set({
+      label: 'Atualizar',
+      spinning: isRefreshing,
+      disabled: isRefreshing,
+      onClick: handleAtualizar
+    });
+  }
+
+  $: isRefreshing, syncHeaderRefresh();
 
   async function carregarChamados({ silent = false } = {}) {
     if (!(currentUser || '').trim()) {
@@ -77,7 +71,6 @@
       chamados = data.chamados || [];
       total = data.total || 0;
       totalPages = data.totalPages || 1;
-      lastUpdatedAt = new Date();
     } catch (err) {
       if (!silent) {
         listError = err?.message || 'Não foi possível carregar os chamados.';
@@ -273,13 +266,7 @@
   }
 
   onMount(async () => {
-    if (onSettingsRequest && typeof onSettingsRequest === 'function') {
-      onSettingsRequest(() => {});
-    }
-    if (onSettingsHover && typeof onSettingsHover === 'function') {
-      onSettingsHover(() => {});
-    }
-
+    syncHeaderRefresh();
     tabulacoesList = await fetchTabulacoesList();
     await carregarChamados();
 
@@ -442,66 +429,6 @@
     </div>
   {:else}
     <div class="queue-view">
-      <header class="queue-header">
-        <div class="queue-header-left">
-          <h2>Arrastadinhas</h2>
-          {#if lastUpdatedAt}
-            <span class="last-update">
-              Atualizado às {lastUpdatedAt.toLocaleTimeString('pt-BR')}
-            </span>
-          {/if}
-        </div>
-        <div class="queue-header-actions">
-          <button
-            type="button"
-            class="btn-primary btn-refresh"
-            on:click={handleAtualizar}
-            disabled={isRefreshing}
-            aria-busy={isRefreshing}
-          >
-            <span class="refresh-icon" class:spinning={isRefreshing}>↻</span>
-            Atualizar
-          </button>
-        </div>
-      </header>
-
-      <section class="extension-panel" aria-label="Extensão Chrome da Agenda">
-        <div class="extension-panel-main">
-          <div>
-            <strong>Entrada pela extensão Chrome</strong>
-            <p>
-              Os chamados chegam pela extensão <strong>Portal CENSUP — Assistente Agenda</strong>,
-              rodando na Agenda já logada. Ao abrir um chamado, o portal tenta localizar o ponto
-              (endereço → referência do mapa → cobertura) e sugere a tabulação.
-            </p>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          class="btn-link"
-          on:click={() => { showExtensionHelp = !showExtensionHelp; }}
-        >
-          {showExtensionHelp ? 'Ocultar instruções' : 'Como usar a extensão'}
-        </button>
-
-        {#if showExtensionHelp}
-          <div class="extension-help">
-            <ol>
-              <li>Abra a Agenda logada em <code>/arrastadinhas</code> e deixe a aba aberta.</li>
-              <li>Clique no ícone da extensão no Chrome.</li>
-              <li>
-                Em <strong>URL da API</strong>, use:
-                <code class="api-hint">{apiBaseHint}</code>
-              </li>
-              <li>Em <strong>Usuário</strong>, use o mesmo login deste portal.</li>
-              <li>Clique em <strong>Ligar PoC</strong> (ou <strong>Agora</strong> para um ciclo).</li>
-              <li>Volte aqui e clique em <strong>Atualizar</strong> para ver os chamados novos.</li>
-            </ol>
-          </div>
-        {/if}
-      </section>
-
       <div class="table-controls">
         <label class="search-control">
           Procurar:
@@ -874,13 +801,13 @@
     height: 42px;
     border: none;
     border-radius: 8px;
-    background: linear-gradient(135deg, #f59e0b 0%, #f97316 100%);
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
     color: white;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    box-shadow: 0 3px 10px rgba(249, 115, 22, 0.35);
+    box-shadow: 0 3px 10px rgba(123, 104, 238, 0.35);
   }
 
   .btn-lupa:hover {
