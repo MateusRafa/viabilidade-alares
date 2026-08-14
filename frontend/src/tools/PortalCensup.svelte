@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import Loading from '../Loading.svelte';
   import { getApiUrl } from '../config.js';
+  import { clearToolShell, toolShellBackHandler, toolShellTitle } from '../toolShellStore.js';
   import {
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
@@ -16,7 +17,6 @@
   export let onSettingsRequest = null;
   export let onSettingsHover = null;
   export let onBackRequest = null;
-  export let onTitleRequest = null;
 
   const REFRESH_INTERVAL_MS = 30000;
   const pageSize = 50;
@@ -169,11 +169,23 @@
     const inDetail = !!selectedChamado;
     const pedido = selectedChamado?.pedido;
 
+    if (inDetail && pedido) {
+      toolShellTitle.set(`ALA-${pedido}`);
+      toolShellBackHandler.set(() => fecharDetalhe());
+      if (typeof document !== 'undefined') {
+        document.title = `ALA-${pedido}`;
+      }
+    } else {
+      toolShellTitle.set(null);
+      toolShellBackHandler.set(null);
+      if (typeof document !== 'undefined') {
+        document.title = 'Portal CENSUP';
+      }
+    }
+
+    // Mantém compatibilidade com ferramentas que usam onBackRequest
     if (typeof onBackRequest === 'function') {
       onBackRequest(inDetail ? () => fecharDetalhe() : null);
-    }
-    if (typeof onTitleRequest === 'function') {
-      onTitleRequest(inDetail && pedido ? `ALA-${pedido}` : null);
     }
   }
 
@@ -277,8 +289,8 @@
 
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
+    clearToolShell();
     if (typeof onBackRequest === 'function') onBackRequest(null);
-    if (typeof onTitleRequest === 'function') onTitleRequest(null);
   });
 </script>
 
