@@ -519,7 +519,11 @@ function filterChamados(chamados, { q = '' } = {}) {
       item.motivo,
       item.situacao,
       item.tabulacaoFinal,
-      item.endereco?.completo
+      item.endereco?.completo,
+      item.projetista,
+      item.usuarioAnalise,
+      item.viabilidadeResumo?.projetista,
+      item.analiseIa?.modelo
     ]
       .filter(Boolean)
       .join(' ')
