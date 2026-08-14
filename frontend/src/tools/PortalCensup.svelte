@@ -3,6 +3,7 @@
   import Loading from '../Loading.svelte';
   import { getApiUrl } from '../config.js';
   import { clearToolShell, toolShellBackHandler, toolShellTitle } from '../toolShellStore.js';
+  import PortalCensupViabilidadeMap from './PortalCensupViabilidadeMap.svelte';
   import {
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
@@ -429,15 +430,12 @@
             {/if}
           </section>
 
-          <section class="panel pdf-panel" aria-label="Prévia do PDF">
-            <h3>Prévia do PDF</h3>
-            <div class="pdf-frame-wrap">
-              <iframe
-                title="Prévia do relatório de tabulação"
-                srcdoc={selectedChamado.pdfHtml || ''}
-                class="pdf-frame"
-              ></iframe>
-            </div>
+          <section class="panel map-panel" aria-label="Mapa e CTOs">
+            <PortalCensupViabilidadeMap
+              lat={selectedChamado.localizacao?.lat ?? selectedChamado.mapaCoords?.lat}
+              lng={selectedChamado.localizacao?.lng ?? selectedChamado.mapaCoords?.lng}
+              dentroCobertura={selectedChamado.viabilidadeResumo?.dentroCobertura}
+            />
           </section>
         </div>
       {/if}
@@ -1061,21 +1059,18 @@
     color: #059669;
   }
 
-  .pdf-frame-wrap {
-    flex: 1;
+  .map-panel {
     min-height: 0;
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
     overflow: hidden;
-    background: #f9fafb;
   }
 
-  .pdf-frame {
-    width: 100%;
-    height: 100%;
-    min-height: 640px;
+  .map-panel :global(.viab-map-panel) {
     border: none;
-    background: white;
+    border-radius: 10px;
+    flex: 1;
   }
 
   .detail-loading {
@@ -1097,10 +1092,6 @@
   @media (max-width: 960px) {
     .detail-grid {
       grid-template-columns: 1fr;
-    }
-
-    .pdf-frame {
-      min-height: 360px;
     }
   }
 </style>
