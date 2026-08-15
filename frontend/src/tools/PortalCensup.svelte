@@ -41,9 +41,26 @@
   let feedbackMessage = '';
   let analyzing = false;
   let analyzeError = '';
+  let searchMode = 'address';
+  let addressInput = '';
+  let coordinatesInput = '';
+  let isSearchPanelMinimized = false;
 
   $: showingDetail = !!selectedChamado;
   $: isDark = $theme === 'dark';
+
+  function syncSearchInputsFromChamado(chamado) {
+    if (!chamado) return;
+    addressInput = chamado.endereco?.completo || '';
+    const lat = chamado.localizacao?.lat ?? chamado.mapaCoords?.lat;
+    const lng = chamado.localizacao?.lng ?? chamado.mapaCoords?.lng;
+    coordinatesInput =
+      lat != null && lng != null && !Number.isNaN(Number(lat)) && !Number.isNaN(Number(lng))
+        ? `${lat}, ${lng}`
+        : '';
+    if (addressInput) searchMode = 'address';
+    else if (coordinatesInput) searchMode = 'coordinates';
+  }
 
   function syncHeaderRefresh() {
     toolShellHeaderAction.set({
@@ -133,6 +150,7 @@
 
     try {
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
+      syncSearchInputsFromChamado(selectedChamado);
       syncShellChrome();
       const precisaAnalise =
         !selectedChamado?.tabulacaoFinal ||
@@ -160,6 +178,7 @@
     try {
       const result = await analisarPortalCensupChamado(currentUser, selectedChamado.id, { force });
       selectedChamado = result.chamado;
+      syncSearchInputsFromChamado(selectedChamado);
       syncShellChrome();
       if (!silent && result.skipped) {
         feedbackMessage = result.reason || 'Análise não refeita.';
@@ -314,140 +333,236 @@
       {:else if detailError}
         <p class="load-error" role="alert">{detailError}</p>
       {:else if selectedChamado}
-        <div class="detail-grid">
-          <section class="panel tabulacao-panel" aria-label="Tabulação">
-            <h3>Tabulação</h3>
-
-            <div class="info-grid">
-              <div class="info-item">
-                <span class="label">Pedido</span>
-                <span class="value">{selectedChamado.pedido}</span>
-              </div>
-              <div class="info-item">
-                <span class="label">Cidade</span>
-                <span class="value">{selectedChamado.endereco?.cidade || selectedChamado.cidade}</span>
-              </div>
-              <div class="info-item full">
-                <span class="label">Endereço</span>
-                <span class="value">{selectedChamado.endereco?.completo || '—'}</span>
-              </div>
-              {#if selectedChamado.endereco?.bairro || selectedChamado.endereco?.cep}
-                <div class="info-item">
-                  <span class="label">Bairro</span>
-                  <span class="value">{selectedChamado.endereco?.bairro || '—'}</span>
-                </div>
-                <div class="info-item">
-                  <span class="label">CEP</span>
-                  <span class="value">{selectedChamado.endereco?.cep || '—'}</span>
-                </div>
-              {/if}
-              {#if selectedChamado.mapaReferencias?.length}
-                <div class="info-item full">
-                  <span class="label">Referências no mapa</span>
-                  <span class="value">{selectedChamado.mapaReferencias.join(' · ')}</span>
-                </div>
-              {/if}
-              <div class="info-item">
-                <span class="label">Local resolvido por</span>
-                <span class="value">{metodoLocalizacaoLabel(selectedChamado.localizacao)}</span>
-              </div>
-              <div class="info-item">
-                <span class="label">Cobertura</span>
-                <span class="value">
-                  {#if selectedChamado.viabilidadeResumo?.dentroCobertura === true}
-                    Dentro da área
-                  {:else if selectedChamado.viabilidadeResumo?.dentroCobertura === false}
-                    Fora da área ({formatDistanciaCobertura(selectedChamado.viabilidadeResumo?.distanciaCoberturaMetros)})
-                  {:else}
-                    —
-                  {/if}
-                </span>
-              </div>
-              {#if selectedChamado.localizacao?.lat != null}
-                <div class="info-item full">
-                  <span class="label">Coordenadas</span>
-                  <span class="value mono">
-                    {selectedChamado.localizacao.lat}, {selectedChamado.localizacao.lng}
-                  </span>
-                </div>
-              {/if}
-              <div class="info-item">
-                <span class="label">Tabulação sugerida</span>
-                <span class="value highlight">{selectedChamado.tabulacaoFinal || '—'}</span>
-              </div>
-              <div class="info-item">
-                <span class="label">Status</span>
-                <span class="value status-badge status-badge--{selectedChamado.tabulacaoStatus || 'pendente'}">
-                  {statusLabel(selectedChamado.tabulacaoStatus)}
-                </span>
-              </div>
-            </div>
-
-            {#if selectedChamado.analiseIa?.motivoSugestao}
-              <div class="ia-box">
-                <strong>Análise automática</strong>
-                <p>{selectedChamado.analiseIa.motivoSugestao}</p>
-              </div>
-            {/if}
-
-            {#if analyzeError}
-              <p class="load-error" role="alert">{analyzeError}</p>
-            {/if}
-
-            <div class="feedback-actions">
-              <button
-                type="button"
-                class="btn-primary"
-                on:click={() => executarAnalise({ force: true })}
-                disabled={analyzing || loadingDetail}
-              >
-                {analyzing ? 'Analisando…' : 'Analisar localização'}
-              </button>
-              <button
-                type="button"
-                class="btn-success"
-                on:click={confirmarTabulacaoCorreta}
-                disabled={submittingFeedback || analyzing || selectedChamado.tabulacaoStatus === 'aprovada'}
-              >
-                Tabulação correta
-              </button>
-              <button
-                type="button"
-                class="btn-warning"
-                on:click={iniciarCorrecao}
-                disabled={submittingFeedback || analyzing}
-              >
-                Tabulação errada
-              </button>
-            </div>
-
-            {#if showCorrectionForm}
-              <div class="correction-form">
-                <label for="tabulacao-corrigida">Tabulação correta</label>
-                <select id="tabulacao-corrigida" bind:value={tabulacaoCorrigida} disabled={submittingFeedback}>
-                  <option value="">Selecione…</option>
-                  {#each tabulacoesList as tabulacao}
-                    <option value={tabulacao}>{tabulacao}</option>
-                  {/each}
-                </select>
-                <button type="button" class="btn-primary" on:click={enviarCorrecao} disabled={submittingFeedback}>
-                  Salvar correção
+        <div class="detail-layout">
+          <aside class="search-panel" class:minimized={isSearchPanelMinimized}>
+            <div class="panel-header">
+              <div class="panel-header-content">
+                {#if !isSearchPanelMinimized}
+                  <h2>Viabilidade Alares</h2>
+                {/if}
+                <button
+                  type="button"
+                  class="minimize-button"
+                  on:click={() => (isSearchPanelMinimized = !isSearchPanelMinimized)}
+                  aria-label={isSearchPanelMinimized ? 'Expandir painel' : 'Minimizar painel'}
+                  title={isSearchPanelMinimized ? 'Expandir' : 'Minimizar'}
+                >
+                  {isSearchPanelMinimized ? '➡️' : '⬅️'}
                 </button>
               </div>
-            {/if}
+              {#if !isSearchPanelMinimized}
+                <p>Localize o cliente e encontre CTOs próximas</p>
+              {/if}
+            </div>
 
-            {#if feedbackMessage}
-              <p class="feedback-message" role="status">{feedbackMessage}</p>
-            {/if}
-          </section>
+            {#if !isSearchPanelMinimized}
+              <div class="search-section">
+                <div class="search-mode-selector">
+                  <button
+                    type="button"
+                    class="mode-button"
+                    class:active={searchMode === 'address'}
+                    on:click={() => (searchMode = 'address')}
+                  >
+                    Endereço
+                  </button>
+                  <button
+                    type="button"
+                    class="mode-button"
+                    class:active={searchMode === 'coordinates'}
+                    on:click={() => (searchMode = 'coordinates')}
+                  >
+                    Coordenadas
+                  </button>
+                </div>
 
-          <section class="panel map-panel" aria-label="Mapa e CTOs">
+                {#if searchMode === 'address'}
+                  <label class="form-group" for="censup-address">
+                    <span>Endereço (Rua e Número)</span>
+                    <input
+                      id="censup-address"
+                      type="text"
+                      bind:value={addressInput}
+                      placeholder="Ex: Rua Exemplo, 123, São Paulo"
+                      disabled={analyzing}
+                    />
+                  </label>
+                {:else}
+                  <label class="form-group" for="censup-coords">
+                    <span>Coordenadas (Latitude, Longitude)</span>
+                    <input
+                      id="censup-coords"
+                      type="text"
+                      bind:value={coordinatesInput}
+                      placeholder="Ex: -23.55, -46.63"
+                      disabled={analyzing}
+                    />
+                  </label>
+                {/if}
+
+                <button
+                  type="button"
+                  class="search-button"
+                  on:click={() => executarAnalise({ force: true })}
+                  disabled={analyzing || loadingDetail}
+                >
+                  {analyzing ? 'Localizando…' : 'Localizar no Mapa'}
+                </button>
+
+                {#if selectedChamado.viabilidadeResumo?.dentroCobertura === true}
+                  <div class="coverage-info-box success">
+                    <strong>✅ Dentro da Área de Cobertura</strong>
+                  </div>
+                {:else if selectedChamado.viabilidadeResumo?.dentroCobertura === false}
+                  <div class="coverage-info-box warning">
+                    <strong>⚠️ Fora da Área de Cobertura</strong>
+                    <p>
+                      Distância:
+                      {formatDistanciaCobertura(selectedChamado.viabilidadeResumo?.distanciaCoberturaMetros)}
+                    </p>
+                  </div>
+                {/if}
+
+                {#if analyzeError}
+                  <p class="load-error" role="alert">{analyzeError}</p>
+                {/if}
+              </div>
+            {/if}
+          </aside>
+
+          <main class="detail-main">
             <PortalCensupViabilidadeMap
               lat={selectedChamado.localizacao?.lat ?? selectedChamado.mapaCoords?.lat}
               lng={selectedChamado.localizacao?.lng ?? selectedChamado.mapaCoords?.lng}
               dentroCobertura={selectedChamado.viabilidadeResumo?.dentroCobertura}
             />
-          </section>
+
+            <section class="result-box tabulacao-box" aria-label="Tabulação">
+              <div class="box-header">
+                <h3>Tabulação</h3>
+              </div>
+
+              <div class="tabulacao-body">
+                <div class="info-grid">
+                  <div class="info-item">
+                    <span class="label">Pedido</span>
+                    <span class="value">{selectedChamado.pedido}</span>
+                  </div>
+                  <div class="info-item">
+                    <span class="label">Cidade</span>
+                    <span class="value">{selectedChamado.endereco?.cidade || selectedChamado.cidade}</span>
+                  </div>
+                  <div class="info-item full">
+                    <span class="label">Endereço</span>
+                    <span class="value">{selectedChamado.endereco?.completo || '—'}</span>
+                  </div>
+                  {#if selectedChamado.endereco?.bairro || selectedChamado.endereco?.cep}
+                    <div class="info-item">
+                      <span class="label">Bairro</span>
+                      <span class="value">{selectedChamado.endereco?.bairro || '—'}</span>
+                    </div>
+                    <div class="info-item">
+                      <span class="label">CEP</span>
+                      <span class="value">{selectedChamado.endereco?.cep || '—'}</span>
+                    </div>
+                  {/if}
+                  {#if selectedChamado.mapaReferencias?.length}
+                    <div class="info-item full">
+                      <span class="label">Referências no mapa</span>
+                      <span class="value">{selectedChamado.mapaReferencias.join(' · ')}</span>
+                    </div>
+                  {/if}
+                  <div class="info-item">
+                    <span class="label">Local resolvido por</span>
+                    <span class="value">{metodoLocalizacaoLabel(selectedChamado.localizacao)}</span>
+                  </div>
+                  <div class="info-item">
+                    <span class="label">Cobertura</span>
+                    <span class="value">
+                      {#if selectedChamado.viabilidadeResumo?.dentroCobertura === true}
+                        Dentro da área
+                      {:else if selectedChamado.viabilidadeResumo?.dentroCobertura === false}
+                        Fora da área ({formatDistanciaCobertura(selectedChamado.viabilidadeResumo?.distanciaCoberturaMetros)})
+                      {:else}
+                        —
+                      {/if}
+                    </span>
+                  </div>
+                  {#if selectedChamado.localizacao?.lat != null}
+                    <div class="info-item full">
+                      <span class="label">Coordenadas</span>
+                      <span class="value mono">
+                        {selectedChamado.localizacao.lat}, {selectedChamado.localizacao.lng}
+                      </span>
+                    </div>
+                  {/if}
+                  <div class="info-item">
+                    <span class="label">Tabulação sugerida</span>
+                    <span class="value highlight">{selectedChamado.tabulacaoFinal || '—'}</span>
+                  </div>
+                  <div class="info-item">
+                    <span class="label">Status</span>
+                    <span class="value status-badge status-badge--{selectedChamado.tabulacaoStatus || 'pendente'}">
+                      {statusLabel(selectedChamado.tabulacaoStatus)}
+                    </span>
+                  </div>
+                </div>
+
+                {#if selectedChamado.analiseIa?.motivoSugestao}
+                  <div class="ia-box">
+                    <strong>Análise automática</strong>
+                    <p>{selectedChamado.analiseIa.motivoSugestao}</p>
+                  </div>
+                {/if}
+
+                <div class="feedback-actions">
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    on:click={() => executarAnalise({ force: true })}
+                    disabled={analyzing || loadingDetail}
+                  >
+                    {analyzing ? 'Analisando…' : 'Analisar localização'}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-success"
+                    on:click={confirmarTabulacaoCorreta}
+                    disabled={submittingFeedback || analyzing || selectedChamado.tabulacaoStatus === 'aprovada'}
+                  >
+                    Tabulação correta
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-warning"
+                    on:click={iniciarCorrecao}
+                    disabled={submittingFeedback || analyzing}
+                  >
+                    Tabulação errada
+                  </button>
+                </div>
+
+                {#if showCorrectionForm}
+                  <div class="correction-form">
+                    <label for="tabulacao-corrigida">Tabulação correta</label>
+                    <select id="tabulacao-corrigida" bind:value={tabulacaoCorrigida} disabled={submittingFeedback}>
+                      <option value="">Selecione…</option>
+                      {#each tabulacoesList as tabulacao}
+                        <option value={tabulacao}>{tabulacao}</option>
+                      {/each}
+                    </select>
+                    <button type="button" class="btn-primary" on:click={enviarCorrecao} disabled={submittingFeedback}>
+                      Salvar correção
+                    </button>
+                  </div>
+                {/if}
+
+                {#if feedbackMessage}
+                  <p class="feedback-message" role="status">{feedbackMessage}</p>
+                {/if}
+              </div>
+            </section>
+          </main>
         </div>
       {/if}
     </div>
@@ -544,14 +659,23 @@
     box-sizing: border-box;
   }
 
-  .queue-view,
-  .detail-view {
+  .queue-view {
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 0;
     padding: 1.25rem 1.5rem;
     gap: 1rem;
+  }
+
+  .detail-view {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 0.85rem 1rem 1rem;
+    gap: 0.75rem;
+    overflow: hidden;
   }
 
   .queue-header {
@@ -834,29 +958,202 @@
     color: #7b68ee;
   }
 
-  .detail-grid {
+  .detail-layout {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(320px, 420px) 1fr;
-    gap: 1rem;
+    display: flex;
+    gap: 0.85rem;
+    overflow: hidden;
   }
 
-  .panel {
+  .search-panel {
+    width: 320px;
+    flex: 0 0 320px;
     background: white;
-    border: 1px solid #e5e7eb;
-    border-radius: 10px;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .search-panel.minimized {
+    width: 60px;
+    flex-basis: 60px;
+  }
+
+  .panel-header {
+    padding: 1rem 1.1rem 0.75rem;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+  }
+
+  .panel-header-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .panel-header h2 {
+    margin: 0;
+    font-size: 1.15rem;
+    color: #7b68ee;
+  }
+
+  .panel-header p {
+    margin: 0.35rem 0 0;
+    font-size: 0.82rem;
+    color: #6b7280;
+  }
+
+  .minimize-button {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0.2rem 0.35rem;
+    border-radius: 6px;
+    line-height: 1;
+  }
+
+  .minimize-button:hover {
+    background: rgba(123, 104, 238, 0.12);
+  }
+
+  .search-section {
     padding: 1rem 1.1rem;
     display: flex;
     flex-direction: column;
-    min-height: 0;
-    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+    gap: 0.85rem;
+    overflow: auto;
   }
 
-  .panel h3 {
-    margin: 0 0 1rem;
-    font-size: 1rem;
-    color: #7b68ee;
+  .search-mode-selector {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+  }
+
+  .mode-button {
+    border: 1px solid #d1d5db;
+    background: white;
+    border-radius: 8px;
+    padding: 0.55rem 0.4rem;
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: #4b5563;
+    cursor: pointer;
+  }
+
+  .mode-button.active {
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    color: white;
+    border-color: transparent;
+  }
+
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: #374151;
+    font-weight: 600;
+  }
+
+  .form-group input {
+    padding: 0.55rem 0.7rem;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 400;
+  }
+
+  .search-button {
+    border: none;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 0.92rem;
+    color: white;
+    cursor: pointer;
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    box-shadow: 0 4px 12px rgba(123, 104, 238, 0.3);
+  }
+
+  .search-button:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .coverage-info-box {
+    border-radius: 8px;
+    padding: 0.75rem 0.85rem;
+    font-size: 0.85rem;
+  }
+
+  .coverage-info-box strong {
+    display: block;
+  }
+
+  .coverage-info-box p {
+    margin: 0.35rem 0 0;
+  }
+
+  .coverage-info-box.success {
+    background: #ecfdf5;
+    color: #065f46;
+    border: 1px solid #a7f3d0;
+  }
+
+  .coverage-info-box.warning {
+    background: #fff7ed;
+    color: #9a3412;
+    border: 1px solid #fed7aa;
+  }
+
+  .detail-main {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    overflow: auto;
+  }
+
+  .result-box.tabulacao-box {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    flex: 0 0 auto;
+  }
+
+  .tabulacao-box .box-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+  }
+
+  .tabulacao-box .box-header h3 {
+    margin: 0;
+    color: #4c1d95;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+
+  .tabulacao-body {
+    padding: 1rem 1.25rem 1.25rem;
   }
 
   .info-grid {
@@ -975,20 +1272,6 @@
     color: #059669;
   }
 
-  .map-panel {
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding: 0;
-    overflow: hidden;
-  }
-
-  .map-panel :global(.viab-map-panel) {
-    border: none;
-    border-radius: 10px;
-    flex: 1;
-  }
-
   .detail-loading {
     flex: 1;
     display: flex;
@@ -1006,8 +1289,15 @@
   }
 
   @media (max-width: 960px) {
-    .detail-grid {
-      grid-template-columns: 1fr;
+    .detail-layout {
+      flex-direction: column;
+      overflow: auto;
+    }
+
+    .search-panel,
+    .search-panel.minimized {
+      width: 100%;
+      flex-basis: auto;
     }
   }
 
@@ -1017,11 +1307,53 @@
   }
 
   .theme-dark .table-wrap,
-  .theme-dark .panel,
+  .theme-dark .search-panel,
+  .theme-dark .tabulacao-box,
   .theme-dark .extension-panel {
     background: #1a1f33;
     border-color: #2d3550;
     box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  }
+
+  .theme-dark .panel-header,
+  .theme-dark .tabulacao-box .box-header {
+    background: #232a42;
+    border-bottom-color: #2d3550;
+  }
+
+  .theme-dark .panel-header h2,
+  .theme-dark .tabulacao-box .box-header h3 {
+    color: #c4b5fd;
+  }
+
+  .theme-dark .panel-header p,
+  .theme-dark .form-group {
+    color: #9ca3af;
+  }
+
+  .theme-dark .form-group input,
+  .theme-dark .mode-button {
+    background: #232a42;
+    color: #e5e7eb;
+    border-color: #3b4566;
+  }
+
+  .theme-dark .mode-button.active {
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    color: white;
+    border-color: transparent;
+  }
+
+  .theme-dark .coverage-info-box.success {
+    background: #064e3b;
+    color: #6ee7b7;
+    border-color: #065f46;
+  }
+
+  .theme-dark .coverage-info-box.warning {
+    background: #422006;
+    color: #fdba74;
+    border-color: #9a3412;
   }
 
   .theme-dark .chamados-table tbody tr:hover {
