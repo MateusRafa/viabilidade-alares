@@ -760,7 +760,7 @@
   .chamados-table th,
   .chamados-table td {
     padding: 0.75rem 0.85rem;
-    text-align: left;
+    text-align: center;
     border-bottom: 1px solid #eef2f7;
     vertical-align: middle;
   }
