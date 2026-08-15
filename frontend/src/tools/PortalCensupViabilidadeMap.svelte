@@ -29,16 +29,22 @@
   let markers = [];
   let polylines = [];
   let clientMarker = null;
-  $: isDark = $theme === 'dark';
   let coverageCircle = null;
   let lastSearchKey = '';
+  let isMapMinimized = false;
+  let isListMinimized = false;
 
+  $: isDark = $theme === 'dark';
   $: coordsReady = lat != null && lng != null && !Number.isNaN(Number(lat)) && !Number.isNaN(Number(lng));
   $: ctosRua = ctos.filter((c) => !c.is_condominio);
   $: totalPortas = ctosRua.reduce(
     (sum, cto) => sum + Math.max(0, Number(cto.vagas_total || 0) - Number(cto.clientes_conectados || 0)),
     0
   );
+  $: equipmentTitle =
+    ctosRua.length === 0
+      ? 'Tabela de Equipamentos Encontrados - Nenhum Equipamento Pesquisado'
+      : `Tabela de Equipamentos Encontrados - ${ctosRua.length} Equipamento${ctosRua.length === 1 ? '' : 's'} Encontrado${ctosRua.length === 1 ? '' : 's'}`;
 
   function clearOverlays() {
     markers.forEach((m) => m.setMap(null));
@@ -98,166 +104,152 @@
 
   function markerColorForCto(cto) {
     const livres = Number(cto.vagas_total || 0) - Number(cto.clientes_conectados || 0);
-    if (cto.is_out_of_limit) return '#F44336';
-    return livres > 0 ? '#F97316' : '#EF4444';
+    if (cto.is_out_of_limit) return '#f97316';
+    if (livres <= 0) return '#ef4444';
+    return '#2563eb';
   }
 
-  function drawClientAndCtos() {
-    if (!map || !window.google?.maps) return;
-    clearOverlays();
+  async function fetchNearbyCtos() {
+    const response = await fetch(
+      getApiUrl(`/api/ctos/nearby?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}&radius=250`)
+    );
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || data.message || 'Falha ao buscar CTOs próximas');
+    }
+    return response.json();
+  }
 
+  function drawClientAndCoverage() {
+    if (!map || !window.google?.maps) return;
     const center = { lat: Number(lat), lng: Number(lng) };
+
+    if (clientMarker) clientMarker.setMap(null);
     clientMarker = new google.maps.Marker({
       map,
       position: center,
-      title: 'Localização do Cliente',
-      zIndex: 999,
+      title: 'Cliente',
       icon: {
         url: HOUSE_ICON,
         scaledSize: new google.maps.Size(36, 36),
         anchor: new google.maps.Point(18, 18)
-      }
+      },
+      zIndex: 999
     });
 
-    coverageCircle = new google.maps.Circle({
-      map,
-      center,
-      radius: 250,
-      strokeColor: '#7B68EE',
-      strokeOpacity: 0.7,
-      strokeWeight: 2,
-      fillColor: '#7B68EE',
-      fillOpacity: 0.08,
-      clickable: false
-    });
+    if (coverageCircle) coverageCircle.setMap(null);
+    if (dentroCobertura != null) {
+      coverageCircle = new google.maps.Circle({
+        map,
+        center,
+        radius: 250,
+        strokeColor: dentroCobertura ? '#16a34a' : '#dc2626',
+        strokeOpacity: 0.85,
+        strokeWeight: 2,
+        fillColor: dentroCobertura ? '#22c55e' : '#ef4444',
+        fillOpacity: 0.08,
+        clickable: false
+      });
+    }
+  }
 
+  function drawCtoMarkers(list) {
+    if (!map || !window.google?.maps) return;
     const bounds = new google.maps.LatLngBounds();
-    bounds.extend(center);
+    bounds.extend({ lat: Number(lat), lng: Number(lng) });
 
-    ctosRua.forEach((cto, index) => {
-      const pos = {
-        lat: Number(cto.latitude),
-        lng: Number(cto.longitude)
-      };
-      if (Number.isNaN(pos.lat) || Number.isNaN(pos.lng)) return;
+    list.forEach((cto, index) => {
+      const cLat = Number(cto.latitude ?? cto.lat);
+      const cLng = Number(cto.longitude ?? cto.lng);
+      if (Number.isNaN(cLat) || Number.isNaN(cLng)) return;
 
       const color = markerColorForCto(cto);
-      const n = index + 1;
       const marker = new google.maps.Marker({
         map,
-        position: pos,
-        title: cto.nome || `CTO ${n}`,
+        position: { lat: cLat, lng: cLng },
         label: {
-          text: String(n),
+          text: String(index + 1),
           color: '#fff',
-          fontWeight: '700',
-          fontSize: '12px'
+          fontSize: '11px',
+          fontWeight: '700'
         },
         icon: {
           path: google.maps.SymbolPath.CIRCLE,
-          scale: 14,
+          scale: 12,
           fillColor: color,
           fillOpacity: 1,
           strokeColor: '#fff',
           strokeWeight: 2
         },
-        zIndex: 100 + n
+        title: cto.nome || cto.id_cto || `CTO ${index + 1}`
       });
       markers.push(marker);
-      bounds.extend(pos);
+      bounds.extend({ lat: cLat, lng: cLng });
 
+      const path = [
+        { lat: Number(lat), lng: Number(lng) },
+        { lat: cLat, lng: cLng }
+      ];
       const line = new google.maps.Polyline({
         map,
-        path: [center, pos],
+        path,
         strokeColor: color,
-        strokeOpacity: 0.9,
-        strokeWeight: 3,
-        geodesic: true
+        strokeOpacity: 0.65,
+        strokeWeight: 2
       });
       polylines.push(line);
     });
 
-    if (ctosRua.length > 0) {
+    if (list.length > 0) {
       map.fitBounds(bounds, 48);
-    } else {
-      map.setCenter(center);
-      map.setZoom(17);
     }
   }
 
-  async function fetchCtosInRadius(radius) {
-    const response = await fetch(
-      getApiUrl(`/api/ctos/nearby?lat=${Number(lat)}&lng=${Number(lng)}&radius=${radius}`)
-    );
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.success) {
-      throw new Error(data.error || `Erro ao buscar CTOs (${response.status})`);
-    }
-    return (data.ctos || [])
-      .filter((cto) => !cto.is_condominio)
-      .map((cto) => ({
-        ...cto,
-        distancia_metros: Number(cto.distancia_metros || 0),
-        distancia_km: Math.round((Number(cto.distancia_metros || 0) / 1000) * 1000) / 1000,
-        distancia_real: Number(cto.distancia_metros || 0),
-        is_out_of_limit: Number(cto.distancia_metros || 0) > 250
-      }))
-      .sort((a, b) => a.distancia_metros - b.distancia_metros);
-  }
-
-  async function searchLikeViabilidade() {
+  async function searchNearby() {
     if (!coordsReady) {
-      error = 'Sem coordenadas para pesquisar no mapa.';
+      clearOverlays();
       ctos = [];
+      error = '';
+      lastSearchKey = '';
+      if (typeof onCtosLoaded === 'function') onCtosLoaded([]);
+      return;
+    }
+
+    const key = `${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
+    if (key === lastSearchKey && ctos.length > 0) {
+      await tick();
+      initMap();
+      clearOverlays();
+      drawClientAndCoverage();
+      drawCtoMarkers(ctos.filter((c) => !c.is_condominio));
       return;
     }
 
     loading = true;
     error = '';
-    ctos = [];
+    lastSearchKey = key;
 
     try {
       await loadGoogleMaps();
       await tick();
-      if (!mapEl) await tick();
       initMap();
+      clearOverlays();
+      drawClientAndCoverage();
 
-      let found = [];
-      if (dentroCobertura !== false) {
-        found = (await fetchCtosInRadius(250)).filter((c) => c.distancia_metros <= 250);
-      }
-
-      if (found.length === 0) {
-        const raios = [500, 700, 900, 1200];
-        let nearest = null;
-        for (const raio of raios) {
-          const batch = await fetchCtosInRadius(raio);
-          if (batch.length) {
-            nearest = { ...batch[0], is_out_of_limit: batch[0].distancia_metros > 250 };
-            break;
-          }
-        }
-        found = nearest ? [nearest] : [];
-      }
-
-      ctos = found;
-      drawClientAndCtos();
+      const data = await fetchNearbyCtos();
+      ctos = Array.isArray(data?.ctos) ? data.ctos : Array.isArray(data) ? data : [];
+      drawCtoMarkers(ctos.filter((c) => !c.is_condominio));
       if (typeof onCtosLoaded === 'function') onCtosLoaded(ctos);
     } catch (err) {
-      error = err?.message || 'Falha ao carregar mapa/CTOs';
+      error = err?.message || 'Não foi possível carregar o mapa/CTOs.';
       ctos = [];
+      if (typeof onCtosLoaded === 'function') onCtosLoaded([]);
     } finally {
       loading = false;
     }
   }
 
-  $: if (coordsReady) {
-    const key = `${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}|${dentroCobertura}`;
-    if (key !== lastSearchKey) {
-      lastSearchKey = key;
-      searchLikeViabilidade();
-    }
-  }
+  $: lat, lng, dentroCobertura, void searchNearby();
 
   onDestroy(() => {
     clearOverlays();
@@ -269,133 +261,184 @@
     const km = (m / 1000).toFixed(3);
     return `${m}m (${km}km)`;
   }
+
+  function toggleMap() {
+    isMapMinimized = !isMapMinimized;
+    if (!isMapMinimized && map && window.google?.maps) {
+      setTimeout(() => google.maps.event.trigger(map, 'resize'), 100);
+    }
+  }
 </script>
 
-<div class="viab-map-panel" class:theme-dark={isDark}>
-  <div class="map-toolbar">
-    <strong>Mapa</strong>
-    <span class="map-meta">
-      {#if coordsReady}
-        {Number(lat).toFixed(6)}, {Number(lng).toFixed(6)}
+<div class="viab-results" class:theme-dark={isDark}>
+  <section class="result-box map-box" class:minimized={isMapMinimized} aria-label="Mapa">
+    <div class="box-header">
+      <h3>Mapa</h3>
+      <button
+        type="button"
+        class="minimize-button"
+        on:click={toggleMap}
+        aria-label={isMapMinimized ? 'Expandir mapa' : 'Minimizar mapa'}
+        title={isMapMinimized ? 'Expandir' : 'Minimizar'}
+      >
+        {isMapMinimized ? '⬇️' : '⬆️'}
+      </button>
+    </div>
+
+    {#if !isMapMinimized}
+      {#if !coordsReady}
+        <div class="map-empty">
+          Sem coordenadas neste chamado. Use <strong>Localizar no Mapa</strong> ou <strong>Analisar localização</strong>.
+        </div>
       {:else}
-        Sem coordenadas
-      {/if}
-    </span>
-  </div>
-
-  {#if !coordsReady}
-    <div class="map-empty">
-      Sem coordenadas neste chamado. Clique em <strong>Analisar localização</strong> primeiro.
-    </div>
-  {:else}
-    <div class="map-canvas-wrap">
-      <div class="map-canvas" bind:this={mapEl}></div>
-      {#if loading}
-        <div class="map-overlay">Pesquisando CTOs próximas…</div>
-      {/if}
-    </div>
-
-    {#if error}
-      <p class="map-error" role="alert">{error}</p>
-    {/if}
-
-    <div class="cto-toolbar">
-      <strong>
-        Tabela de Equipamentos Encontrados —
-        {ctosRua.length}
-        {ctosRua.length === 1 ? 'Equipamento Encontrado' : 'Equipamentos Encontrados'}
-      </strong>
-      <span class="ports-meta">
-        {totalPortas}
-        {totalPortas === 1 ? 'porta disponível' : 'portas disponíveis'}
-      </span>
-    </div>
-
-    <div class="cto-table-wrap">
-      <table class="cto-table">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Cidade</th>
-            <th>POP</th>
-            <th>Nome</th>
-            <th>ID</th>
-            <th>Total de Portas</th>
-            <th>Portas Conectadas</th>
-            <th>Portas Disponíveis</th>
-            <th>Distância</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#if loading && ctosRua.length === 0}
-            <tr>
-              <td colspan="9" class="empty">Carregando equipamentos…</td>
-            </tr>
-          {:else if ctosRua.length === 0}
-            <tr>
-              <td colspan="9" class="empty">Nenhum equipamento CTO encontrado próximo a este local.</td>
-            </tr>
-          {:else}
-            {#each ctosRua as cto, index}
-              {@const livres = Math.max(0, Number(cto.vagas_total || 0) - Number(cto.clientes_conectados || 0))}
-              <tr class:sem-porta={livres === 0} class:fora-limite={cto.is_out_of_limit}>
-                <td>{index + 1}</td>
-                <td>{cto.cidade || '—'}</td>
-                <td>{cto.pop || '—'}</td>
-                <td>{cto.nome || '—'}</td>
-                <td>{cto.id || cto.id_cto || '—'}</td>
-                <td>{cto.vagas_total ?? 0}</td>
-                <td>{cto.clientes_conectados ?? 0}</td>
-                <td>{livres}</td>
-                <td>{formatDist(cto)}</td>
-              </tr>
-            {/each}
+        <div class="map-canvas-wrap">
+          <div class="map-canvas" bind:this={mapEl}></div>
+          {#if loading}
+            <div class="map-overlay">Pesquisando CTOs próximas…</div>
           {/if}
-        </tbody>
-      </table>
+        </div>
+        {#if error}
+          <p class="map-error" role="alert">{error}</p>
+        {/if}
+      {/if}
+    {/if}
+  </section>
+
+  <section class="result-box table-box" class:minimized={isListMinimized} aria-label="Tabela de equipamentos">
+    <div class="box-header">
+      <h3>{equipmentTitle}</h3>
+      <button
+        type="button"
+        class="minimize-button"
+        on:click={() => (isListMinimized = !isListMinimized)}
+        aria-label={isListMinimized ? 'Expandir tabela' : 'Minimizar tabela'}
+        title={isListMinimized ? 'Expandir' : 'Minimizar'}
+      >
+        {isListMinimized ? '⬇️' : '⬆️'}
+      </button>
     </div>
-  {/if}
+
+    {#if !isListMinimized}
+      <div class="cto-table-wrap">
+        {#if !coordsReady}
+          <p class="empty-hint">Nenhum equipamento pesquisado ainda.</p>
+        {:else}
+          <table class="cto-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Cidade</th>
+                <th>POP</th>
+                <th>Nome</th>
+                <th>ID</th>
+                <th>Total de Portas</th>
+                <th>Portas Conectadas</th>
+                <th>Portas Disponíveis</th>
+                <th>Distância</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#if loading && ctosRua.length === 0}
+                <tr>
+                  <td colspan="9" class="empty">Carregando equipamentos…</td>
+                </tr>
+              {:else if ctosRua.length === 0}
+                <tr>
+                  <td colspan="9" class="empty">Nenhum equipamento CTO encontrado próximo a este local.</td>
+                </tr>
+              {:else}
+                {#each ctosRua as cto, index}
+                  {@const livres = Math.max(0, Number(cto.vagas_total || 0) - Number(cto.clientes_conectados || 0))}
+                  <tr class:sem-porta={livres === 0} class:fora-limite={cto.is_out_of_limit}>
+                    <td>{index + 1}</td>
+                    <td>{cto.cidade || '—'}</td>
+                    <td>{cto.pop || '—'}</td>
+                    <td>{cto.nome || '—'}</td>
+                    <td>{cto.id || cto.id_cto || '—'}</td>
+                    <td>{cto.vagas_total ?? 0}</td>
+                    <td>{cto.clientes_conectados ?? 0}</td>
+                    <td>{livres}</td>
+                    <td>{formatDist(cto)}</td>
+                  </tr>
+                {/each}
+              {/if}
+            </tbody>
+          </table>
+        {/if}
+      </div>
+      {#if coordsReady && ctosRua.length > 0}
+        <div class="ports-footer">
+          {totalPortas}
+          {totalPortas === 1 ? 'porta disponível' : 'portas disponíveis'}
+        </div>
+      {/if}
+    {/if}
+  </section>
 </div>
 
 <style>
-  .viab-map-panel {
+  .viab-results {
     display: flex;
     flex-direction: column;
-    gap: 0;
-    min-height: 0;
-    flex: 1;
-    background: #fff;
-    border: 1px solid #e5e7eb;
-    border-radius: 10px;
-    overflow: hidden;
-  }
-
-  .map-toolbar,
-  .cto-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: 0.75rem;
-    padding: 0.65rem 0.85rem;
-    background: linear-gradient(135deg, #7B68EE 0%, #6B5BEE 100%);
-    color: #fff;
+    min-height: 0;
+    flex: 0 0 auto;
   }
 
-  .map-toolbar strong,
-  .cto-toolbar strong {
-    font-size: 0.92rem;
+  .result-box {
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
   }
 
-  .map-meta,
-  .ports-meta {
-    font-size: 0.8rem;
-    opacity: 0.95;
+  .result-box.minimized {
+    flex: 0 0 auto;
+  }
+
+  .box-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+  }
+
+  .result-box.minimized .box-header {
+    border-bottom: none;
+  }
+
+  .box-header h3 {
+    margin: 0;
+    color: #4c1d95;
+    font-size: 1.1rem;
+    font-weight: 600;
+    line-height: 1.3;
+  }
+
+  .minimize-button {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0.2rem 0.35rem;
+    border-radius: 6px;
+    line-height: 1;
+  }
+
+  .minimize-button:hover {
+    background: rgba(123, 104, 238, 0.12);
   }
 
   .map-canvas-wrap {
     position: relative;
-    height: min(46vh, 420px);
-    min-height: 280px;
+    height: min(42vh, 380px);
+    min-height: 260px;
     background: #e5e7eb;
   }
 
@@ -406,8 +449,6 @@
 
   .map-overlay,
   .map-empty {
-    position: absolute;
-    inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -415,12 +456,17 @@
     color: #374151;
     font-size: 0.92rem;
     text-align: center;
-    padding: 1rem;
+    padding: 1.5rem 1rem;
+    min-height: 220px;
+  }
+
+  .map-overlay {
+    position: absolute;
+    inset: 0;
+    min-height: 0;
   }
 
   .map-empty {
-    position: relative;
-    min-height: 220px;
     background: #faf5ff;
     color: #6b7280;
   }
@@ -435,9 +481,18 @@
 
   .cto-table-wrap {
     flex: 1;
-    min-height: 160px;
+    min-height: 140px;
     max-height: 280px;
     overflow: auto;
+    padding: 0 0.25rem 0.25rem;
+  }
+
+  .empty-hint {
+    margin: 0;
+    padding: 1.5rem 1rem;
+    text-align: center;
+    color: #6b7280;
+    font-size: 0.9rem;
   }
 
   .cto-table {
@@ -479,9 +534,26 @@
     white-space: normal;
   }
 
-  .viab-map-panel.theme-dark {
+  .ports-footer {
+    padding: 0.55rem 1rem;
+    border-top: 1px solid #e5e7eb;
+    font-size: 0.82rem;
+    color: #6b7280;
+    background: #fafafa;
+  }
+
+  .viab-results.theme-dark .result-box {
     background: #1a1f33;
-    border-color: #2d3550;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  }
+
+  .theme-dark .box-header {
+    background: #232a42;
+    border-bottom-color: #2d3550;
+  }
+
+  .theme-dark .box-header h3 {
+    color: #c4b5fd;
   }
 
   .theme-dark .map-canvas-wrap {
@@ -523,7 +595,14 @@
     color: #f87171;
   }
 
-  .theme-dark .cto-table .empty {
+  .theme-dark .cto-table .empty,
+  .theme-dark .empty-hint,
+  .theme-dark .ports-footer {
     color: #9ca3af;
+  }
+
+  .theme-dark .ports-footer {
+    background: #151a2b;
+    border-top-color: #2d3550;
   }
 </style>
