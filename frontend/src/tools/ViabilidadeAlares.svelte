@@ -6,6 +6,7 @@
   import Config from '../Config.svelte';
   import Loading from '../Loading.svelte';
   import { getApiUrl } from '../config.js';
+  import { theme } from '../themeStore.js';
 
   // Props do componente
   export let currentUser = '';
@@ -22,6 +23,8 @@
   export let initialLng = null;
   /** id do elemento do mapa — único quando embutido para não conflitar com outras tools. */
   export let mapDomId = 'map';
+
+  $: isDarkTheme = embedded && $theme === 'dark';
 
   function getMapElement() {
     return typeof document !== 'undefined' ? document.getElementById(mapDomId) : null;
@@ -7106,12 +7109,12 @@
 
 <!-- Tela de Loading -->
 {#if isLoading}
-  <div class="loading-fullscreen" class:embedded>
+  <div class="loading-fullscreen" class:embedded class:theme-dark={isDarkTheme}>
     <Loading currentMessage={loadingMessage} />
   </div>
 {:else}
 <!-- Conteúdo da Ferramenta de Viabilidade -->
-<div class="viabilidade-content" class:embedded>
+<div class="viabilidade-content" class:embedded class:theme-dark={isDarkTheme}>
   <div class="main-layout">
     <!-- Painel de Busca -->
     <aside class="search-panel" class:minimized={isSearchPanelMinimized} style="width: {isSearchPanelMinimized ? '60px' : sidebarWidthStyle} !important; flex: 0 0 auto;">
@@ -8431,6 +8434,107 @@
 
   .tabulacao-slot-body {
     padding-top: 0.75rem;
+  }
+
+  /* Tema escuro (Portal CENSUP embutido) */
+  .viabilidade-content.theme-dark {
+    background: #0f1220;
+    color: #e5e7eb;
+  }
+
+  .loading-fullscreen.theme-dark {
+    background: #0f1220;
+  }
+
+  .theme-dark .search-panel,
+  .theme-dark .map-container,
+  .theme-dark .results-table-container,
+  .theme-dark .empty-state,
+  .theme-dark .tabulacao-container {
+    background: #1a1f33 !important;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+  }
+
+  .theme-dark .panel-header h2,
+  .theme-dark .map-header h3,
+  .theme-dark .table-header h3,
+  .theme-dark .results-header h3 {
+    color: #c4b5fd !important;
+  }
+
+  .theme-dark .panel-header p,
+  .theme-dark .empty-state p,
+  .theme-dark .form-group label,
+  .theme-dark .info-label {
+    color: #9ca3af !important;
+  }
+
+  .theme-dark .map-header,
+  .theme-dark .table-header,
+  .theme-dark .map-container.minimized .map-header,
+  .theme-dark .results-table-container.minimized .table-header,
+  .theme-dark .empty-state.minimized .table-header {
+    background: #232a42 !important;
+    border-bottom-color: #2d3550 !important;
+  }
+
+  .theme-dark .form-group input,
+  .theme-dark .form-group textarea,
+  .theme-dark .form-group select,
+  .theme-dark .mode-button {
+    background: #232a42 !important;
+    color: #e5e7eb !important;
+    border-color: #3b4566 !important;
+  }
+
+  .theme-dark .mode-button.active {
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%) !important;
+    color: #fff !important;
+    border-color: transparent !important;
+  }
+
+  .theme-dark .results-table th,
+  .theme-dark .results-table td {
+    color: #e5e7eb !important;
+    border-bottom-color: #2d3550 !important;
+  }
+
+  .theme-dark .results-table thead th,
+  .theme-dark .results-table th {
+    background: #232a42 !important;
+    color: #e5e7eb !important;
+  }
+
+  .theme-dark .results-table tbody tr:nth-child(even) {
+    background: #151a2b !important;
+  }
+
+  .theme-dark .results-table tbody tr:hover {
+    background: #232a42 !important;
+  }
+
+  .theme-dark .coverage-info-box {
+    background: #232a42;
+    border-color: #3b4566;
+    color: #e5e7eb;
+  }
+
+  .theme-dark .coverage-info-box-success {
+    background: #064e3b !important;
+    color: #6ee7b7 !important;
+    border-color: #065f46 !important;
+  }
+
+  .theme-dark .error-message {
+    background: #3f1515;
+    color: #fca5a5;
+  }
+
+  .theme-dark .stats-box,
+  .theme-dark .info-box {
+    background: #232a42 !important;
+    color: #e5e7eb !important;
+    border-color: #3b4566 !important;
   }
 
   .main-layout {
