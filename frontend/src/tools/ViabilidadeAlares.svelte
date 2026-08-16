@@ -12,6 +12,20 @@
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
   export let onSettingsRequest = null; // Callback para quando configurações são solicitadas
+  /** Quando true, roda embutida (ex.: Portal CENSUP) sem tela cheia própria. */
+  export let embedded = false;
+  /** Endereço inicial para busca automática (modo embutido). */
+  export let initialAddress = '';
+  /** Latitude inicial (modo embutido). */
+  export let initialLat = null;
+  /** Longitude inicial (modo embutido). */
+  export let initialLng = null;
+  /** id do elemento do mapa — único quando embutido para não conflitar com outras tools. */
+  export let mapDomId = 'map';
+
+  function getMapElement() {
+    return typeof document !== 'undefined' ? document.getElementById(mapDomId) : null;
+  }
 
   // Helper para URL da API - usando função do config.js
   // (getApiUrl já foi importado acima)
@@ -1385,6 +1399,7 @@
       // Carregar a ferramenta de Viabilidade
       // Mostrar loading enquanto carrega a ferramenta
       isLoading = true;
+      const bootPause = (ms) => (embedded ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms)));
       
       try {
       // Etapa 1: Carregando Mapa
@@ -1399,7 +1414,7 @@
     await loadGoogleMaps();
     
     // Aguardar mais tempo para o usuário conseguir ler a mensagem
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await bootPause(2500);
     
     // Limpar intervalo anterior
     if (dotsInterval) {
@@ -1420,7 +1435,7 @@
     }
     
     // Aguardar mais tempo para o usuário conseguir ler a mensagem
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await bootPause(2500);
     
     // Limpar intervalo anterior
     if (dotsInterval) {
@@ -1436,7 +1451,7 @@
     await loadTabulacoes();
     
     // Aguardar mais tempo para o usuário conseguir ler a mensagem
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await bootPause(2500);
     
     // Limpar intervalo anterior
     if (dotsInterval) {
@@ -1448,7 +1463,7 @@
     dotsInterval = animateDots('Ajuste Finais', (message) => {
       loadingMessage = message;
     });
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await bootPause(2500);
     
     // Limpar intervalo anterior
     if (dotsInterval) {
@@ -1460,7 +1475,7 @@
     dotsInterval = animateDots('Abrindo Ferramenta Virtual', (message) => {
       loadingMessage = message;
     });
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await bootPause(2500);
     
     // Limpar intervalo antes de ocultar loading
     if (dotsInterval) {
@@ -1483,6 +1498,9 @@
     
     // Iniciar heartbeat em background
     startHeartbeat();
+
+    // Pré-busca quando embutida no Portal CENSUP
+    await applyInitialSearchIfAny();
       } catch (err) {
         console.error('Erro ao inicializar ferramenta:', err);
         error = 'Erro ao inicializar ferramenta: ' + err.message;
@@ -1498,7 +1516,34 @@
         await tick();
         await new Promise(resolve => setTimeout(resolve, 100));
         initMap();
+        await applyInitialSearchIfAny();
       }
+  }
+
+  async function applyInitialSearchIfAny() {
+    const hasCoords =
+      initialLat != null &&
+      initialLng != null &&
+      !Number.isNaN(Number(initialLat)) &&
+      !Number.isNaN(Number(initialLng));
+    const hasAddress = !!(initialAddress || '').trim();
+
+    if (!hasCoords && !hasAddress) return;
+
+    if (hasCoords) {
+      searchMode = 'coordinates';
+      coordinatesInput = `${Number(initialLat)}, ${Number(initialLng)}`;
+    } else {
+      searchMode = 'address';
+      addressInput = (initialAddress || '').trim();
+    }
+
+    await tick();
+    try {
+      await searchClientLocation();
+    } catch (err) {
+      console.warn('Pré-busca inicial falhou:', err);
+    }
   }
 
   // Função para limpar estado da ferramenta
@@ -1691,12 +1736,12 @@
       document.addEventListener('click', handleDocumentClick);
       
       // Registrar função de configurações com o parent
-      if (onSettingsRequest && typeof onSettingsRequest === 'function') {
+      if (!embedded && onSettingsRequest && typeof onSettingsRequest === 'function') {
         onSettingsRequest(openSettings);
       }
       
       // Registrar função de pré-carregamento no hover
-      if (onSettingsHover && typeof onSettingsHover === 'function') {
+      if (!embedded && onSettingsHover && typeof onSettingsHover === 'function') {
         onSettingsHover(preloadSettingsData);
       }
       await initializeTool();
@@ -2024,7 +2069,7 @@
   function initMap() {
     if (!googleMapsLoaded) return;
 
-    const mapElement = document.getElementById('map');
+    const mapElement = getMapElement();
     if (!mapElement) return;
 
     map = new google.maps.Map(mapElement, {
@@ -2219,7 +2264,7 @@
     }
 
     // Verificar se o mapa está realmente visível no DOM
-    const mapElement = document.getElementById('map');
+    const mapElement = getMapElement();
     if (!mapElement) {
       console.error('❌ [ViabilidadeAlares] Elemento do mapa não encontrado no DOM');
       return;
@@ -4214,7 +4259,7 @@
       };
     } else if (event && event.latLng) {
       // Fallback: usar coordenadas do mapa se domEvent não estiver disponível
-      const mapDiv = document.getElementById('map');
+      const mapDiv = getMapElement();
       if (mapDiv) {
         const mapRect = mapDiv.getBoundingClientRect();
         const projection = map.getProjection();
@@ -5838,7 +5883,7 @@
         }, 1000);
       });
 
-      const mapElement = document.getElementById('map');
+      const mapElement = getMapElement();
       if (!mapElement) {
         throw new Error('Elemento do mapa não encontrado');
       }
@@ -5877,7 +5922,7 @@
             clonedDoc.documentElement.style.backgroundColor = '#ffffff';
           }
           
-          const clonedMap = clonedDoc.getElementById('map');
+          const clonedMap = clonedDoc.getElementById(mapDomId);
           if (clonedMap) {
             clonedMap.style.visibility = 'visible';
             clonedMap.style.opacity = '1';
@@ -7061,12 +7106,12 @@
 
 <!-- Tela de Loading -->
 {#if isLoading}
-  <div class="loading-fullscreen">
+  <div class="loading-fullscreen" class:embedded>
     <Loading currentMessage={loadingMessage} />
   </div>
 {:else}
 <!-- Conteúdo da Ferramenta de Viabilidade -->
-<div class="viabilidade-content">
+<div class="viabilidade-content" class:embedded>
   <div class="main-layout">
     <!-- Painel de Busca -->
     <aside class="search-panel" class:minimized={isSearchPanelMinimized} style="width: {isSearchPanelMinimized ? '60px' : sidebarWidthStyle} !important; flex: 0 0 auto;">
@@ -7445,7 +7490,7 @@
               
               // Limpar estilos inline para respeitar o estado reativo
               const mapElement = document.querySelector('.map-container');
-              const mapDiv = document.getElementById('map');
+              const mapDiv = getMapElement();
               
               if (mapElement) {
                 if (isMapMinimized) {
@@ -7498,7 +7543,7 @@
             {isMapMinimized ? '⬇️' : '⬆️'}
           </button>
         </div>
-        <div id="map" class="map" class:hidden={isMapMinimized}></div>
+        <div id={mapDomId} class="map" class:hidden={isMapMinimized}></div>
         
         <!-- Popup de informações da rota -->
         {#if selectedRouteIndex !== null && selectedRouteIndex < routes.length}
@@ -7769,6 +7814,17 @@
           {#if !isListMinimized}
             <p>🔍 Localize um cliente para ver os equipamentos encontrados aqui</p>
           {/if}
+        </div>
+      {/if}
+
+      {#if $$slots.tabulacao}
+        <div class="results-table-container tabulacao-container">
+          <div class="table-header">
+            <h3>Tabulação</h3>
+          </div>
+          <div class="tabulacao-slot-body">
+            <slot name="tabulacao" />
+          </div>
         </div>
       {/if}
     </main>
@@ -8344,6 +8400,37 @@
     flex-direction: column;
     overflow: hidden;
     background: #f5f7fa;
+  }
+
+  .viabilidade-content.embedded {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .viabilidade-content.embedded .main-layout {
+    height: 100%;
+    padding-bottom: 1rem;
+  }
+
+  .viabilidade-content.embedded .main-area {
+    height: 100%;
+    overflow-y: auto;
+  }
+
+  .loading-fullscreen.embedded {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .tabulacao-container {
+    flex: 0 0 auto !important;
+    min-height: auto;
+  }
+
+  .tabulacao-slot-body {
+    padding-top: 0.75rem;
   }
 
   .main-layout {
