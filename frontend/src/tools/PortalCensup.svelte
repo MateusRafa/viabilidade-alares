@@ -3,7 +3,7 @@
   import Loading from '../Loading.svelte';
   import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellSearch, toolShellThemeToggle, toolShellTitle } from '../toolShellStore.js';
   import { theme } from '../themeStore.js';
-  import PortalCensupViabilidadeMap from './PortalCensupViabilidadeMap.svelte';
+  import ViabilidadeAlares from './ViabilidadeAlares.svelte';
   import {
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
@@ -41,26 +41,9 @@
   let feedbackMessage = '';
   let analyzing = false;
   let analyzeError = '';
-  let searchMode = 'address';
-  let addressInput = '';
-  let coordinatesInput = '';
-  let isSearchPanelMinimized = false;
 
   $: showingDetail = !!selectedChamado;
   $: isDark = $theme === 'dark';
-
-  function syncSearchInputsFromChamado(chamado) {
-    if (!chamado) return;
-    addressInput = chamado.endereco?.completo || '';
-    const lat = chamado.localizacao?.lat ?? chamado.mapaCoords?.lat;
-    const lng = chamado.localizacao?.lng ?? chamado.mapaCoords?.lng;
-    coordinatesInput =
-      lat != null && lng != null && !Number.isNaN(Number(lat)) && !Number.isNaN(Number(lng))
-        ? `${lat}, ${lng}`
-        : '';
-    if (addressInput) searchMode = 'address';
-    else if (coordinatesInput) searchMode = 'coordinates';
-  }
 
   function syncHeaderRefresh() {
     toolShellHeaderAction.set({
@@ -150,7 +133,6 @@
 
     try {
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
-      syncSearchInputsFromChamado(selectedChamado);
       syncShellChrome();
       const precisaAnalise =
         !selectedChamado?.tabulacaoFinal ||
@@ -178,7 +160,6 @@
     try {
       const result = await analisarPortalCensupChamado(currentUser, selectedChamado.id, { force });
       selectedChamado = result.chamado;
-      syncSearchInputsFromChamado(selectedChamado);
       syncShellChrome();
       if (!silent && result.skipped) {
         feedbackMessage = result.reason || 'Análise não refeita.';
@@ -333,116 +314,20 @@
       {:else if detailError}
         <p class="load-error" role="alert">{detailError}</p>
       {:else if selectedChamado}
-        <div class="detail-layout">
-          <aside class="search-panel" class:minimized={isSearchPanelMinimized}>
-            <div class="panel-header">
-              <div class="panel-header-content">
-                {#if !isSearchPanelMinimized}
-                  <h2>Viabilidade Alares</h2>
-                {/if}
-                <button
-                  type="button"
-                  class="minimize-button"
-                  on:click={() => (isSearchPanelMinimized = !isSearchPanelMinimized)}
-                  aria-label={isSearchPanelMinimized ? 'Expandir painel' : 'Minimizar painel'}
-                  title={isSearchPanelMinimized ? 'Expandir' : 'Minimizar'}
-                >
-                  {isSearchPanelMinimized ? '➡️' : '⬅️'}
-                </button>
-              </div>
-              {#if !isSearchPanelMinimized}
-                <p>Localize o cliente e encontre CTOs próximas</p>
-              {/if}
-            </div>
-
-            {#if !isSearchPanelMinimized}
-              <div class="search-section">
-                <div class="search-mode-selector">
-                  <button
-                    type="button"
-                    class="mode-button"
-                    class:active={searchMode === 'address'}
-                    on:click={() => (searchMode = 'address')}
-                  >
-                    Endereço
-                  </button>
-                  <button
-                    type="button"
-                    class="mode-button"
-                    class:active={searchMode === 'coordinates'}
-                    on:click={() => (searchMode = 'coordinates')}
-                  >
-                    Coordenadas
-                  </button>
-                </div>
-
-                {#if searchMode === 'address'}
-                  <label class="form-group" for="censup-address">
-                    <span>Endereço (Rua e Número)</span>
-                    <input
-                      id="censup-address"
-                      type="text"
-                      bind:value={addressInput}
-                      placeholder="Ex: Rua Exemplo, 123, São Paulo"
-                      disabled={analyzing}
-                    />
-                  </label>
-                {:else}
-                  <label class="form-group" for="censup-coords">
-                    <span>Coordenadas (Latitude, Longitude)</span>
-                    <input
-                      id="censup-coords"
-                      type="text"
-                      bind:value={coordinatesInput}
-                      placeholder="Ex: -23.55, -46.63"
-                      disabled={analyzing}
-                    />
-                  </label>
-                {/if}
-
-                <button
-                  type="button"
-                  class="search-button"
-                  on:click={() => executarAnalise({ force: true })}
-                  disabled={analyzing || loadingDetail}
-                >
-                  {analyzing ? 'Localizando…' : 'Localizar no Mapa'}
-                </button>
-
-                {#if selectedChamado.viabilidadeResumo?.dentroCobertura === true}
-                  <div class="coverage-info-box success">
-                    <strong>✅ Dentro da Área de Cobertura</strong>
-                  </div>
-                {:else if selectedChamado.viabilidadeResumo?.dentroCobertura === false}
-                  <div class="coverage-info-box warning">
-                    <strong>⚠️ Fora da Área de Cobertura</strong>
-                    <p>
-                      Distância:
-                      {formatDistanciaCobertura(selectedChamado.viabilidadeResumo?.distanciaCoberturaMetros)}
-                    </p>
-                  </div>
-                {/if}
-
-                {#if analyzeError}
-                  <p class="load-error" role="alert">{analyzeError}</p>
-                {/if}
-              </div>
-            {/if}
-          </aside>
-
-          <main class="detail-main">
-            <PortalCensupViabilidadeMap
-              lat={selectedChamado.localizacao?.lat ?? selectedChamado.mapaCoords?.lat}
-              lng={selectedChamado.localizacao?.lng ?? selectedChamado.mapaCoords?.lng}
-              dentroCobertura={selectedChamado.viabilidadeResumo?.dentroCobertura}
-            />
-
-            <section class="result-box tabulacao-box" aria-label="Tabulação">
-              <div class="box-header">
-                <h3>Tabulação</h3>
-              </div>
-
-              <div class="tabulacao-body">
+        {@const viabLat = selectedChamado.localizacao?.lat ?? selectedChamado.mapaCoords?.lat ?? null}
+        {@const viabLng = selectedChamado.localizacao?.lng ?? selectedChamado.mapaCoords?.lng ?? null}
+        <div class="detail-viabilidade">
+          {#key `${selectedChamado.id}:${viabLat ?? ''}:${viabLng ?? ''}`}
+            <ViabilidadeAlares
+              embedded={true}
+              mapDomId="portal-censup-viab-map"
+              currentUser={currentUser}
+              userTipo={userTipo}
+              initialAddress={selectedChamado.endereco?.completo || ''}
+              initialLat={viabLat}
+              initialLng={viabLng}
+            >
+              <div slot="tabulacao" class="censup-tabulacao">
                 <div class="info-grid">
                   <div class="info-item">
                     <span class="label">Pedido</span>
@@ -515,6 +400,10 @@
                   </div>
                 {/if}
 
+                {#if analyzeError}
+                  <p class="load-error" role="alert">{analyzeError}</p>
+                {/if}
+
                 <div class="feedback-actions">
                   <button
                     type="button"
@@ -561,8 +450,8 @@
                   <p class="feedback-message" role="status">{feedbackMessage}</p>
                 {/if}
               </div>
-            </section>
-          </main>
+            </ViabilidadeAlares>
+          {/key}
         </div>
       {/if}
     </div>
@@ -673,9 +562,24 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
-    padding: 0.85rem 1rem 1rem;
-    gap: 0.75rem;
+    padding: 0;
+    gap: 0;
     overflow: hidden;
+    position: relative;
+  }
+
+  .detail-viabilidade {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .censup-tabulacao {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
   }
 
   .queue-header {
