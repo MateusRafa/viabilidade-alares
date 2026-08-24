@@ -2,6 +2,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import crypto from 'crypto';
 import { analisarLocalizacaoChamado } from './analiseLocalizacao.js';
+import { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
+import { dbFindChamado, dbListChamadosNaFila, dbUpsertChamado } from './chamadosDb.js';
 
 const DATA_FILE = path.join(process.cwd(), 'data', 'portal-censup-chamados.json');
 
@@ -69,6 +71,30 @@ async function readStore() {
 async function writeStore(store) {
   await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
   await fs.writeFile(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+}
+
+function isChamadosTableMissing(err) {
+  const message = err?.message || '';
+  return (
+    err?.code === 'PGRST205' ||
+    err?.code === '42P01' ||
+    /does not exist|Could not find the table/i.test(message)
+  );
+}
+
+async function trySupabase(action, fn) {
+  if (!isPortalCensupSupabaseAvailable()) return { used: false, data: null };
+  try {
+    const data = await fn();
+    return { used: true, data };
+  } catch (err) {
+    if (isChamadosTableMissing(err)) {
+      console.warn(`⚠️ [PortalCENSUP] Tabela chamados ainda não existe (${action}). Usando JSON local.`);
+      return { used: false, data: null };
+    }
+    console.error(`❌ [PortalCENSUP] Supabase falhou em ${action}:`, err.message);
+    throw err;
+  }
 }
 
 function formatDataSituacao(iso) {
@@ -533,6 +559,22 @@ function filterChamados(chamados, { q = '' } = {}) {
 }
 
 export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
+  const fromDb = await trySupabase('listar fila', () => dbListChamadosNaFila({ q, page, limit }));
+  if (fromDb.used && fromDb.data) {
+    const { chamados, total, page: safePage, limit: safeLimit } = fromDb.data;
+    return {
+      chamados: chamados.map((item) => ({
+        ...item,
+        dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
+      })),
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.max(1, Math.ceil(total / safeLimit)),
+      source: 'supabase'
+    };
+  }
+
   const store = await readStore();
   const filtered = filterChamados(store.chamados, { q });
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
@@ -548,13 +590,15 @@ export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
     total: filtered.length,
     page: safePage,
     limit: safeLimit,
-    totalPages: Math.max(1, Math.ceil(filtered.length / safeLimit))
+    totalPages: Math.max(1, Math.ceil(filtered.length / safeLimit)),
+    source: 'json'
   };
 }
 
 export async function getChamadoById(id) {
-  const store = await readStore();
-  const chamado = store.chamados.find((item) => item.id === id);
+  const fromDb = await trySupabase('buscar chamado', () => dbFindChamado({ id }));
+  const chamado = fromDb.used ? fromDb.data : (await readStore()).chamados.find((item) => item.id === id);
+
   if (!chamado) {
     const err = new Error('Chamado não encontrado');
     err.statusCode = 404;
@@ -568,10 +612,14 @@ export async function getChamadoById(id) {
   };
 }
 
-export async function findChamadoByPedidoOrCode({ pedido, agendaCode } = {}) {
+export async function findChamadoByPedidoOrCode({ pedido, agendaCode, id } = {}) {
+  const fromDb = await trySupabase('buscar por pedido', () => dbFindChamado({ id, pedido, agendaCode }));
+  if (fromDb.used) return fromDb.data;
+
   const store = await readStore();
   return (
     store.chamados.find((item) => {
+      if (id && item.id === id) return true;
       if (agendaCode && item.agendaCode === agendaCode) return true;
       if (pedido && String(item.pedido) === String(pedido)) return true;
       return false;
@@ -615,32 +663,20 @@ export async function upsertChamadoFromAgenda(payload) {
 }
 
 export async function upsertChamado(payload) {
-  const store = await readStore();
-  const pedidoKey = payload.pedido != null ? String(payload.pedido) : null;
-  let existingIndex = -1;
+  const existing = await findChamadoByPedidoOrCode({
+    id: payload.id,
+    pedido: payload.pedido,
+    agendaCode: payload.agendaCode
+  });
 
-  if (payload.id) {
-    existingIndex = store.chamados.findIndex((item) => item.id === payload.id);
-  }
-  if (existingIndex < 0 && payload.agendaCode) {
-    existingIndex = store.chamados.findIndex((item) => item.agendaCode === payload.agendaCode);
-  }
-  if (existingIndex < 0 && pedidoKey) {
-    existingIndex = store.chamados.findIndex((item) => String(item.pedido) === pedidoKey);
-  }
-
-  const id =
-    payload.id ||
-    (existingIndex >= 0 ? store.chamados[existingIndex].id : null) ||
-    payload.agendaCode ||
-    crypto.randomUUID();
-
+  const id = payload.id || existing?.id || payload.agendaCode || crypto.randomUUID();
   const now = new Date().toISOString();
-  const previous = existingIndex >= 0 ? store.chamados[existingIndex] : {};
+  const previous = existing || {};
   const next = {
     ...previous,
     ...payload,
     id,
+    filaStatus: payload.filaStatus || previous.filaStatus || 'na_fila',
     endereco: {
       ...(previous.endereco || {}),
       ...(payload.endereco || {})
@@ -654,26 +690,25 @@ export async function upsertChamado(payload) {
     createdAt: previous.createdAt || now
   };
 
-  if (existingIndex >= 0) {
-    store.chamados[existingIndex] = next;
-  } else {
-    store.chamados.unshift(next);
-  }
+  const saved = await trySupabase('salvar chamado', () => dbUpsertChamado(next));
+  if (saved.used && saved.data) return saved.data;
 
+  const store = await readStore();
+  const existingIndex = store.chamados.findIndex((item) => item.id === id);
+  if (existingIndex >= 0) store.chamados[existingIndex] = next;
+  else store.chamados.unshift(next);
   await writeStore(store);
   return next;
 }
 
 export async function analisarChamadoById(id, { force = false } = {}) {
-  const store = await readStore();
-  const index = store.chamados.findIndex((item) => item.id === id);
-  if (index < 0) {
+  const chamado = await findChamadoByPedidoOrCode({ id });
+  if (!chamado) {
     const err = new Error('Chamado não encontrado');
     err.statusCode = 404;
     throw err;
   }
 
-  const chamado = store.chamados[index];
   const jaRevisado =
     chamado.tabulacaoStatus === 'aprovada' || chamado.tabulacaoStatus === 'corrigida';
 
@@ -685,35 +720,27 @@ export async function analisarChamadoById(id, { force = false } = {}) {
     };
   }
 
-  store.chamados[index] = {
+  await upsertChamado({
     ...chamado,
     analiseStatus: 'processando',
     updatedAt: new Date().toISOString()
-  };
-  await writeStore(store);
+  });
 
   try {
-    const result = await analisarLocalizacaoChamado(store.chamados[index]);
-    const updated = {
-      ...store.chamados[index],
+    const current = await findChamadoByPedidoOrCode({ id });
+    const result = await analisarLocalizacaoChamado(current);
+    await upsertChamado({
+      ...current,
       analiseStatus: result.analiseStatus,
       localizacao: result.localizacao,
       passosAnalise: result.passos,
       viabilidadeResumo: result.viabilidadeResumo,
-      tabulacaoFinal: result.tabulacaoFinal ?? store.chamados[index].tabulacaoFinal,
-      tabulacaoConfianca: result.tabulacaoConfianca ?? store.chamados[index].tabulacaoConfianca,
-      tabulacaoStatus: result.tabulacaoStatus || store.chamados[index].tabulacaoStatus,
+      tabulacaoFinal: result.tabulacaoFinal ?? current.tabulacaoFinal,
+      tabulacaoConfianca: result.tabulacaoConfianca ?? current.tabulacaoConfianca,
+      tabulacaoStatus: result.tabulacaoStatus || current.tabulacaoStatus,
       analiseIa: result.analiseIa,
       updatedAt: new Date().toISOString()
-    };
-
-    // re-read in case of concurrent writes
-    const fresh = await readStore();
-    const idx = fresh.chamados.findIndex((item) => item.id === id);
-    if (idx >= 0) {
-      fresh.chamados[idx] = { ...fresh.chamados[idx], ...updated };
-      await writeStore(fresh);
-    }
+    });
 
     return {
       chamado: await getChamadoById(id),
@@ -721,20 +748,16 @@ export async function analisarChamadoById(id, { force = false } = {}) {
       result
     };
   } catch (err) {
-    const fresh = await readStore();
-    const idx = fresh.chamados.findIndex((item) => item.id === id);
-    if (idx >= 0) {
-      fresh.chamados[idx] = {
-        ...fresh.chamados[idx],
-        analiseStatus: 'falhou',
-        analiseIa: {
-          modelo: 'cascata-localizacao-v1',
-          motivoSugestao: err.message || 'Falha ao analisar localização'
-        },
-        updatedAt: new Date().toISOString()
-      };
-      await writeStore(fresh);
-    }
+    const current = (await findChamadoByPedidoOrCode({ id })) || chamado;
+    await upsertChamado({
+      ...current,
+      analiseStatus: 'falhou',
+      analiseIa: {
+        modelo: 'cascata-localizacao-v1',
+        motivoSugestao: err.message || 'Falha ao analisar localização'
+      },
+      updatedAt: new Date().toISOString()
+    });
     throw err;
   }
 }
@@ -749,15 +772,13 @@ export function analisarChamadoEmBackground(id) {
 }
 
 export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigida = null }) {
-  const store = await readStore();
-  const index = store.chamados.findIndex((item) => item.id === id);
-  if (index < 0) {
+  const chamado = await findChamadoByPedidoOrCode({ id });
+  if (!chamado) {
     const err = new Error('Chamado não encontrado');
     err.statusCode = 404;
     throw err;
   }
 
-  const chamado = store.chamados[index];
   const feedbackEntry = {
     id: crypto.randomUUID(),
     chamadoId: id,
@@ -769,15 +790,22 @@ export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigid
     createdAt: new Date().toISOString()
   };
 
+  const next = {
+    ...chamado,
+    updatedAt: feedbackEntry.createdAt
+  };
+
   if (correto === true) {
-    chamado.tabulacaoStatus = 'aprovada';
+    next.tabulacaoStatus = 'aprovada';
   } else if (tabulacaoCorrigida) {
-    chamado.tabulacaoFinal = tabulacaoCorrigida;
-    chamado.tabulacaoStatus = 'corrigida';
+    next.tabulacaoFinal = tabulacaoCorrigida;
+    next.tabulacaoStatus = 'corrigida';
   }
 
-  chamado.updatedAt = feedbackEntry.createdAt;
-  store.chamados[index] = chamado;
+  await upsertChamado(next);
+
+  const store = await readStore();
+  store.feedback = Array.isArray(store.feedback) ? store.feedback : [];
   store.feedback.unshift(feedbackEntry);
   await writeStore(store);
 
