@@ -5,11 +5,14 @@ yarn-debug.log*
 yarn-error.log*
 package-lock.json
 
-# Arquivos de ambiente
+# Arquivos de ambiente (nunca versionar chaves)
 .env
+**/.env
 .env.local
 .env.production
 .env.development
+backend/.env
+frontend/.env
 
 # Build
 dist/
