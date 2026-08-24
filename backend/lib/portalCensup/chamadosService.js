@@ -6,55 +6,20 @@ import { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
 import { dbFindChamado, dbListChamadosNaFila, dbUpsertChamado } from './chamadosDb.js';
 
 const DATA_FILE = path.join(process.cwd(), 'data', 'portal-censup-chamados.json');
+const FAKE_SEED_ID = '5303036a-6e14-4ca1-b5a7-46207c301735';
+const FAKE_SEED_PEDIDO = '1745000';
 
-const SEED_CHAMADOS = [
-  {
-    id: '5303036a-6e14-4ca1-b5a7-46207c301735',
-    agendaCode: '5303036a-6e14-4ca1-b5a7-46207c301735',
-    uf: 'SP',
-    cidade: 'IBIUNA',
-    sistema: 'Hub de Vendas',
-    pedido: '1745000',
-    dataSituacao: '2026-08-12T10:01:35.000Z',
-    pdv: 'WEBDEALER Mondiale',
-    motivo: 'Similaridade de endereço',
-    situacao: 'Em análise por MATHEUS AMIEL COSTA LIMA',
-    endereco: {
-      logradouro: 'RUA TRAVESSA JOAQUIM GABRIEL SOARES',
-      numero: '4',
-      bairro: 'VILA LIMA',
-      cidade: 'IBIÚNA',
-      uf: 'SP',
-      cep: '18150000',
-      completo: 'RUA TRAVESSA JOAQUIM GABRIEL SOARES N 4, SG'
-    },
-    tabulacaoFinal: 'Aprovado Com Portas',
-    tabulacaoConfianca: 0.82,
-    tabulacaoStatus: 'pendente_revisao',
-    viabilidadeResumo: {
-      dentroCobertura: true,
-      ctosEncontradas: 1,
-      portasDisponiveis: 4,
-      distanciaCtoMetros: 118,
-      projetista: 'Sistema IA'
-    },
-    analiseIa: {
-      modelo: 'regras-v1',
-      motivoSugestao: 'Endereço dentro da cobertura com CTO a menos de 250m e portas disponíveis.'
-    }
-  }
-];
+function isFakeSeedChamado(item) {
+  if (!item) return false;
+  return item.id === FAKE_SEED_ID || String(item.pedido || '') === FAKE_SEED_PEDIDO;
+}
 
 async function ensureDataFile() {
   try {
     await fs.access(DATA_FILE);
   } catch {
     await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
-    await fs.writeFile(
-      DATA_FILE,
-      JSON.stringify({ chamados: SEED_CHAMADOS, feedback: [] }, null, 2),
-      'utf8'
-    );
+    await fs.writeFile(DATA_FILE, JSON.stringify({ chamados: [], feedback: [] }, null, 2), 'utf8');
   }
 }
 
@@ -63,7 +28,7 @@ async function readStore() {
   const raw = await fs.readFile(DATA_FILE, 'utf8');
   const parsed = JSON.parse(raw);
   return {
-    chamados: Array.isArray(parsed.chamados) ? parsed.chamados : [],
+    chamados: (Array.isArray(parsed.chamados) ? parsed.chamados : []).filter((item) => !isFakeSeedChamado(item)),
     feedback: Array.isArray(parsed.feedback) ? parsed.feedback : []
   };
 }
@@ -558,21 +523,41 @@ function filterChamados(chamados, { q = '' } = {}) {
   });
 }
 
+function emptyList({ page = 1, limit = 10, source = 'supabase' } = {}) {
+  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+  const safePage = Math.max(parseInt(page, 10) || 1, 1);
+  return {
+    chamados: [],
+    total: 0,
+    page: safePage,
+    limit: safeLimit,
+    totalPages: 1,
+    source
+  };
+}
+
 export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
-  const fromDb = await trySupabase('listar fila', () => dbListChamadosNaFila({ q, page, limit }));
-  if (fromDb.used && fromDb.data) {
-    const { chamados, total, page: safePage, limit: safeLimit } = fromDb.data;
-    return {
-      chamados: chamados.map((item) => ({
-        ...item,
-        dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
-      })),
-      total,
-      page: safePage,
-      limit: safeLimit,
-      totalPages: Math.max(1, Math.ceil(total / safeLimit)),
-      source: 'supabase'
-    };
+  if (isPortalCensupSupabaseAvailable()) {
+    try {
+      const fromDb = await dbListChamadosNaFila({ q, page, limit });
+      return {
+        chamados: (fromDb?.chamados || []).map((item) => ({
+          ...item,
+          dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
+        })),
+        total: fromDb?.total || 0,
+        page: fromDb?.page || page,
+        limit: fromDb?.limit || limit,
+        totalPages: Math.max(1, Math.ceil((fromDb?.total || 0) / (fromDb?.limit || limit || 10))),
+        source: 'supabase'
+      };
+    } catch (err) {
+      if (isChamadosTableMissing(err)) {
+        console.warn('⚠️ [PortalCENSUP] Tabela chamados ainda não existe. Fila vazia (sem JSON de exemplo).');
+        return emptyList({ page, limit, source: 'supabase' });
+      }
+      throw err;
+    }
   }
 
   const store = await readStore();
@@ -691,7 +676,12 @@ export async function upsertChamado(payload) {
   };
 
   const saved = await trySupabase('salvar chamado', () => dbUpsertChamado(next));
-  if (saved.used && saved.data) return saved.data;
+  if (isPortalCensupSupabaseAvailable()) {
+    if (saved.used && saved.data) return saved.data;
+    const err = new Error('Não foi possível gravar o chamado no Supabase do CENSUP');
+    err.statusCode = 503;
+    throw err;
+  }
 
   const store = await readStore();
   const existingIndex = store.chamados.findIndex((item) => item.id === id);
