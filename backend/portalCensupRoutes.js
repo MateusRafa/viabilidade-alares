@@ -16,6 +16,10 @@ import {
   stopAgendaBot,
   syncAgendaBotOnce
 } from './lib/portalCensup/agendaBot/index.js';
+import {
+  portalCensupSupabaseConfig,
+  testPortalCensupSupabaseConnection
+} from './lib/portalCensup/supabaseCensup.js';
 
 function getUsuarioFromRequest(req) {
   const headerKeys = Object.keys(req.headers || {});
@@ -39,6 +43,37 @@ function sendError(res, err) {
  * @param {import('express').Express} app
  */
 export function registerPortalCensupRoutes(app) {
+  testPortalCensupSupabaseConnection()
+    .then((status) => {
+      if (status.success) {
+        console.log(`✅ [PortalCENSUP][Supabase] ${status.message}`);
+      } else {
+        console.warn(`⚠️ [PortalCENSUP][Supabase] ${status.error}`);
+      }
+    })
+    .catch((err) => {
+      console.warn('⚠️ [PortalCENSUP][Supabase] Falha ao testar conexão:', err.message);
+    });
+
+  app.get('/api/portal-censup/supabase-status', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const connection = await testPortalCensupSupabaseConnection();
+      res.json({
+        success: connection.success,
+        ...portalCensupSupabaseConfig,
+        ...connection
+      });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET supabase-status:', err);
+      sendError(res, err);
+    }
+  });
+
   app.get('/api/portal-censup/chamados', async (req, res) => {
     try {
       const usuario = getUsuarioFromRequest(req);
