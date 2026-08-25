@@ -7,6 +7,7 @@ import {
   getChamadoById,
   listChamados,
   registerFeedback,
+  syncFilaToSupabase,
   upsertChamado
 } from './lib/portalCensup/chamadosService.js';
 import {
@@ -44,9 +45,13 @@ function sendError(res, err) {
  */
 export function registerPortalCensupRoutes(app) {
   testPortalCensupSupabaseConnection()
-    .then((status) => {
+    .then(async (status) => {
       if (status.success) {
         console.log(`✅ [PortalCENSUP][Supabase] ${status.message}`);
+        const sync = await syncFilaToSupabase();
+        if (sync.synced) {
+          console.log(`✅ [PortalCENSUP][Supabase] Fila existente enviada: ${sync.synced} chamado(s)`);
+        }
       } else {
         console.warn(`⚠️ [PortalCENSUP][Supabase] ${status.error}`);
       }
@@ -70,6 +75,21 @@ export function registerPortalCensupRoutes(app) {
       });
     } catch (err) {
       console.error('❌ [PortalCENSUP] GET supabase-status:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/sync-supabase', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const result = await syncFilaToSupabase();
+      res.status(result.success ? 200 : 503).json({ success: result.success, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST sync-supabase:', err);
       sendError(res, err);
     }
   });
