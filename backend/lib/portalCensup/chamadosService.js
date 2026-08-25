@@ -5,37 +5,64 @@ import { analisarLocalizacaoChamado } from './analiseLocalizacao.js';
 import { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
 import { dbFindChamado, dbListChamadosNaFila, dbUpsertChamado } from './chamadosDb.js';
 
-const DATA_FILE = path.join(process.cwd(), 'data', 'portal-censup-chamados.json');
 const FAKE_SEED_ID = '5303036a-6e14-4ca1-b5a7-46207c301735';
 const FAKE_SEED_PEDIDO = '1745000';
+
+function dataFileCandidates() {
+  const files = [];
+  const envDir = (process.env.DATA_DIR || '').trim();
+  if (envDir) files.push(path.join(envDir, 'portal-censup-chamados.json'));
+  files.push(path.join(process.cwd(), 'data', 'portal-censup-chamados.json'));
+  return [...new Set(files)];
+}
+
+function primaryDataFile() {
+  return dataFileCandidates()[0];
+}
 
 function isFakeSeedChamado(item) {
   if (!item) return false;
   return item.id === FAKE_SEED_ID || String(item.pedido || '') === FAKE_SEED_PEDIDO;
 }
 
-async function ensureDataFile() {
+async function readJsonIfExists(filePath) {
   try {
-    await fs.access(DATA_FILE);
+    const raw = await fs.readFile(filePath, 'utf8');
+    return JSON.parse(raw);
   } catch {
-    await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
-    await fs.writeFile(DATA_FILE, JSON.stringify({ chamados: [], feedback: [] }, null, 2), 'utf8');
+    return null;
   }
 }
 
 async function readStore() {
-  await ensureDataFile();
-  const raw = await fs.readFile(DATA_FILE, 'utf8');
-  const parsed = JSON.parse(raw);
-  return {
-    chamados: (Array.isArray(parsed.chamados) ? parsed.chamados : []).filter((item) => !isFakeSeedChamado(item)),
-    feedback: Array.isArray(parsed.feedback) ? parsed.feedback : []
-  };
+  const merged = { chamados: [], feedback: [] };
+  const seenPedidos = new Set();
+  const seenIds = new Set();
+
+  for (const filePath of dataFileCandidates()) {
+    const parsed = await readJsonIfExists(filePath);
+    if (!parsed) continue;
+    const chamados = Array.isArray(parsed.chamados) ? parsed.chamados : [];
+    for (const item of chamados) {
+      if (isFakeSeedChamado(item)) continue;
+      const pedidoKey = item?.pedido != null ? String(item.pedido) : '';
+      if (pedidoKey && seenPedidos.has(pedidoKey)) continue;
+      if (item?.id && seenIds.has(item.id)) continue;
+      if (pedidoKey) seenPedidos.add(pedidoKey);
+      if (item?.id) seenIds.add(item.id);
+      merged.chamados.push(item);
+    }
+    const feedback = Array.isArray(parsed.feedback) ? parsed.feedback : [];
+    merged.feedback.push(...feedback);
+  }
+
+  return merged;
 }
 
 async function writeStore(store) {
-  await fs.mkdir(path.dirname(DATA_FILE), { recursive: true });
-  await fs.writeFile(DATA_FILE, JSON.stringify(store, null, 2), 'utf8');
+  const filePath = primaryDataFile();
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(store, null, 2), 'utf8');
 }
 
 function isChamadosTableMissing(err) {
@@ -536,32 +563,7 @@ function emptyList({ page = 1, limit = 10, source = 'supabase' } = {}) {
   };
 }
 
-export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
-  if (isPortalCensupSupabaseAvailable()) {
-    try {
-      await syncFilaToSupabase();
-      const fromDb = await dbListChamadosNaFila({ q, page, limit });
-      return {
-        chamados: (fromDb?.chamados || []).map((item) => ({
-          ...item,
-          dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
-        })),
-        total: fromDb?.total || 0,
-        page: fromDb?.page || page,
-        limit: fromDb?.limit || limit,
-        totalPages: Math.max(1, Math.ceil((fromDb?.total || 0) / (fromDb?.limit || limit || 10))),
-        source: 'supabase'
-      };
-    } catch (err) {
-      if (isChamadosTableMissing(err)) {
-        console.warn('⚠️ [PortalCENSUP] Tabela chamados ainda não existe. Fila vazia (sem JSON de exemplo).');
-        return emptyList({ page, limit, source: 'supabase' });
-      }
-      throw err;
-    }
-  }
-
-  const store = await readStore();
+function paginateStore(store, { q = '', page = 1, limit = 10 } = {}, extra = {}) {
   const filtered = filterChamados(store.chamados, { q });
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
@@ -577,13 +579,65 @@ export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
     page: safePage,
     limit: safeLimit,
     totalPages: Math.max(1, Math.ceil(filtered.length / safeLimit)),
-    source: 'json'
+    source: 'json',
+    ...extra
   };
+}
+
+export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
+  const store = await readStore();
+
+  if (isPortalCensupSupabaseAvailable()) {
+    try {
+      const sync = await syncFilaToSupabase();
+      const fromDb = await dbListChamadosNaFila({ q, page, limit });
+      const dbTotal = fromDb?.total || 0;
+
+      if (dbTotal > 0 || store.chamados.length === 0) {
+        return {
+          chamados: (fromDb?.chamados || []).map((item) => ({
+            ...item,
+            dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
+          })),
+          total: dbTotal,
+          page: fromDb?.page || page,
+          limit: fromDb?.limit || limit,
+          totalPages: Math.max(1, Math.ceil(dbTotal / (fromDb?.limit || limit || 10))),
+          source: 'supabase',
+          supabaseSync: sync
+        };
+      }
+
+      console.warn(
+        `⚠️ [PortalCENSUP] Supabase ainda vazio após sync (${sync.synced}/${sync.total}). Mostrando JSON. Erros: ${JSON.stringify(sync.errors || [])}`
+      );
+      return paginateStore(store, { q, page, limit }, {
+        source: 'json',
+        supabaseSync: sync,
+        warning: 'A fila está no JSON, mas ainda não gravou no Supabase.'
+      });
+    } catch (err) {
+      if (isChamadosTableMissing(err)) {
+        console.warn('⚠️ [PortalCENSUP] Tabela chamados ainda não existe. Usando JSON local.');
+        return paginateStore(store, { q, page, limit }, {
+          warning: 'Tabela chamados ainda não existe no Supabase.'
+        });
+      }
+      console.error('❌ [PortalCENSUP] Falha ao listar no Supabase, usando JSON:', err.message);
+      return paginateStore(store, { q, page, limit }, {
+        warning: err.message
+      });
+    }
+  }
+
+  return paginateStore(store, { q, page, limit });
 }
 
 export async function getChamadoById(id) {
   const fromDb = await trySupabase('buscar chamado', () => dbFindChamado({ id }));
-  const chamado = fromDb.used ? fromDb.data : (await readStore()).chamados.find((item) => item.id === id);
+  const chamado =
+    fromDb.data ||
+    (await readStore()).chamados.find((item) => item.id === id || String(item.pedido) === String(id));
 
   if (!chamado) {
     const err = new Error('Chamado não encontrado');
@@ -600,7 +654,7 @@ export async function getChamadoById(id) {
 
 export async function findChamadoByPedidoOrCode({ pedido, agendaCode, id } = {}) {
   const fromDb = await trySupabase('buscar por pedido', () => dbFindChamado({ id, pedido, agendaCode }));
-  if (fromDb.used) return fromDb.data;
+  if (fromDb.data) return fromDb.data;
 
   const store = await readStore();
   return (
@@ -697,12 +751,22 @@ export async function upsertChamado(payload) {
     console.warn(
       `⚠️ [PortalCENSUP] Pedido ${next.pedido} salvo só no JSON. Configure PORTAL_CENSUP_SUPABASE_URL e PORTAL_CENSUP_SUPABASE_SERVICE_KEY no backend Railway.`
     );
+    next.persistedToSupabase = false;
+    next.supabaseError =
+      'Supabase CENSUP não configurado neste processo. Confira as variáveis no serviço backend e faça Redeploy.';
     return next;
   }
 
-  const saved = await dbUpsertChamado(next);
-  console.log(`✅ [PortalCENSUP] Pedido ${next.pedido} gravado na tabela chamados do Supabase`);
-  return saved || next;
+  try {
+    const saved = await dbUpsertChamado(next);
+    console.log(`✅ [PortalCENSUP] Pedido ${next.pedido} gravado na tabela chamados do Supabase`);
+    return { ...(saved || next), persistedToSupabase: true };
+  } catch (err) {
+    console.error(`❌ [PortalCENSUP] Pedido ${next.pedido} NÃO gravou no Supabase:`, err.message);
+    next.persistedToSupabase = false;
+    next.supabaseError = err.message;
+    return next;
+  }
 }
 
 export async function syncFilaToSupabase() {
