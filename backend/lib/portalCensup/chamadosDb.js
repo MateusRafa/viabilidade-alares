@@ -1,4 +1,5 @@
 import supabaseCensup, { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
+import crypto from 'crypto';
 
 const TABLE = 'chamados';
 
@@ -177,13 +178,42 @@ export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10 } = {}
   };
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || '')
+  );
+}
+
 export async function dbUpsertChamado(chamado) {
   if (!isPortalCensupSupabaseAvailable()) return null;
 
-  const row = chamadoToRow(chamado);
+  const existing = await dbFindChamado({
+    id: isUuid(chamado.id) ? chamado.id : null,
+    pedido: chamado.pedido,
+    agendaCode: chamado.agendaCode
+  });
+
+  const id = existing?.id || (isUuid(chamado.id) ? chamado.id : crypto.randomUUID());
+  const row = chamadoToRow({
+    ...chamado,
+    id,
+    createdAt: existing?.createdAt || chamado.createdAt
+  });
   if (!row.created_at) row.created_at = new Date().toISOString();
 
-  const { data, error } = await supabaseCensup.from(TABLE).upsert(row, { onConflict: 'id' }).select('*').single();
-  throwIfError(error, 'salvar chamado');
+  if (existing) {
+    const { id: _ignoreId, created_at: _ignoreCreated, ...patch } = row;
+    const { data, error } = await supabaseCensup
+      .from(TABLE)
+      .update(patch)
+      .eq('id', existing.id)
+      .select('*')
+      .single();
+    throwIfError(error, 'atualizar chamado');
+    return rowToChamado(data);
+  }
+
+  const { data, error } = await supabaseCensup.from(TABLE).insert(row).select('*').single();
+  throwIfError(error, 'inserir chamado');
   return rowToChamado(data);
 }
