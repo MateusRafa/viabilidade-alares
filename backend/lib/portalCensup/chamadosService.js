@@ -539,6 +539,7 @@ function emptyList({ page = 1, limit = 10, source = 'supabase' } = {}) {
 export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
   if (isPortalCensupSupabaseAvailable()) {
     try {
+      await syncFilaToSupabase();
       const fromDb = await dbListChamadosNaFila({ q, page, limit });
       return {
         chamados: (fromDb?.chamados || []).map((item) => ({
@@ -684,20 +685,59 @@ export async function upsertChamado(payload) {
     createdAt: previous.createdAt || now
   };
 
-  const saved = await trySupabase('salvar chamado', () => dbUpsertChamado(next));
-  if (isPortalCensupSupabaseAvailable()) {
-    if (saved.used && saved.data) return saved.data;
-    const err = new Error('Não foi possível gravar o chamado no Supabase do CENSUP');
-    err.statusCode = 503;
-    throw err;
+  const store = await readStore();
+  const existingIndex = store.chamados.findIndex(
+    (item) => item.id === id || (next.pedido && String(item.pedido) === String(next.pedido))
+  );
+  if (existingIndex >= 0) store.chamados[existingIndex] = { ...store.chamados[existingIndex], ...next };
+  else store.chamados.unshift(next);
+  await writeStore(store);
+
+  if (!isPortalCensupSupabaseAvailable()) {
+    console.warn(
+      `⚠️ [PortalCENSUP] Pedido ${next.pedido} salvo só no JSON. Configure PORTAL_CENSUP_SUPABASE_URL e PORTAL_CENSUP_SUPABASE_SERVICE_KEY no backend Railway.`
+    );
+    return next;
+  }
+
+  const saved = await dbUpsertChamado(next);
+  console.log(`✅ [PortalCENSUP] Pedido ${next.pedido} gravado na tabela chamados do Supabase`);
+  return saved || next;
+}
+
+export async function syncFilaToSupabase() {
+  if (!isPortalCensupSupabaseAvailable()) {
+    return {
+      success: false,
+      synced: 0,
+      total: 0,
+      error: 'Supabase CENSUP não configurado. Defina PORTAL_CENSUP_SUPABASE_URL e PORTAL_CENSUP_SUPABASE_SERVICE_KEY no backend Railway.'
+    };
   }
 
   const store = await readStore();
-  const existingIndex = store.chamados.findIndex((item) => item.id === id);
-  if (existingIndex >= 0) store.chamados[existingIndex] = next;
-  else store.chamados.unshift(next);
-  await writeStore(store);
-  return next;
+  const errors = [];
+  let synced = 0;
+
+  for (const chamado of store.chamados) {
+    try {
+      await dbUpsertChamado(chamado);
+      synced += 1;
+    } catch (err) {
+      errors.push({ pedido: chamado.pedido, error: err.message });
+    }
+  }
+
+  if (synced) {
+    console.log(`✅ [PortalCENSUP] Fila sincronizada com Supabase: ${synced}/${store.chamados.length}`);
+  }
+
+  return {
+    success: errors.length === 0,
+    synced,
+    total: store.chamados.length,
+    errors
+  };
 }
 
 export async function analisarChamadoById(id, { force = false } = {}) {
