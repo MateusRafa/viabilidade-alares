@@ -7,6 +7,29 @@ function authHeaders(usuario) {
   };
 }
 
+export async function fetchPortalCensupSupabaseStatus(usuario) {
+  const response = await fetch(getApiUrl('/api/portal-censup/supabase-status'), {
+    headers: authHeaders(usuario)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.success === undefined) {
+    throw new Error(data.error || `Erro ao consultar Supabase (${response.status})`);
+  }
+  return data;
+}
+
+export async function syncPortalCensupSupabase(usuario) {
+  const response = await fetch(getApiUrl('/api/portal-censup/sync-supabase'), {
+    method: 'POST',
+    headers: authHeaders(usuario)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok && !data) {
+    throw new Error(`Erro ao sincronizar Supabase (${response.status})`);
+  }
+  return data;
+}
+
 export async function fetchPortalCensupChamados(usuario, { q = '', page = 1, limit = 10 } = {}) {
   const params = new URLSearchParams({
     q,
