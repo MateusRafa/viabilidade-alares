@@ -18,7 +18,7 @@ import {
   syncAgendaBotOnce
 } from './lib/portalCensup/agendaBot/index.js';
 import {
-  portalCensupSupabaseConfig,
+  getPortalCensupSupabaseConfig,
   testPortalCensupSupabaseConnection
 } from './lib/portalCensup/supabaseCensup.js';
 
@@ -70,7 +70,7 @@ export function registerPortalCensupRoutes(app) {
       const connection = await testPortalCensupSupabaseConnection();
       res.json({
         success: connection.success,
-        ...portalCensupSupabaseConfig,
+        ...getPortalCensupSupabaseConfig(),
         ...connection
       });
     } catch (err) {
@@ -179,7 +179,12 @@ export function registerPortalCensupRoutes(app) {
       // Cascata endereço → referência → cobertura (não bloqueia a extensão)
       analisarChamadoEmBackground(chamado.id);
 
-      res.json({ success: true, chamado });
+      res.json({
+        success: true,
+        chamado,
+        persistedToSupabase: chamado.persistedToSupabase === true,
+        supabaseError: chamado.supabaseError || null
+      });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST chamado:', err);
       sendError(res, err);
