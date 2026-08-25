@@ -9,7 +9,8 @@
     fetchPortalCensupChamadoById,
     sendPortalCensupFeedback,
     fetchTabulacoesList,
-    analisarPortalCensupChamado
+    analisarPortalCensupChamado,
+    fetchPortalCensupSupabaseStatus
   } from './portalCensupApi.js';
 
   export let currentUser = '';
@@ -28,6 +29,8 @@
   let searchTimer = null;
   let loadingList = false;
   let listError = '';
+  let persistNotice = '';
+  let persistOk = false;
   let refreshInterval = null;
   let isRefreshing = false;
 
@@ -95,6 +98,39 @@
       chamados = data.chamados || [];
       total = data.total || 0;
       totalPages = data.totalPages || 1;
+
+      const sync = data.supabaseSync;
+      if (data.source === 'supabase') {
+        persistOk = true;
+        persistNotice = '';
+      } else if (sync && Array.isArray(sync.errors) && sync.errors.length) {
+        persistOk = false;
+        persistNotice = `A fila está na tela, mas o Supabase recusou a gravação: ${sync.errors[0].error || 'erro desconhecido'}`;
+      } else if (data.warning) {
+        persistOk = false;
+        persistNotice = data.warning;
+      } else if (data.source === 'json') {
+        persistOk = false;
+        persistNotice =
+          'A fila ainda está só no servidor (JSON). Nada foi gravado na table chamados do Supabase.';
+      }
+
+      try {
+        const status = await fetchPortalCensupSupabaseStatus(currentUser);
+        if (!status.success || !status.tablesReady) {
+          persistOk = false;
+          persistNotice =
+            status.error ||
+            status.message ||
+            persistNotice ||
+            'Supabase CENSUP não está gravando neste backend.';
+        } else if (data.source === 'supabase') {
+          persistOk = true;
+          persistNotice = '';
+        }
+      } catch {
+        /* status é auxiliar */
+      }
     } catch (err) {
       if (!silent) {
         listError = err?.message || 'Não foi possível carregar os chamados.';
@@ -457,6 +493,9 @@
     </div>
   {:else}
     <div class="queue-view">
+      {#if persistNotice && !persistOk}
+        <p class="persist-warning" role="status">{persistNotice}</p>
+      {/if}
       {#if listError}
         <p class="load-error" role="alert">{listError}</p>
       {/if}
@@ -1192,6 +1231,15 @@
     border-radius: 8px;
   }
 
+  .persist-warning {
+    margin: 0 0 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #fffbeb;
+    color: #92400e;
+    border: 1px solid #fcd34d;
+    border-radius: 8px;
+  }
+
   @media (max-width: 960px) {
     .detail-layout {
       flex-direction: column;
@@ -1332,6 +1380,12 @@
     background: #3f1515;
     color: #fca5a5;
     border-color: #7f1d1d;
+  }
+
+  .theme-dark .persist-warning {
+    background: #3f2e15;
+    color: #fde68a;
+    border-color: #92400e;
   }
 
   .theme-dark .feedback-message {
