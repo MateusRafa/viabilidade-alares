@@ -1,4 +1,4 @@
-import supabaseCensup, { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
+import { getPortalCensupSupabase, isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
 import crypto from 'crypto';
 
 const TABLE = 'chamados';
@@ -25,7 +25,10 @@ const CORE_KEYS = new Set([
   'pdfPath',
   'createdAt',
   'updatedAt',
-  'dataSituacaoLabel'
+  'dataSituacaoLabel',
+  'persistedToSupabase',
+  'supabaseError',
+  'pdfHtml'
 ]);
 
 function parseDataSituacao(value) {
@@ -95,9 +98,23 @@ export function rowToChamado(row) {
   };
 }
 
+function client() {
+  const supabaseCensup = getPortalCensupSupabase();
+  if (!supabaseCensup) {
+    const err = new Error('Cliente Supabase CENSUP indisponível');
+    err.code = 'CENSUP_SUPABASE_UNAVAILABLE';
+    throw err;
+  }
+  return supabaseCensup;
+}
+
 function throwIfError(error, action) {
   if (!error) return;
-  const err = new Error(error.message || `Falha ao ${action} no Supabase CENSUP`);
+  const parts = [error.message || `Falha ao ${action} no Supabase CENSUP`];
+  if (error.code) parts.push(`code=${error.code}`);
+  if (error.details) parts.push(error.details);
+  if (error.hint) parts.push(error.hint);
+  const err = new Error(parts.join(' — '));
   err.cause = error;
   err.code = error.code;
   throw err;
@@ -107,13 +124,13 @@ export async function dbFindChamado({ id, pedido, agendaCode } = {}) {
   if (!isPortalCensupSupabaseAvailable()) return null;
 
   if (id) {
-    const { data, error } = await supabaseCensup.from(TABLE).select('*').eq('id', id).maybeSingle();
+    const { data, error } = await client().from(TABLE).select('*').eq('id', id).maybeSingle();
     throwIfError(error, 'buscar chamado por id');
     if (data) return rowToChamado(data);
   }
 
   if (agendaCode) {
-    const { data, error } = await supabaseCensup
+    const { data, error } = await client()
       .from(TABLE)
       .select('*')
       .eq('agenda_code', agendaCode)
@@ -123,7 +140,7 @@ export async function dbFindChamado({ id, pedido, agendaCode } = {}) {
   }
 
   if (pedido) {
-    const { data, error } = await supabaseCensup
+    const { data, error } = await client()
       .from(TABLE)
       .select('*')
       .eq('pedido', String(pedido))
@@ -144,7 +161,7 @@ export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10 } = {}
   const to = from + safeLimit - 1;
   const query = (q || '').trim();
 
-  let builder = supabaseCensup
+  let builder = client()
     .from(TABLE)
     .select('*', { count: 'exact' })
     .eq('fila_status', 'na_fila')
@@ -203,7 +220,7 @@ export async function dbUpsertChamado(chamado) {
 
   if (existing) {
     const { id: _ignoreId, created_at: _ignoreCreated, ...patch } = row;
-    const { data, error } = await supabaseCensup
+    const { data, error } = await client()
       .from(TABLE)
       .update(patch)
       .eq('id', existing.id)
@@ -213,7 +230,7 @@ export async function dbUpsertChamado(chamado) {
     return rowToChamado(data);
   }
 
-  const { data, error } = await supabaseCensup.from(TABLE).insert(row).select('*').single();
+  const { data, error } = await client().from(TABLE).insert(row).select('*').single();
   throwIfError(error, 'inserir chamado');
   return rowToChamado(data);
 }
