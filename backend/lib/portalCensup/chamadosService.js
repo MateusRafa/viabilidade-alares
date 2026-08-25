@@ -647,6 +647,12 @@ export async function upsertChamadoFromAgenda(payload) {
   return upsertChamado(merged);
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || '')
+  );
+}
+
 export async function upsertChamado(payload) {
   const existing = await findChamadoByPedidoOrCode({
     id: payload.id,
@@ -654,7 +660,10 @@ export async function upsertChamado(payload) {
     agendaCode: payload.agendaCode
   });
 
-  const id = payload.id || existing?.id || payload.agendaCode || crypto.randomUUID();
+  const id =
+    (isUuid(existing?.id) && existing.id) ||
+    (isUuid(payload.id) && payload.id) ||
+    crypto.randomUUID();
   const now = new Date().toISOString();
   const previous = existing || {};
   const next = {
