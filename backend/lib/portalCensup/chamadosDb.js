@@ -123,7 +123,7 @@ function throwIfError(error, action) {
 export async function dbFindChamado({ id, pedido, agendaCode } = {}) {
   if (!isPortalCensupSupabaseAvailable()) return null;
 
-  if (id) {
+  if (id && isUuid(id)) {
     const { data, error } = await client().from(TABLE).select('*').eq('id', id).maybeSingle();
     throwIfError(error, 'buscar chamado por id');
     if (data) return rowToChamado(data);
@@ -139,17 +139,29 @@ export async function dbFindChamado({ id, pedido, agendaCode } = {}) {
     if (data) return rowToChamado(data);
   }
 
-  if (pedido) {
+  const pedidoKey = pedido || (id && !isUuid(id) ? id : null);
+  if (pedidoKey) {
     const { data, error } = await client()
       .from(TABLE)
       .select('*')
-      .eq('pedido', String(pedido))
+      .eq('pedido', String(pedidoKey))
       .maybeSingle();
     throwIfError(error, 'buscar chamado por pedido');
     if (data) return rowToChamado(data);
   }
 
   return null;
+}
+
+export async function dbListAllChamados() {
+  if (!isPortalCensupSupabaseAvailable()) return [];
+
+  const { data, error } = await client()
+    .from(TABLE)
+    .select('*')
+    .order('created_at', { ascending: false });
+  throwIfError(error, 'listar todos os chamados');
+  return (data || []).map(rowToChamado);
 }
 
 export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10 } = {}) {
@@ -164,7 +176,6 @@ export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10 } = {}
   let builder = client()
     .from(TABLE)
     .select('*', { count: 'exact' })
-    .eq('fila_status', 'na_fila')
     .order('created_at', { ascending: false })
     .range(from, to);
 
