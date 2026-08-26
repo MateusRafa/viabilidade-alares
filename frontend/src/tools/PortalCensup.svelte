@@ -9,8 +9,7 @@
     fetchPortalCensupChamadoById,
     sendPortalCensupFeedback,
     fetchTabulacoesList,
-    analisarPortalCensupChamado,
-    fetchPortalCensupSupabaseStatus
+    analisarPortalCensupChamado
   } from './portalCensupApi.js';
 
   export let currentUser = '';
@@ -99,37 +98,14 @@
       total = data.total || 0;
       totalPages = data.totalPages || 1;
 
-      const sync = data.supabaseSync;
       if (data.source === 'supabase') {
         persistOk = true;
         persistNotice = '';
-      } else if (sync && Array.isArray(sync.errors) && sync.errors.length) {
-        persistOk = false;
-        persistNotice = `A fila está na tela, mas o Supabase recusou a gravação: ${sync.errors[0].error || 'erro desconhecido'}`;
-      } else if (data.warning) {
-        persistOk = false;
-        persistNotice = data.warning;
-      } else if (data.source === 'json') {
+      } else {
         persistOk = false;
         persistNotice =
-          'A fila ainda está só no servidor (JSON). Nada foi gravado na table chamados do Supabase.';
-      }
-
-      try {
-        const status = await fetchPortalCensupSupabaseStatus(currentUser);
-        if (!status.success || !status.tablesReady) {
-          persistOk = false;
-          persistNotice =
-            status.error ||
-            status.message ||
-            persistNotice ||
-            'Supabase CENSUP não está gravando neste backend.';
-        } else if (data.source === 'supabase') {
-          persistOk = true;
-          persistNotice = '';
-        }
-      } catch {
-        /* status é auxiliar */
+          data.warning ||
+          'A tela ainda não está lendo a table chamados do Supabase.';
       }
     } catch (err) {
       if (!silent) {
