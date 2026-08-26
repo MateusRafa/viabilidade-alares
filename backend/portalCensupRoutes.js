@@ -49,8 +49,8 @@ export function registerPortalCensupRoutes(app) {
       if (status.success) {
         console.log(`✅ [PortalCENSUP][Supabase] ${status.message}`);
         const sync = await syncFilaToSupabase();
-        if (sync.synced) {
-          console.log(`✅ [PortalCENSUP][Supabase] Fila existente enviada: ${sync.synced} chamado(s)`);
+        if (sync.success) {
+          console.log(`✅ [PortalCENSUP][Supabase] JSON local alinhado com a table: ${sync.synced} chamado(s)`);
         }
       } else {
         console.warn(`⚠️ [PortalCENSUP][Supabase] ${status.error}`);
