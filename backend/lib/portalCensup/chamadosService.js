@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { analisarLocalizacaoChamado } from './analiseLocalizacao.js';
 import { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
-import { dbFindChamado, dbListChamadosNaFila, dbUpsertChamado } from './chamadosDb.js';
+import { dbFindChamado, dbListAllChamados, dbListChamadosNaFila, dbUpsertChamado } from './chamadosDb.js';
 
 const FAKE_SEED_ID = '5303036a-6e14-4ca1-b5a7-46207c301735';
 const FAKE_SEED_PEDIDO = '1745000';
@@ -584,60 +584,39 @@ function paginateStore(store, { q = '', page = 1, limit = 10 } = {}, extra = {})
   };
 }
 
+function withListLabels(chamados) {
+  return (chamados || []).map((item) => ({
+    ...item,
+    dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
+  }));
+}
+
 export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
-  const store = await readStore();
-
   if (isPortalCensupSupabaseAvailable()) {
-    try {
-      const sync = await syncFilaToSupabase();
-      const fromDb = await dbListChamadosNaFila({ q, page, limit });
-      const dbTotal = fromDb?.total || 0;
-
-      if (dbTotal > 0 || store.chamados.length === 0) {
-        return {
-          chamados: (fromDb?.chamados || []).map((item) => ({
-            ...item,
-            dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
-          })),
-          total: dbTotal,
-          page: fromDb?.page || page,
-          limit: fromDb?.limit || limit,
-          totalPages: Math.max(1, Math.ceil(dbTotal / (fromDb?.limit || limit || 10))),
-          source: 'supabase',
-          supabaseSync: sync
-        };
-      }
-
-      console.warn(
-        `⚠️ [PortalCENSUP] Supabase ainda vazio após sync (${sync.synced}/${sync.total}). Mostrando JSON. Erros: ${JSON.stringify(sync.errors || [])}`
-      );
-      return paginateStore(store, { q, page, limit }, {
-        source: 'json',
-        supabaseSync: sync,
-        warning: 'A fila está no JSON, mas ainda não gravou no Supabase.'
-      });
-    } catch (err) {
-      if (isChamadosTableMissing(err)) {
-        console.warn('⚠️ [PortalCENSUP] Tabela chamados ainda não existe. Usando JSON local.');
-        return paginateStore(store, { q, page, limit }, {
-          warning: 'Tabela chamados ainda não existe no Supabase.'
-        });
-      }
-      console.error('❌ [PortalCENSUP] Falha ao listar no Supabase, usando JSON:', err.message);
-      return paginateStore(store, { q, page, limit }, {
-        warning: err.message
-      });
-    }
+    const fromDb = await dbListChamadosNaFila({ q, page, limit });
+    syncJsonFromSupabase().catch((err) => {
+      console.warn('⚠️ [PortalCENSUP] Não atualizou o JSON local a partir da table:', err.message);
+    });
+    const dbTotal = fromDb?.total || 0;
+    return {
+      chamados: withListLabels(fromDb?.chamados),
+      total: dbTotal,
+      page: fromDb?.page || page,
+      limit: fromDb?.limit || limit,
+      totalPages: Math.max(1, Math.ceil(dbTotal / (fromDb?.limit || limit || 10))),
+      source: 'supabase'
+    };
   }
 
-  return paginateStore(store, { q, page, limit });
+  return paginateStore(await readStore(), { q, page, limit });
 }
 
 export async function getChamadoById(id) {
-  const fromDb = await trySupabase('buscar chamado', () => dbFindChamado({ id }));
-  const chamado =
-    fromDb.data ||
-    (await readStore()).chamados.find((item) => item.id === id || String(item.pedido) === String(id));
+  const fromDb = await trySupabase('buscar chamado', () => dbFindChamado({ id, pedido: id }));
+  const chamado = isPortalCensupSupabaseAvailable()
+    ? fromDb.data
+    : fromDb.data ||
+      (await readStore()).chamados.find((item) => item.id === id || String(item.pedido) === String(id));
 
   if (!chamado) {
     const err = new Error('Chamado não encontrado');
@@ -655,6 +634,7 @@ export async function getChamadoById(id) {
 export async function findChamadoByPedidoOrCode({ pedido, agendaCode, id } = {}) {
   const fromDb = await trySupabase('buscar por pedido', () => dbFindChamado({ id, pedido, agendaCode }));
   if (fromDb.data) return fromDb.data;
+  if (isPortalCensupSupabaseAvailable()) return null;
 
   const store = await readStore();
   return (
@@ -769,39 +749,31 @@ export async function upsertChamado(payload) {
   }
 }
 
-export async function syncFilaToSupabase() {
+export async function syncJsonFromSupabase() {
   if (!isPortalCensupSupabaseAvailable()) {
     return {
       success: false,
       synced: 0,
       total: 0,
-      error: 'Supabase CENSUP não configurado. Defina PORTAL_CENSUP_SUPABASE_URL e PORTAL_CENSUP_SUPABASE_SERVICE_KEY no backend Railway.'
+      error: 'Supabase CENSUP não configurado.'
     };
   }
 
+  const chamados = await dbListAllChamados();
   const store = await readStore();
-  const errors = [];
-  let synced = 0;
-
-  for (const chamado of store.chamados) {
-    try {
-      await dbUpsertChamado(chamado);
-      synced += 1;
-    } catch (err) {
-      errors.push({ pedido: chamado.pedido, error: err.message });
-    }
-  }
-
-  if (synced) {
-    console.log(`✅ [PortalCENSUP] Fila sincronizada com Supabase: ${synced}/${store.chamados.length}`);
-  }
-
+  store.chamados = chamados;
+  await writeStore(store);
   return {
-    success: errors.length === 0,
-    synced,
-    total: store.chamados.length,
-    errors
+    success: true,
+    synced: chamados.length,
+    total: chamados.length,
+    errors: []
   };
+}
+
+/** A table é a fonte da verdade. O JSON só espelha o que está no Supabase. */
+export async function syncFilaToSupabase() {
+  return syncJsonFromSupabase();
 }
 
 export async function analisarChamadoById(id, { force = false } = {}) {
