@@ -164,7 +164,7 @@ export async function dbListAllChamados() {
   return (data || []).map(rowToChamado);
 }
 
-export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10 } = {}) {
+export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10, filaStatus = 'na_fila' } = {}) {
   if (!isPortalCensupSupabaseAvailable()) return null;
 
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
@@ -172,10 +172,12 @@ export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10 } = {}
   const from = (safePage - 1) * safeLimit;
   const to = from + safeLimit - 1;
   const query = (q || '').trim();
+  const status = filaStatus === 'finalizada' ? 'finalizada' : 'na_fila';
 
   let builder = client()
     .from(TABLE)
     .select('*', { count: 'exact' })
+    .eq('fila_status', status)
     .order('created_at', { ascending: false })
     .range(from, to);
 
