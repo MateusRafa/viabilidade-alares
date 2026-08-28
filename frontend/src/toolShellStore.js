@@ -12,6 +12,9 @@ export const toolShellHeaderAction = writable(null);
 /** Busca no header (botão lupa que abre o input). */
 export const toolShellSearch = writable(null);
 
+/** Botão extra no header (ex.: alternar fila / resolvidos), ao lado da pesquisa. */
+export const toolShellViewToggle = writable(null);
+
 /** Mostra botão de tema claro/escuro no header. */
 export const toolShellThemeToggle = writable(false);
 
@@ -20,5 +23,6 @@ export function clearToolShell() {
   toolShellBackHandler.set(null);
   toolShellHeaderAction.set(null);
   toolShellSearch.set(null);
+  toolShellViewToggle.set(null);
   toolShellThemeToggle.set(false);
 }
