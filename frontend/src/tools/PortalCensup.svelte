@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import Loading from '../Loading.svelte';
-  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellSearch, toolShellThemeToggle, toolShellTitle } from '../toolShellStore.js';
+  import { clearToolShell, toolShellBackHandler, toolShellHeaderAction, toolShellSearch, toolShellThemeToggle, toolShellTitle, toolShellViewToggle } from '../toolShellStore.js';
   import { theme } from '../themeStore.js';
   import ViabilidadeAlares from './ViabilidadeAlares.svelte';
   import {
@@ -20,6 +20,7 @@
   const REFRESH_INTERVAL_MS = 30000;
   const pageSize = 50;
 
+  let listView = 'pendentes';
   let chamados = [];
   let total = 0;
   let totalPages = 1;
@@ -78,6 +79,28 @@
   }
 
   $: isRefreshing, syncHeaderRefresh();
+  $: listView, syncHeaderViewToggle();
+
+  function syncHeaderViewToggle({ enabled = true } = {}) {
+    if (!enabled) {
+      toolShellViewToggle.set(null);
+      return;
+    }
+
+    const showingResolved = listView === 'resolvidos';
+    toolShellViewToggle.set({
+      label: showingResolved ? 'Pendentes' : 'Resolvidos',
+      title: showingResolved ? 'Voltar para a fila de pendentes' : 'Ver ALAs resolvidos',
+      active: showingResolved,
+      onClick: toggleListView
+    });
+  }
+
+  function toggleListView() {
+    listView = listView === 'resolvidos' ? 'pendentes' : 'resolvidos';
+    page = 1;
+    carregarChamados();
+  }
 
   async function carregarChamados({ silent = false } = {}) {
     if (!(currentUser || '').trim()) {
@@ -92,7 +115,8 @@
       const data = await fetchPortalCensupChamados(currentUser, {
         q: searchQuery,
         page,
-        limit: pageSize
+        limit: pageSize,
+        view: listView
       });
       chamados = data.chamados || [];
       total = data.total || 0;
@@ -203,6 +227,7 @@
       toolShellTitle.set(`ALA-${pedido}`);
       toolShellBackHandler.set(() => fecharDetalhe());
       syncHeaderSearch({ enabled: false });
+      syncHeaderViewToggle({ enabled: false });
       if (typeof document !== 'undefined') {
         document.title = `ALA-${pedido}`;
       }
@@ -210,6 +235,7 @@
       toolShellTitle.set(null);
       toolShellBackHandler.set(null);
       syncHeaderSearch({ enabled: true });
+      syncHeaderViewToggle({ enabled: true });
       if (typeof document !== 'undefined') {
         document.title = 'Portal CENSUP';
       }
@@ -301,6 +327,7 @@
   onMount(async () => {
     syncHeaderRefresh();
     syncHeaderSearch({ enabled: true });
+    syncHeaderViewToggle({ enabled: true });
     toolShellThemeToggle.set(true);
     tabulacoesList = await fetchTabulacoesList();
     await carregarChamados();
@@ -498,7 +525,9 @@
               </tr>
             {:else if chamados.length === 0}
               <tr>
-                <td colspan="9" class="empty-cell">Sem dados na tabela</td>
+                <td colspan="9" class="empty-cell">
+                  {listView === 'resolvidos' ? 'Nenhum ALA resolvido' : 'Sem dados na tabela'}
+                </td>
               </tr>
             {:else}
               {#each chamados as item (item.id)}
