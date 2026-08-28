@@ -104,7 +104,8 @@ export function registerPortalCensupRoutes(app) {
       const result = await listChamados({
         q: req.query.q || '',
         page: req.query.page,
-        limit: req.query.limit
+        limit: req.query.limit,
+        view: req.query.view || 'pendentes'
       });
 
       res.json({ success: true, ...result });
