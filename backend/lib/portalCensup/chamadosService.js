@@ -524,10 +524,12 @@ function currentUserFallback(chamado) {
   return chamado.projetista || chamado.usuarioAnalise || null;
 }
 
-function filterChamados(chamados, { q = '' } = {}) {
+function filterChamados(chamados, { q = '', filaStatus = 'na_fila' } = {}) {
+  const status = filaStatus === 'finalizada' ? 'finalizada' : 'na_fila';
+  const byStatus = (chamados || []).filter((item) => (item.filaStatus || 'na_fila') === status);
   const query = (q || '').trim().toLowerCase();
-  if (!query) return chamados;
-  return chamados.filter((item) => {
+  if (!query) return byStatus;
+  return byStatus.filter((item) => {
     const haystack = [
       item.pedido,
       item.cidade,
@@ -563,8 +565,8 @@ function emptyList({ page = 1, limit = 10, source = 'supabase' } = {}) {
   };
 }
 
-function paginateStore(store, { q = '', page = 1, limit = 10 } = {}, extra = {}) {
-  const filtered = filterChamados(store.chamados, { q });
+function paginateStore(store, { q = '', page = 1, limit = 10, filaStatus = 'na_fila' } = {}, extra = {}) {
+  const filtered = filterChamados(store.chamados, { q, filaStatus });
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
   const start = (safePage - 1) * safeLimit;
@@ -591,9 +593,15 @@ function withListLabels(chamados) {
   }));
 }
 
-export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
+export function resolvePortalCensupFilaStatus(view = 'pendentes') {
+  return view === 'resolvidos' ? 'finalizada' : 'na_fila';
+}
+
+export async function listChamados({ q = '', page = 1, limit = 10, view = 'pendentes' } = {}) {
+  const filaStatus = resolvePortalCensupFilaStatus(view);
+
   if (isPortalCensupSupabaseAvailable()) {
-    const fromDb = await dbListChamadosNaFila({ q, page, limit });
+    const fromDb = await dbListChamadosNaFila({ q, page, limit, filaStatus });
     syncJsonFromSupabase().catch((err) => {
       console.warn('⚠️ [PortalCENSUP] Não atualizou o JSON local a partir da table:', err.message);
     });
@@ -604,11 +612,16 @@ export async function listChamados({ q = '', page = 1, limit = 10 } = {}) {
       page: fromDb?.page || page,
       limit: fromDb?.limit || limit,
       totalPages: Math.max(1, Math.ceil(dbTotal / (fromDb?.limit || limit || 10))),
-      source: 'supabase'
+      source: 'supabase',
+      view: view === 'resolvidos' ? 'resolvidos' : 'pendentes',
+      filaStatus
     };
   }
 
-  return paginateStore(await readStore(), { q, page, limit });
+  return paginateStore(await readStore(), { q, page, limit, filaStatus }, {
+    view: view === 'resolvidos' ? 'resolvidos' : 'pendentes',
+    filaStatus
+  });
 }
 
 export async function getChamadoById(id) {
@@ -872,9 +885,11 @@ export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigid
 
   if (correto === true) {
     next.tabulacaoStatus = 'aprovada';
+    next.filaStatus = 'finalizada';
   } else if (tabulacaoCorrigida) {
     next.tabulacaoFinal = tabulacaoCorrigida;
     next.tabulacaoStatus = 'corrigida';
+    next.filaStatus = 'finalizada';
   }
 
   await upsertChamado(next);
