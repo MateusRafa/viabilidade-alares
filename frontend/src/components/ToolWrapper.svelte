@@ -1,5 +1,5 @@
 <script>
-  import { toolShellHeaderAction, toolShellSearch, toolShellThemeToggle } from '../toolShellStore.js';
+  import { toolShellHeaderAction, toolShellSearch, toolShellThemeToggle, toolShellViewToggle } from '../toolShellStore.js';
   import { theme } from '../themeStore.js';
 
   export let toolTitle = 'Ferramenta';
@@ -12,6 +12,7 @@
 
   $: headerAction = $toolShellHeaderAction;
   $: searchConfig = $toolShellSearch;
+  $: viewToggle = $toolShellViewToggle;
   $: showThemeToggle = $toolShellThemeToggle;
   $: isDark = $theme === 'dark';
 
@@ -94,6 +95,19 @@
             </svg>
           </button>
         </div>
+      {/if}
+
+      {#if viewToggle?.onClick}
+        <button
+          class="header-view-toggle"
+          class:active={viewToggle.active}
+          on:click|stopPropagation={viewToggle.onClick}
+          aria-label={viewToggle.label || 'Alternar visualização'}
+          title={viewToggle.title || viewToggle.label || 'Alternar visualização'}
+          type="button"
+        >
+          {viewToggle.label}
+        </button>
       {/if}
 
       {#if showThemeToggle}
@@ -274,6 +288,29 @@
     background: rgba(255, 255, 255, 0.35);
   }
 
+  .header-view-toggle {
+    height: 36px;
+    padding: 0 0.75rem;
+    border: none;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.2);
+    color: white;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s ease;
+  }
+
+  .header-view-toggle:hover {
+    background: rgba(255, 255, 255, 0.3);
+  }
+
+  .header-view-toggle.active {
+    background: rgba(255, 255, 255, 0.38);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  }
+
   .header-action-button:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.3);
   }
@@ -349,6 +386,11 @@
 
     .header-search-input {
       width: min(180px, 40vw);
+    }
+
+    .header-view-toggle {
+      padding: 0 0.55rem;
+      font-size: 0.75rem;
     }
   }
 </style>
