@@ -30,11 +30,12 @@ export async function syncPortalCensupSupabase(usuario) {
   return data;
 }
 
-export async function fetchPortalCensupChamados(usuario, { q = '', page = 1, limit = 10 } = {}) {
+export async function fetchPortalCensupChamados(usuario, { q = '', page = 1, limit = 10, view = 'pendentes' } = {}) {
   const params = new URLSearchParams({
     q,
     page: String(page),
-    limit: String(limit)
+    limit: String(limit),
+    view
   });
 
   const response = await fetch(getApiUrl(`/api/portal-censup/chamados?${params}`), {
