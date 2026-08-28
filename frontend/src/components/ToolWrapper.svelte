@@ -99,14 +99,29 @@
 
       {#if viewToggle?.onClick}
         <button
-          class="header-view-toggle"
+          class="header-action-button header-view-toggle"
           class:active={viewToggle.active}
           on:click|stopPropagation={viewToggle.onClick}
           aria-label={viewToggle.label || 'Alternar visualização'}
           title={viewToggle.title || viewToggle.label || 'Alternar visualização'}
           type="button"
         >
-          {viewToggle.label}
+          <svg class="view-toggle-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="censup-table-icon-header" x1="4" y1="4" x2="20" y2="10" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#7B68EE" />
+                <stop offset="1" stop-color="#6495ED" />
+              </linearGradient>
+            </defs>
+            <rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2.2" />
+            <rect x="4.2" y="4.2" width="15.6" height="5.4" rx="1.2" class="view-toggle-header" />
+            <path d="M3 10.2h18" stroke="currentColor" stroke-width="2.2" />
+            <path d="M8.2 10.2v10.6" stroke="currentColor" stroke-width="2.2" />
+            <path d="M3 14.6h5.2" stroke="currentColor" stroke-width="2.2" />
+            <path d="M8.2 14.6h12.8" stroke="currentColor" stroke-width="2.2" />
+            <path d="M3 19h5.2" stroke="currentColor" stroke-width="2.2" />
+            <path d="M8.2 19h12.8" stroke="currentColor" stroke-width="2.2" />
+          </svg>
         </button>
       {/if}
 
@@ -288,27 +303,12 @@
     background: rgba(255, 255, 255, 0.35);
   }
 
-  .header-view-toggle {
-    height: 36px;
-    padding: 0 0.75rem;
-    border: none;
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.2);
-    color: white;
-    font-size: 0.82rem;
-    font-weight: 600;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.2s ease;
+  .header-view-toggle .view-toggle-header {
+    fill: url(#censup-table-icon-header);
   }
 
-  .header-view-toggle:hover {
-    background: rgba(255, 255, 255, 0.3);
-  }
-
-  .header-view-toggle.active {
-    background: rgba(255, 255, 255, 0.38);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  .header-view-toggle.active .view-toggle-header {
+    fill: #ffffff;
   }
 
   .header-action-button:hover:not(:disabled) {
@@ -386,11 +386,6 @@
 
     .header-search-input {
       width: min(180px, 40vw);
-    }
-
-    .header-view-toggle {
-      padding: 0 0.55rem;
-      font-size: 0.75rem;
     }
   }
 </style>
