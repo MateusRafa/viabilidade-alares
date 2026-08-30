@@ -7,6 +7,9 @@
     "dev": "node --watch server.js",
     "evaluate:diagramacao": "node scripts/evaluate-diagramacao.js",
     "agenda-bot:login": "node scripts/agenda-bot-login.js",
+    "cluster:verify": "node scripts/cluster/phase0-verify.js",
+    "cluster:copy-data": "node scripts/cluster/phase0-copy-data.js",
+    "cluster:copy-rpcs": "node scripts/cluster/phase0-copy-rpcs.js",
     "playwright:install": "npx playwright install chromium"
   },
   "dependencies": {
@@ -19,7 +22,8 @@
     "@turf/turf": "^6.5.0",
     "martinez-polygon-clipping": "0.7.1",
     "pdfjs-dist": "^4.10.38",
-    "playwright": "^1.51.0"
+    "playwright": "^1.51.0",
+    "pg": "^8.13.1"
   }
 }
 
