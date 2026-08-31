@@ -53,7 +53,12 @@ async function insertBatches(client, table, rows) {
   if (rows.length === 0) return 0;
   let inserted = 0;
   for (let i = 0; i < rows.length; i += PAGE_SIZE) {
-    const batch = rows.slice(i, i + PAGE_SIZE);
+    const batch = rows.slice(i, i + PAGE_SIZE).map((row) => {
+      const copy = { ...row };
+      // Deixa o serial da réplica gerar id próprio (evita conflito de PK)
+      if (table !== 'coverage_calculation_progress') delete copy.id;
+      return copy;
+    });
     const { error } = await client.from(table).insert(batch);
     if (error) throw new Error(`${table} insert lote ${i / PAGE_SIZE + 1}: ${error.message}`);
     inserted += batch.length;
