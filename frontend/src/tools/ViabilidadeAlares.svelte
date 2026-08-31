@@ -33,6 +33,13 @@
   // Helper para URL da API - usando função do config.js
   // (getApiUrl já foi importado acima)
 
+  /** Headers para cluster (alternância de leitura por projetista). */
+  function clusterFetchHeaders() {
+    const h = {};
+    if (currentUser) h['X-Projetista'] = currentUser;
+    return h;
+  }
+
   // ========== CONSTANTES ==========
   // Raios de busca de CTOs (em metros)
   const SEARCH_RADIUS_INITIAL = 250; // Raio inicial de busca
@@ -1114,7 +1121,9 @@
       // Verificar se o Supabase está disponível fazendo uma busca simples
       const testLat = -23.5505; // Coordenada de teste (São Paulo)
       const testLng = -46.6333;
-      const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${testLat}&lng=${testLng}&radius=1000`));
+      const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${testLat}&lng=${testLng}&radius=1000`), {
+        headers: clusterFetchHeaders()
+      });
       if (response.ok) {
         baseDataExists = true;
         return true;
@@ -2109,7 +2118,9 @@
     }
     
     try {
-      const coverageCheckResponse = await fetch(getApiUrl(`/api/coverage/check-point?lat=${lat}&lng=${lng}`));
+      const coverageCheckResponse = await fetch(getApiUrl(`/api/coverage/check-point?lat=${lat}&lng=${lng}`), {
+        headers: clusterFetchHeaders()
+      });
       if (coverageCheckResponse.ok) {
         const coverageCheckData = await coverageCheckResponse.json();
         if (coverageCheckData.success) {
@@ -2222,7 +2233,9 @@
     try {
       console.log('📥 [ViabilidadeAlares] Carregando polígono de cobertura do backend...');
       
-      const response = await fetch(getApiUrl('/api/coverage/polygon?simplified=true'));
+      const response = await fetch(getApiUrl('/api/coverage/polygon?simplified=true'), {
+        headers: clusterFetchHeaders()
+      });
       
       if (!response.ok) {
         console.warn('⚠️ [ViabilidadeAlares] Não foi possível carregar polígonos de cobertura:', response.status);
@@ -2857,7 +2870,9 @@
       // ============================================
       console.log(`🏢 [Frontend] ETAPA 1: Buscando PRÉDIOS próximos de (${clientCoords.lat}, ${clientCoords.lng}) dentro de 100m...`);
       
-      const prediosResponse = await fetch(getApiUrl(`/api/condominios/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=100`));
+      const prediosResponse = await fetch(getApiUrl(`/api/condominios/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=100`), {
+        headers: clusterFetchHeaders()
+      });
       
       let predios = [];
       if (prediosResponse.ok) {
@@ -2916,7 +2931,9 @@
         // ============================================
         console.log(`🔍 [Frontend] ETAPA 2: Buscando CTOs próximas de (${clientCoords.lat}, ${clientCoords.lng})...`);
         
-        const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=250`));
+        const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=250`), {
+          headers: clusterFetchHeaders()
+        });
         
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
@@ -3065,7 +3082,9 @@
               const resultadosParalelos = await Promise.all(
                 grupoRaios.map(async (raio) => {
                   try {
-                    const searchResponse = await fetch(getApiUrl(`/api/ctos/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=${raio}`));
+                    const searchResponse = await fetch(getApiUrl(`/api/ctos/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=${raio}`), {
+                      headers: clusterFetchHeaders()
+                    });
                     
                     if (!searchResponse.ok) {
                       return { raio, success: false, error: `HTTP ${searchResponse.status}`, ctos: [] };
