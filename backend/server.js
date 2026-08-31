@@ -10,10 +10,20 @@ import { fileURLToPath } from 'url';
 import multer from 'multer';
 import * as turf from '@turf/turf';
 import { union as martinezUnion } from 'martinez-polygon-clipping';
-import supabase, { testSupabaseConnection, checkTables, isSupabaseAvailable } from './supabase.js';
+import supabasePrimary, { testSupabaseConnection, checkTables, isSupabaseAvailable } from './supabase.js';
+import {
+  resolveReadDbForRequest,
+  dualWrite,
+  mirrorClusterTables,
+  isClusterEnabled,
+  logClusterBoot
+} from './lib/supabaseCluster/index.js';
 import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
 import { bootstrapAgendaBotIfEnabled } from './lib/portalCensup/agendaBot/index.js';
+
+/** Cliente primary (não-cluster / fallback). Alias histórico. */
+const supabase = supabasePrimary;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +35,7 @@ const PORT = process.env.PORT || 3001;
 console.log('🔧 [Config] PORT:', PORT);
 console.log('🔧 [Config] FRONTEND_URL:', process.env.FRONTEND_URL || 'Não configurado (permitindo todas as origens)');
 console.log('🔧 [Config] DATA_DIR:', process.env.DATA_DIR || './data');
+logClusterBoot();
 
 // Middleware CORS - Configuração robusta para produção
 // Permitir todas as origens por padrão - DEVE SER O PRIMEIRO MIDDLEWARE
@@ -43,7 +54,7 @@ app.use((req, res, next) => {
       res.setHeader('Access-Control-Allow-Origin', '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Content-Length, X-Usuario, x-usuario');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Content-Length, X-Usuario, x-usuario, X-Projetista, x-projetista');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Max-Age', '86400'); // 24 horas
     res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
@@ -88,7 +99,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Função auxiliar para deletar todos os polígonos de cobertura
+// Função auxiliar para deletar todos os polígonos de cobertura (dual-write se cluster on)
 async function deleteAllCoveragePolygons() {
   try {
     if (!supabase || !isSupabaseAvailable()) {
@@ -97,44 +108,31 @@ async function deleteAllCoveragePolygons() {
     }
 
     console.log('🗑️ [Polygons] Deletando todos os polígonos de cobertura...');
-    
-    // Verificar quantos polígonos existem
-    const { count: countBefore } = await supabase
-      .from('coverage_polygons')
-      .select('*', { count: 'exact', head: true });
-    
-    console.log(`📊 [Polygons] Polígonos existentes antes da deleção: ${countBefore || 0}`);
-    
-    if (countBefore && countBefore > 0) {
-      // Deletar todos os polígonos
-      const { error: deleteError, count: deleteCount } = await supabase
-        .from('coverage_polygons')
-        .delete()
-        .gte('created_at', '1970-01-01T00:00:00Z'); // Condição sempre verdadeira
-      
-      if (deleteError) {
-        console.error('❌ [Polygons] Erro ao deletar polígonos:', deleteError);
-        return { success: false, error: deleteError.message };
-      }
-      
-      console.log(`✅ [Polygons] ${deleteCount || countBefore} polígono(s) deletado(s) com sucesso`);
-      
-      // Verificar que a deleção foi bem-sucedida
-      const { count: countAfter } = await supabase
+
+    const results = await dualWrite(async (client, label) => {
+      const { count: countBefore } = await client
         .from('coverage_polygons')
         .select('*', { count: 'exact', head: true });
-      
-      if (countAfter && countAfter > 0) {
-        console.warn(`⚠️ [Polygons] AINDA EXISTEM ${countAfter} polígonos após deleção!`);
-      } else {
-        console.log(`✅ [Polygons] Confirmação: Tabela coverage_polygons está vazia`);
+
+      console.log(`📊 [Polygons][${label}] antes: ${countBefore || 0}`);
+
+      if (!countBefore || countBefore === 0) {
+        return { deletedCount: 0 };
       }
-      
-      return { success: true, deletedCount: deleteCount || countBefore };
-    } else {
-      console.log(`ℹ️ [Polygons] Tabela coverage_polygons já está vazia, nada para deletar`);
-      return { success: true, deletedCount: 0 };
-    }
+
+      const { error: deleteError, count: deleteCount } = await client
+        .from('coverage_polygons')
+        .delete()
+        .gte('created_at', '1970-01-01T00:00:00Z');
+
+      if (deleteError) throw deleteError;
+
+      console.log(`✅ [Polygons][${label}] deletados: ${deleteCount || countBefore}`);
+      return { deletedCount: deleteCount || countBefore };
+    });
+
+    const deletedCount = results[0]?.value?.deletedCount || 0;
+    return { success: true, deletedCount };
   } catch (err) {
     console.error('❌ [Polygons] Erro ao deletar polígonos:', err);
     return { success: false, error: err.message };
@@ -848,6 +846,8 @@ async function readCTOsFromSupabase() {
 // Esta é a solução para resolver o problema de memória - busca apenas CTOs próximas
 app.get('/api/ctos/nearby', async (req, res) => {
   try {
+    const __clusterRead = resolveReadDbForRequest(req, res);
+    const supabase = __clusterRead.db || supabasePrimary;
     // Garantir headers CORS
     const origin = req.headers.origin;
     if (origin) {
@@ -1749,6 +1749,22 @@ app.post('/api/coverage/calculate', async (req, res) => {
         console.log(`   - Lotes processados: ${batchNumber}`);
         console.log(`   - Método: PostGIS (via Supabase)`);
         console.log(`✅ [API] ==========================================`);
+
+        if (isClusterEnabled()) {
+          uploadProgress.message = 'Espelhando cobertura na réplica...';
+          const mirrorResult = await mirrorClusterTables({
+            tables: ['coverage_polygons', 'coverage_calculation_progress']
+          });
+          if (!mirrorResult.success) {
+            console.error('❌ [Cluster] Mirror pós-cálculo falhou:', mirrorResult.error);
+            uploadProgress.message =
+              'Área criada no primary; sync réplica pendente: ' + (mirrorResult.error || 'erro');
+            uploadProgress.syncPending = true;
+          } else if (!mirrorResult.skipped) {
+            console.log('✅ [Cluster] Mirror pós-cálculo OK');
+            uploadProgress.message = 'Área de cobertura criada com sucesso (cluster sincronizado)!';
+          }
+        }
       } catch (err) {
         console.error('❌ [API] Erro no processamento em background:', err);
         uploadProgress.stage = 'error';
@@ -1878,6 +1894,8 @@ app.get('/api/coverage/calculate-status', async (req, res) => {
 // Rota para obter polígono de cobertura ativo
 app.get('/api/coverage/polygon', async (req, res) => {
   try {
+    const __clusterRead = resolveReadDbForRequest(req, res);
+    const supabase = __clusterRead.db || supabasePrimary;
     // Garantir headers CORS
     const origin = req.headers.origin;
     if (origin) {
@@ -2083,6 +2101,8 @@ app.post('/api/coverage/calculate-polygon-for-ctos', async (req, res) => {
 // Rota para verificar se um ponto está dentro da cobertura
 app.get('/api/coverage/check-point', async (req, res) => {
   try {
+    const __clusterRead = resolveReadDbForRequest(req, res);
+    const supabase = __clusterRead.db || supabasePrimary;
     // Garantir headers CORS
     const origin = req.headers.origin;
     if (origin) {
@@ -2174,6 +2194,8 @@ function escapeLikePattern(pattern) {
 
 app.get('/api/ctos/search', async (req, res) => {
   try {
+    const __clusterRead = resolveReadDbForRequest(req, res);
+    const supabase = __clusterRead.db || supabasePrimary;
     // Garantir headers CORS
     const origin = req.headers.origin;
     if (origin) {
@@ -2543,6 +2565,8 @@ app.post('/api/ctos/caminhos-rede-batch', async (req, res) => {
 // Rota OTIMIZADA: Buscar apenas prédios/condomínios dentro de 250m
 app.get('/api/condominios/nearby', async (req, res) => {
   try {
+    const __clusterRead = resolveReadDbForRequest(req, res);
+    const supabase = __clusterRead.db || supabasePrimary;
     // Garantir headers CORS
     const origin = req.headers.origin;
     if (origin) {
@@ -3439,136 +3463,60 @@ app.delete('/api/base/delete', requireAdmin, async (req, res) => {
       // Continuar mesmo se falhar - não é crítico
     }
     
-    // Limpar registros de cálculo em progresso (se existirem)
+    // Limpar progresso + CTOs nos write clients (dual-write se cluster on)
     if (supabase && isSupabaseAvailable()) {
       try {
-        console.log('🗑️ [API] Limpando registros de cálculo em progresso...');
-        const { error: clearProgressError } = await supabase
-          .from('coverage_calculation_progress')
-          .delete()
-          .neq('calculation_id', ''); // Deletar todos os registros
-        
-        if (clearProgressError) {
-          console.warn(`⚠️ [API] Aviso ao limpar progresso: ${clearProgressError.message}`);
-        } else {
-          console.log(`✅ [API] Registros de cálculo limpos`);
-        }
-      } catch (clearErr) {
-        console.warn(`⚠️ [API] Erro ao limpar progresso (não crítico):`, clearErr.message);
-      }
-    }
+        console.log('🗑️ [API] Deletando progresso e CTOs (cluster dual-write se ativo)...');
 
-    // Tentar deletar do Supabase primeiro
-    if (supabase && isSupabaseAvailable()) {
-      try {
-        console.log('🗑️ [API] Deletando CTOs do Supabase...');
-        
-        // Primeiro, verificar quantos registros existem
-        const { count: countBefore } = await supabase
-          .from('ctos')
-          .select('*', { count: 'exact', head: true });
-        
-        console.log(`📊 [API] Registros existentes antes da deleção: ${countBefore || 0}`);
-        
-        if (countBefore && countBefore > 0) {
-          // Deletar TODOS os registros usando uma condição que sempre seja verdadeira
-          let deleteSuccess = false;
-          
-          try {
-            const { error: deleteError, count: countResult } = await supabase
-              .from('ctos')
-              .delete()
-              .gte('created_at', '1970-01-01T00:00:00Z'); // Condição sempre verdadeira
-            
-            if (deleteError) {
-              throw deleteError;
-            }
-            
-            deletedCount = countResult || countBefore;
-            deleteSuccess = true;
-            console.log(`✅ [API] CTOs deletadas: ${deletedCount} registros`);
-          } catch (deleteError) {
-            console.warn('⚠️ [API] Método 1 falhou, tentando método alternativo...', deleteError.message);
-            
-            // Método alternativo: Deletar usando neq com UUID impossível
-            try {
-              const { error: deleteError2, count: countResult2 } = await supabase
-                .from('ctos')
-                .delete()
-                .neq('id', '00000000-0000-0000-0000-000000000000');
-              
-              if (deleteError2) {
-                throw deleteError2;
-              }
-              
-              deletedCount = countResult2 || countBefore;
-              deleteSuccess = true;
-              console.log(`✅ [API] CTOs deletadas (método alternativo): ${deletedCount} registros`);
-            } catch (deleteError2) {
-              console.error('❌ [API] Método alternativo também falhou:', deleteError2);
-              
-              // Método 3: Deletar em lotes (última tentativa)
-              console.log('⚠️ [API] Tentando deletar em lotes...');
-              let deletedInBatches = 0;
-              let batchSize = 1000;
-              let hasMore = true;
-              
-              while (hasMore) {
-                const { data: batch, error: batchError } = await supabase
-                  .from('ctos')
-                  .select('id')
-                  .limit(batchSize);
-                
-                if (batchError) {
-                  throw batchError;
-                }
-                
-                if (!batch || batch.length === 0) {
-                  hasMore = false;
-                  break;
-                }
-                
-                const idsToDelete = batch.map(row => row.id);
-                const { error: batchDeleteError } = await supabase
-                  .from('ctos')
-                  .delete()
-                  .in('id', idsToDelete);
-                
-                if (batchDeleteError) {
-                  throw batchDeleteError;
-                }
-                
-                deletedInBatches += idsToDelete.length;
-                console.log(`🗑️ [API] Lote deletado: ${idsToDelete.length} registros (total: ${deletedInBatches})`);
-                
-                if (batch.length < batchSize) {
-                  hasMore = false;
-                }
-              }
-              
-              deletedCount = deletedInBatches;
-              deleteSuccess = true;
-              console.log(`✅ [API] CTOs deletadas em lotes: ${deletedCount} registros`);
-            }
+        const writeResults = await dualWrite(async (client, label) => {
+          const { error: clearProgressError } = await client
+            .from('coverage_calculation_progress')
+            .delete()
+            .neq('calculation_id', '');
+          if (clearProgressError) {
+            console.warn(`⚠️ [API][${label}] progresso: ${clearProgressError.message}`);
           }
-          
-          // Verificar que a deleção foi bem-sucedida
-          const { count: countAfter } = await supabase
+
+          const { count: countBefore } = await client
             .from('ctos')
             .select('*', { count: 'exact', head: true });
-          
-          if (countAfter && countAfter > 0) {
-            console.warn(`⚠️ [API] AINDA EXISTEM ${countAfter} registros após deleção!`);
-            console.warn(`⚠️ [API] Isso pode indicar um problema. Continuando...`);
-          } else {
-            console.log(`✅ [API] Confirmação: Tabela ctos está vazia (${countAfter || 0} registros)`);
+
+          console.log(`📊 [API][${label}] CTOs antes: ${countBefore || 0}`);
+          if (!countBefore || countBefore === 0) {
+            return { deletedCount: 0 };
           }
-          
-          deletedFromSupabase = true;
-        } else {
-          console.log(`ℹ️ [API] Tabela ctos já está vazia, nada para deletar`);
-          deletedFromSupabase = true;
-        }
+
+          let deleted = 0;
+          try {
+            const { error, count } = await client
+              .from('ctos')
+              .delete()
+              .gte('created_at', '1970-01-01T00:00:00Z');
+            if (error) throw error;
+            deleted = count || countBefore;
+          } catch (e1) {
+            console.warn(`⚠️ [API][${label}] delete método 1: ${e1.message}`);
+            let hasMore = true;
+            while (hasMore) {
+              const { data: batch, error: batchError } = await client
+                .from('ctos')
+                .select('id')
+                .limit(1000);
+              if (batchError) throw batchError;
+              if (!batch || batch.length === 0) break;
+              const { error: delErr } = await client.from('ctos').delete().in('id', batch.map((r) => r.id));
+              if (delErr) throw delErr;
+              deleted += batch.length;
+              if (batch.length < 1000) hasMore = false;
+            }
+          }
+
+          console.log(`✅ [API][${label}] CTOs deletadas: ${deleted}`);
+          return { deletedCount: deleted };
+        });
+
+        deletedCount = writeResults[0]?.value?.deletedCount || 0;
+        deletedFromSupabase = true;
       } catch (supabaseErr) {
         console.error('❌ [API] ===== ERRO NA DELEÇÃO SUPABASE =====');
         console.error('❌ [API] Erro ao deletar do Supabase:', supabaseErr.message);
@@ -7424,6 +7372,22 @@ app.post('/api/upload-base', (req, res, next) => {
             uploadProgress.importedRows = importedRows;
             uploadProgress.totalCTOs = importedRows;
             uploadProgress.message = 'Base de dados atualizada com sucesso!';
+
+            if (isClusterEnabled()) {
+              uploadProgress.message = 'Espelhando base na réplica...';
+              const mirrorResult = await mirrorClusterTables({
+                tables: ['ctos', 'condominios']
+              });
+              if (!mirrorResult.success) {
+                console.error('❌ [Cluster] Mirror pós-upload falhou:', mirrorResult.error);
+                uploadProgress.message =
+                  'Base atualizada no primary; sync réplica pendente: ' + (mirrorResult.error || 'erro');
+                uploadProgress.syncPending = true;
+              } else if (!mirrorResult.skipped) {
+                console.log('✅ [Cluster] Mirror pós-upload OK');
+                uploadProgress.message = 'Base de dados atualizada com sucesso (cluster sincronizado)!';
+              }
+            }
             
             // Registrar no histórico de uploads
             if (importedRows > 0 || idsToDelete.length > 0 || result.ctosToUpdate.length > 0) {
