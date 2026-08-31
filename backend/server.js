@@ -14,6 +14,7 @@ import supabasePrimary, { testSupabaseConnection, checkTables, isSupabaseAvailab
 import {
   resolveReadDbForRequest,
   dualWrite,
+  getWriteClients,
   mirrorClusterTables,
   isClusterEnabled,
   logClusterBoot
@@ -6079,6 +6080,46 @@ async function loadExistingCTOs(supabaseClient, progressCallback = null) {
  * @returns {Promise<Object>} - { deleted: number } - Quantidade de CTOs deletadas
  * @throws {Error} - Se houver erro ao deletar
  */
+/** Clientes para escrita de CTOs no upload (primary + replica se cluster on). */
+function getUploadWriteClients(fallbackClient) {
+  const clients = getWriteClients();
+  if (clients.length > 0) return clients;
+  if (fallbackClient) return [{ label: 'primary', client: fallbackClient }];
+  return [];
+}
+
+/**
+ * Executa a mesma operação de escrita em todos os backends do cluster.
+ * Primary deve existir; falha na réplica propaga erro (não deixa B2 desatualizado em silêncio).
+ */
+async function dualWriteUpload(fallbackClient, fn) {
+  const clients = getUploadWriteClients(fallbackClient);
+  if (clients.length === 0) {
+    throw new Error('Nenhum cliente Supabase para escrita do upload');
+  }
+  if (clients.length > 1) {
+    console.log(`🪞 [Cluster] dual-write upload → ${clients.map((c) => c.label).join(' + ')}`);
+  }
+  const settled = await Promise.allSettled(
+    clients.map(({ client, label }) => Promise.resolve(fn(client, label)))
+  );
+  const failures = [];
+  const values = [];
+  settled.forEach((result, i) => {
+    const label = clients[i].label;
+    if (result.status === 'fulfilled') values.push({ label, value: result.value });
+    else {
+      failures.push({ label, error: result.reason });
+      console.error(`❌ [Cluster] upload write ${label}:`, result.reason?.message || result.reason);
+    }
+  });
+  if (failures.length > 0) {
+    const msg = failures.map((f) => `${f.label}: ${f.error?.message || f.error}`).join(' | ');
+    throw new Error(`Cluster upload dual-write falhou: ${msg}`);
+  }
+  return values;
+}
+
 async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback = null) {
   if (!idsToDelete || idsToDelete.length === 0) {
     console.log('ℹ️ [Upload] Nenhuma CTO para deletar (Cenário 1)');
@@ -6098,20 +6139,21 @@ async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback
       batchNumber++;
       const batch = idsToDelete.slice(i, i + DELETE_BATCH_SIZE);
       
-      // Deletar lote usando .in() para deletar múltiplos IDs de uma vez
-      const { error, count } = await supabaseClient
-        .from('ctos')
-        .delete()
-        .in('id_cto', batch)
-        .select('id_cto', { count: 'exact', head: true });
-      
-      if (error) {
-        console.error(`❌ [Upload] Erro ao deletar lote ${batchNumber}:`, error);
-        throw new Error(`Erro ao deletar CTOs (lote ${batchNumber}): ${error.message}`);
-      }
-      
-      // count pode ser null, então usar batch.length como fallback
-      const deletedInBatch = count !== null ? count : batch.length;
+      // Deletar lote em primary (+ replica se cluster on)
+      await dualWriteUpload(supabaseClient, async (client, label) => {
+        const { error, count } = await client
+          .from('ctos')
+          .delete()
+          .in('id_cto', batch)
+          .select('id_cto', { count: 'exact', head: true });
+
+        if (error) {
+          throw new Error(`[${label}] ${error.message}`);
+        }
+        return count !== null ? count : batch.length;
+      });
+
+      const deletedInBatch = batch.length;
       totalDeleted += deletedInBatch;
       
       // Atualizar progresso (se callback fornecido)
@@ -6200,23 +6242,27 @@ async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallbac
   });
 
   const updateSingleCTO = async (cto, retryCount = 0) => {
-    const { error } = await supabaseClient
-      .from('ctos')
-      .update(buildUpdateRecord(cto))
-      .eq('id_cto', cto.id_cto);
+    try {
+      await dualWriteUpload(supabaseClient, async (client, label) => {
+        const { error } = await client
+          .from('ctos')
+          .update(buildUpdateRecord(cto))
+          .eq('id_cto', cto.id_cto);
+        if (error) throw new Error(`[${label}] ${error.message}`);
+      });
+      return { ok: true };
+    } catch (err) {
+      const msg = err.message || '';
+      const isRetryable =
+        msg.includes('500') || msg.includes('timeout') || msg.includes('Cloudflare');
 
-    if (!error) return { ok: true };
+      if (isRetryable && retryCount < MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, (retryCount + 1) * 1000));
+        return updateSingleCTO(cto, retryCount + 1);
+      }
 
-    const isRetryable = error.message.includes('500')
-      || error.message.includes('timeout')
-      || error.message.includes('Cloudflare');
-
-    if (isRetryable && retryCount < MAX_RETRIES) {
-      await new Promise(resolve => setTimeout(resolve, (retryCount + 1) * 1000));
-      return updateSingleCTO(cto, retryCount + 1);
+      return { ok: false, error: msg, id_cto: cto.id_cto };
     }
-
-    return { ok: false, error: error.message, id_cto: cto.id_cto };
   };
 
   const updateBatchConcurrent = async (batch, batchNum) => {
@@ -6342,41 +6388,52 @@ async function insertCTOsInBatches(supabaseClient, ctosToInsert, progressCallbac
   const startTime = Date.now();
   const MAX_RETRIES = 3; // Número máximo de tentativas por lote
   
-  // Função auxiliar para inserir lote com retry
   const insertBatchWithRetry = async (batch, batchNum, retryCount = 0) => {
     try {
-      // Garantir que todas as CTOs do lote tenham chave_unica
-      const batchWithChave = batch.map(cto => {
-        if (!cto.chave_unica) {
-          cto.chave_unica = generateChaveUnica(cto);
+      // Garantir que todas as CTOs do lote tenham chave_unica; não forçar id (serial em cada backend)
+      const batchWithChave = batch.map((cto) => {
+        const row = { ...cto };
+        if (!row.chave_unica) {
+          row.chave_unica = generateChaveUnica(row);
         }
-        return cto;
+        delete row.id;
+        return row;
       });
-      
-      // Inserir lote no Supabase
-      const { error, data } = await supabaseClient
-        .from('ctos')
-        .insert(batchWithChave)
-        .select('id_cto');
-      
-      if (error) {
-        // Se for erro 500 (Cloudflare/Supabase) e ainda temos tentativas, retry
-        if ((error.message.includes('500') || error.message.includes('timeout') || error.message.includes('Cloudflare')) && retryCount < MAX_RETRIES) {
-          const waitTime = (retryCount + 1) * 2000; // 2s, 4s, 6s
-          console.warn(`⚠️ [Upload] Erro temporário no lote ${batchNum} (tentativa ${retryCount + 1}/${MAX_RETRIES}). Aguardando ${waitTime}ms antes de retry...`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-          return insertBatchWithRetry(batch, batchNum, retryCount + 1);
+
+      await dualWriteUpload(supabaseClient, async (client, label) => {
+        const { error, data } = await client
+          .from('ctos')
+          .insert(batchWithChave)
+          .select('id_cto');
+
+        if (error) {
+          if (
+            (error.message.includes('500') ||
+              error.message.includes('timeout') ||
+              error.message.includes('Cloudflare')) &&
+            retryCount < MAX_RETRIES
+          ) {
+            throw Object.assign(new Error(error.message), { retryable: true });
+          }
+          throw new Error(`[${label}] ${error.message}`);
         }
-        throw error;
-      }
-      
-      return data ? data.length : batchWithChave.length;
+        return data ? data.length : batchWithChave.length;
+      });
+
+      return batchWithChave.length;
     } catch (err) {
-      // Se ainda temos tentativas e é erro temporário, retry
-      if (retryCount < MAX_RETRIES && (err.message.includes('500') || err.message.includes('timeout') || err.message.includes('Cloudflare'))) {
+      const retryable =
+        err.retryable ||
+        (retryCount < MAX_RETRIES &&
+          (String(err.message).includes('500') ||
+            String(err.message).includes('timeout') ||
+            String(err.message).includes('Cloudflare')));
+      if (retryable && retryCount < MAX_RETRIES) {
         const waitTime = (retryCount + 1) * 2000;
-        console.warn(`⚠️ [Upload] Erro temporário no lote ${batchNum} (tentativa ${retryCount + 1}/${MAX_RETRIES}). Aguardando ${waitTime}ms antes de retry...`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+        console.warn(
+          `⚠️ [Upload] Erro temporário no lote ${batchNum} (tentativa ${retryCount + 1}/${MAX_RETRIES}). Aguardando ${waitTime}ms antes de retry...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitTime));
         return insertBatchWithRetry(batch, batchNum, retryCount + 1);
       }
       throw err;
@@ -7374,18 +7431,48 @@ app.post('/api/upload-base', (req, res, next) => {
             uploadProgress.message = 'Base de dados atualizada com sucesso!';
 
             if (isClusterEnabled()) {
-              uploadProgress.message = 'Espelhando base na réplica...';
-              const mirrorResult = await mirrorClusterTables({
-                tables: ['ctos', 'condominios']
-              });
-              if (!mirrorResult.success) {
-                console.error('❌ [Cluster] Mirror pós-upload falhou:', mirrorResult.error);
-                uploadProgress.message =
-                  'Base atualizada no primary; sync réplica pendente: ' + (mirrorResult.error || 'erro');
+              try {
+                const writers = getWriteClients();
+                if (writers.length >= 2) {
+                  const counts = await Promise.all(
+                    writers.map(async ({ client, label }) => {
+                      const { count, error } = await client
+                        .from('ctos')
+                        .select('*', { count: 'exact', head: true });
+                      if (error) throw new Error(`[${label}] ${error.message}`);
+                      return { label, count: count ?? 0 };
+                    })
+                  );
+                  console.log(
+                    '📊 [Cluster] Contagem pós-upload:',
+                    counts.map((c) => `${c.label}=${c.count}`).join(', ')
+                  );
+                  const primaryCount = counts.find((c) => c.label === 'primary')?.count;
+                  const replicaCount = counts.find((c) => c.label === 'replica')?.count;
+                  if (primaryCount !== replicaCount) {
+                    console.warn(
+                      `⚠️ [Cluster] Divergência ctos primary=${primaryCount} replica=${replicaCount} — iniciando mirror de correção`
+                    );
+                    uploadProgress.message = 'Corrigindo sincronização da réplica...';
+                    const mirrorResult = await mirrorClusterTables({ tables: ['ctos'] });
+                    if (!mirrorResult.success) {
+                      uploadProgress.message =
+                        'Base no primary OK; sync réplica pendente: ' + (mirrorResult.error || 'erro');
+                      uploadProgress.syncPending = true;
+                    } else {
+                      uploadProgress.message =
+                        'Base de dados atualizada com sucesso (cluster sincronizado)!';
+                    }
+                  } else {
+                    uploadProgress.message =
+                      'Base de dados atualizada com sucesso (cluster sincronizado)!';
+                  }
+                }
+              } catch (clusterCheckErr) {
+                console.error('❌ [Cluster] Verificação pós-upload:', clusterCheckErr.message);
                 uploadProgress.syncPending = true;
-              } else if (!mirrorResult.skipped) {
-                console.log('✅ [Cluster] Mirror pós-upload OK');
-                uploadProgress.message = 'Base de dados atualizada com sucesso (cluster sincronizado)!';
+                uploadProgress.message =
+                  'Base no primary OK; verificação da réplica falhou: ' + clusterCheckErr.message;
               }
             }
             
