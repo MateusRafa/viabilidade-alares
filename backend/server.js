@@ -17,14 +17,40 @@ import {
   getWriteClients,
   mirrorClusterTables,
   isClusterEnabled,
+  isClusterAvailable,
+  isActiveDbAvailable,
+  getActiveSupabaseClient,
+  getClusterStatus,
+  getClusterMode,
+  setClusterMode,
+  getClusterModeInfo,
+  initClusterMode,
   logClusterBoot
 } from './lib/supabaseCluster/index.js';
 import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
 import { bootstrapAgendaBotIfEnabled } from './lib/portalCensup/agendaBot/index.js';
 
-/** Cliente primary (não-cluster / fallback). Alias histórico. */
-const supabase = supabasePrimary;
+/** Cliente cluster-aware: respeita modo admin (primary/replica/alternate). */
+function createClusterAwareSupabase() {
+  return new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        const client = getActiveSupabaseClient() || supabasePrimary;
+        if (!client) return undefined;
+        const value = client[prop];
+        return typeof value === 'function' ? value.bind(client) : value;
+      }
+    }
+  );
+}
+
+const supabase = createClusterAwareSupabase();
+
+function isDbAvailable() {
+  return isActiveDbAvailable() || isSupabaseAvailable();
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,7 +129,7 @@ app.use((req, res, next) => {
 // Função auxiliar para deletar todos os polígonos de cobertura (dual-write se cluster on)
 async function deleteAllCoveragePolygons() {
   try {
-    if (!supabase || !isSupabaseAvailable()) {
+    if (!isDbAvailable()) {
       console.warn('⚠️ [Polygons] Supabase não disponível - não é possível deletar polígonos');
       return { success: false, error: 'Supabase não disponível' };
     }
@@ -140,11 +166,23 @@ async function deleteAllCoveragePolygons() {
   }
 }
 
+/** Escrita cluster-aware: dual-write no modo alternate, backend único nos modos primary/replica. */
+async function clusterAwareWrite(fn) {
+  if (isClusterEnabled() && isClusterAvailable() && getClusterMode() === 'alternate') {
+    return dualWrite(fn);
+  }
+  const client = getActiveSupabaseClient() || supabasePrimary;
+  if (!client) throw new Error('Nenhum cliente Supabase disponível');
+  const label = getClusterMode() === 'replica' ? 'replica' : 'primary';
+  const value = await fn(client, label);
+  return [{ label, value }];
+}
+
 // Função auxiliar para inserir entrada/saída no Supabase
 // Lida com nomes de tabelas que têm caracteres especiais
 async function inserirEntradaSaida(nomeProjetista, tipo = 'entrada') {
   // Verificar se Supabase está disponível
-  if (!supabase || !isSupabaseAvailable()) {
+  if (!isDbAvailable()) {
     console.error('❌ [Supabase] Supabase não disponível - não é possível salvar entrada/saída');
     return { success: false, error: 'Supabase não disponível' };
   }
@@ -306,6 +344,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+initClusterMode(DATA_DIR);
 
 // Configurar multer para upload de arquivos
 // OTIMIZAÇÃO DE MEMÓRIA: Usar diskStorage em vez de memoryStorage
@@ -3706,7 +3745,7 @@ async function readProjetistasAsync() {
 // Função para salvar projetistas no Supabase (nova versão)
 async function saveProjetistasToSupabase(projetistas) {
   try {
-    if (!supabase || !isSupabaseAvailable()) {
+    if (!isDbAvailable()) {
       return false; // Indica que deve usar fallback
     }
     
@@ -3724,29 +3763,22 @@ async function saveProjetistasToSupabase(projetistas) {
       };
     }).filter(p => p.nome); // Remover vazios
     
-    // Deletar todos os projetistas existentes e inserir os novos
-    // (Isso garante sincronização completa)
-    const { error: deleteError } = await supabase
-      .from('projetistas')
-      .delete()
-      .neq('id', 0); // Deletar todos (condição sempre verdadeira)
-    
-    if (deleteError) {
-      console.error('❌ [Supabase] Erro ao limpar projetistas:', deleteError);
-      return false;
-    }
-    
-    // Inserir todos os projetistas
-    if (dataToSave.length > 0) {
-      const { error: insertError } = await supabase
+    await clusterAwareWrite(async (client) => {
+      const { error: deleteError } = await client
         .from('projetistas')
-        .insert(dataToSave);
-      
-      if (insertError) {
-        console.error('❌ [Supabase] Erro ao inserir projetistas:', insertError);
-        return false;
+        .delete()
+        .neq('id', 0);
+
+      if (deleteError) throw deleteError;
+
+      if (dataToSave.length > 0) {
+        const { error: insertError } = await client
+          .from('projetistas')
+          .insert(dataToSave);
+
+        if (insertError) throw insertError;
       }
-    }
+    });
     
     console.log(`✅ [Supabase] ${dataToSave.length} projetistas salvos no Supabase`);
     if (dataToSave.length > 0) {
@@ -3910,7 +3942,7 @@ async function readTabulacoes() {
 // Função para salvar tabulações no Supabase (nova versão)
 async function saveTabulacoesToSupabase(tabulacoes) {
   try {
-    if (!supabase || !isSupabaseAvailable()) {
+    if (!isDbAvailable()) {
       return false; // Indica que deve usar fallback
     }
     
@@ -3922,29 +3954,22 @@ async function saveTabulacoesToSupabase(tabulacoes) {
       .filter(nome => nome) // Remover vazios
       .map(nome => ({ nome }));
     
-    // Deletar todas as tabulações existentes e inserir as novas
-    // (Isso garante sincronização completa)
-    const { error: deleteError } = await supabase
-      .from('tabulacoes')
-      .delete()
-      .neq('id', 0); // Deletar todos (condição sempre verdadeira)
-    
-    if (deleteError) {
-      console.error('❌ [Supabase] Erro ao limpar tabulações:', deleteError);
-      return false;
-    }
-    
-    // Inserir todas as tabulações
-    if (dataToSave.length > 0) {
-      const { error: insertError } = await supabase
+    await clusterAwareWrite(async (client) => {
+      const { error: deleteError } = await client
         .from('tabulacoes')
-        .insert(dataToSave);
-      
-      if (insertError) {
-        console.error('❌ [Supabase] Erro ao inserir tabulações:', insertError);
-        return false;
+        .delete()
+        .neq('id', 0);
+
+      if (deleteError) throw deleteError;
+
+      if (dataToSave.length > 0) {
+        const { error: insertError } = await client
+          .from('tabulacoes')
+          .insert(dataToSave);
+
+        if (insertError) throw insertError;
       }
-    }
+    });
     
     console.log(`✅ [Supabase] ${dataToSave.length} tabulações salvas no Supabase`);
     if (dataToSave.length > 0) {
@@ -4467,26 +4492,26 @@ async function insertVIALAIntoSupabase(dataToSave) {
   const maxAttempts = 12;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { error } = await supabase
-      .from('vi_ala')
-      .insert([payload]);
-
-    if (!error) {
+    try {
+      await clusterAwareWrite(async (client) => {
+        const { error } = await client.from('vi_ala').insert([payload]);
+        if (error) throw error;
+      });
       return { success: true, payload };
-    }
+    } catch (error) {
+      const missingColumn = getMissingSupabaseColumn(error?.message);
+      if (missingColumn && Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
+        console.warn(`⚠️ [Supabase] Coluna '${missingColumn}' não existe em vi_ala, removendo do insert (tentativa ${attempt})...`);
+        delete payload[missingColumn];
+        continue;
+      }
 
-    const missingColumn = getMissingSupabaseColumn(error.message);
-    if (missingColumn && Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
-      console.warn(`⚠️ [Supabase] Coluna '${missingColumn}' não existe em vi_ala, removendo do insert (tentativa ${attempt})...`);
-      delete payload[missingColumn];
-      continue;
+      return {
+        success: false,
+        error: error?.message || 'Erro ao inserir VI ALA no Supabase',
+        code: error?.code || null
+      };
     }
-
-    return {
-      success: false,
-      error: error.message || 'Erro ao inserir VI ALA no Supabase',
-      code: error.code || null
-    };
   }
 
   return {
@@ -4504,28 +4529,28 @@ async function insertVIALABatchIntoSupabase(records) {
   const maxAttempts = 12;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const { error } = await supabase
-      .from('vi_ala')
-      .insert(payload);
-
-    if (!error) {
+    try {
+      await clusterAwareWrite(async (client) => {
+        const { error } = await client.from('vi_ala').insert(payload);
+        if (error) throw error;
+      });
       return { success: true, count: payload.length };
-    }
-
-    const missingColumn = getMissingSupabaseColumn(error.message);
-    if (missingColumn && payload.some((record) => Object.prototype.hasOwnProperty.call(record, missingColumn))) {
-      console.warn(`⚠️ [Supabase] Coluna '${missingColumn}' não existe em vi_ala, removendo do lote (tentativa ${attempt})...`);
-      for (const record of payload) {
-        delete record[missingColumn];
+    } catch (error) {
+      const missingColumn = getMissingSupabaseColumn(error?.message);
+      if (missingColumn && payload.some((record) => Object.prototype.hasOwnProperty.call(record, missingColumn))) {
+        console.warn(`⚠️ [Supabase] Coluna '${missingColumn}' não existe em vi_ala, removendo do lote (tentativa ${attempt})...`);
+        for (const record of payload) {
+          delete record[missingColumn];
+        }
+        continue;
       }
-      continue;
-    }
 
-    return {
-      success: false,
-      error: error.message || 'Erro ao inserir lote de VI ALAs no Supabase',
-      code: error.code || null
-    };
+      return {
+        success: false,
+        error: error?.message || 'Erro ao inserir lote de VI ALAs no Supabase',
+        code: error?.code || null
+      };
+    }
   }
 
   return {
@@ -5012,6 +5037,91 @@ async function requireAdmin(req, res, next) {
     return res.status(500).json({ success: false, error: 'Erro ao verificar permissões' });
   }
 }
+
+// =============================================================================
+// Cluster Supabase — modo admin + sincronização B1→B2
+// =============================================================================
+
+app.get('/api/cluster/status', requireAdmin, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      ...getClusterStatus(),
+      modeInfo: getClusterModeInfo()
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/cluster/mode', requireAdmin, async (req, res) => {
+  try {
+    res.json({ success: true, ...getClusterModeInfo(), status: getClusterStatus() });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.put('/api/cluster/mode', requireAdmin, async (req, res) => {
+  try {
+    const { mode } = req.body || {};
+    if (!mode) {
+      return res.status(400).json({ success: false, error: 'Campo "mode" é obrigatório' });
+    }
+    if (!isClusterEnabled()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cluster desabilitado. Configure SUPABASE_CLUSTER_ENABLED=true'
+      });
+    }
+    if (!isClusterAvailable()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Réplica não configurada. Configure SUPABASE_REPLICA_*'
+      });
+    }
+    const saved = setClusterMode(mode);
+    res.json({
+      success: true,
+      message: `Modo alterado para ${saved.mode}`,
+      ...getClusterModeInfo(),
+      status: getClusterStatus()
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/cluster/sync', requireAdmin, async (req, res) => {
+  try {
+    if (!isClusterEnabled()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cluster desabilitado. Configure SUPABASE_CLUSTER_ENABLED=true'
+      });
+    }
+    if (!isClusterAvailable()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Réplica não configurada'
+      });
+    }
+
+    console.log(`🪞 [Cluster] Sync manual solicitado por admin (${req.body?.usuario || 'admin'})`);
+    const result = await mirrorClusterTables();
+    if (!result.success) {
+      return res.status(500).json({ success: false, ...result });
+    }
+    res.json({
+      success: true,
+      message: 'Réplica sincronizada com o primary',
+      synced: result.synced,
+      skipped: result.skipped || false
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // Rota para autenticar usuário (validar login)
 app.post('/api/auth/login', async (req, res) => {
@@ -7481,21 +7591,19 @@ app.post('/api/upload-base', (req, res, next) => {
               supabaseImported = true;
               
               try {
-                const { error: historyError } = await supabase
-                  .from('upload_history')
-                  .insert([{
-                    file_name: fileName,
-                    file_size: fileSize,
-                    total_rows: totalRows,
-                    valid_rows: result.validRows,
-                    uploaded_by: req.body?.usuario || req.user?.nome || 'Sistema'
-                  }]);
-                
-                if (historyError) {
-                  console.warn('⚠️ [Background] Erro ao registrar histórico (não crítico):', historyError);
-                } else {
-                  console.log('✅ [Background] Histórico de upload registrado');
-                }
+                await clusterAwareWrite(async (client) => {
+                  const { error: historyError } = await client
+                    .from('upload_history')
+                    .insert([{
+                      file_name: fileName,
+                      file_size: fileSize,
+                      total_rows: totalRows,
+                      valid_rows: result.validRows,
+                      uploaded_by: req.body?.usuario || req.user?.nome || 'Sistema'
+                    }]);
+                  if (historyError) throw historyError;
+                });
+                console.log('✅ [Background] Histórico de upload registrado');
               } catch (historyErr) {
                 console.warn('⚠️ [Background] Erro ao registrar histórico (não crítico):', historyErr.message);
               }
