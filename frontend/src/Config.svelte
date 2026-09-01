@@ -59,6 +59,19 @@
   let baseLastModified = null;
   let coverageLastModified = null; // Data da última atualização da mancha de cobertura
   let uploadPollInterval = null; // Intervalo de polling para verificar status
+  let uploadSoftWarnTimeoutId = null;
+  let uploadHardStopTimeoutId = null;
+
+  function clearUploadWatchdogTimers() {
+    if (uploadSoftWarnTimeoutId) {
+      clearTimeout(uploadSoftWarnTimeoutId);
+      uploadSoftWarnTimeoutId = null;
+    }
+    if (uploadHardStopTimeoutId) {
+      clearTimeout(uploadHardStopTimeoutId);
+      uploadHardStopTimeoutId = null;
+    }
+  }
   let showDeleteBaseModal = false; // Modal de confirmação para deletar base
   let deletingBase = false; // Flag para indicar que está deletando base
   let showChangeRoleModal = false; // Modal para alterar tipo de usuário
@@ -69,6 +82,20 @@
   let toolPermissions = {}; // Permissões de ferramentas: { 'tool-id': true/false }
   let loadingChangeRole = false; // Estado de carregamento do modal
   let totalCTOsLoaded = 0; // Total de CTOs carregadas (para exibir na mensagem)
+  
+  // Cluster Supabase (admin)
+  let clusterMode = 'alternate';
+  let clusterEnabled = false;
+  let clusterAvailable = false;
+  let clusterLoading = false;
+  let clusterSyncing = false;
+  let clusterMessage = '';
+  let clusterError = '';
+  const clusterModeLabels = {
+    primary: 'Backend Principal (B1)',
+    replica: 'Backend Secundário (B2)',
+    alternate: 'Ambos em alternância'
+  };
   
   // Variáveis para cálculo de mancha (separado do upload)
   let calculatingCoverage = false;
@@ -436,7 +463,8 @@
       loadTabulacoes(),
       loadBaseLastModified(),
       loadCoverageLastModified(),
-      loadViAlas()
+      loadViAlas(),
+      loadClusterStatus()
     ]).catch(err => {
       console.error('Erro ao carregar dados:', err);
     });
@@ -1079,6 +1107,85 @@
     } catch (err) {
       console.error('❌ Erro ao carregar VI ALAs:', err);
       viAlasList = [];
+    }
+  }
+
+  async function loadClusterStatus() {
+    if (userTipo !== 'admin') return;
+    clusterLoading = true;
+    clusterError = '';
+    try {
+      const response = await fetch(getApiUrl('/api/cluster/mode'), {
+        headers: { 'X-Usuario': currentUser || '' }
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Falha ao carregar status do cluster');
+      }
+      clusterMode = data.mode || 'alternate';
+      clusterEnabled = Boolean(data.status?.enabled);
+      clusterAvailable = Boolean(data.status?.available);
+    } catch (err) {
+      clusterError = err.message || 'Erro ao carregar cluster';
+    } finally {
+      clusterLoading = false;
+    }
+  }
+
+  async function changeClusterMode(mode) {
+    if (userTipo !== 'admin' || clusterLoading || clusterSyncing) return;
+    clusterLoading = true;
+    clusterMessage = '';
+    clusterError = '';
+    try {
+      const response = await fetch(getApiUrl('/api/cluster/mode'), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Usuario': currentUser || ''
+        },
+        body: JSON.stringify({ mode, usuario: currentUser || '' })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Falha ao alterar modo');
+      }
+      clusterMode = data.mode || mode;
+      clusterEnabled = Boolean(data.status?.enabled);
+      clusterAvailable = Boolean(data.status?.available);
+      clusterMessage = data.message || 'Modo atualizado';
+    } catch (err) {
+      clusterError = err.message || 'Erro ao alterar modo';
+    } finally {
+      clusterLoading = false;
+    }
+  }
+
+  async function syncClusterReplica() {
+    if (userTipo !== 'admin' || clusterSyncing) return;
+    if (!confirm('Sincronizar B2 com B1? Isso pode levar vários minutos.')) return;
+    clusterSyncing = true;
+    clusterMessage = '';
+    clusterError = '';
+    try {
+      const response = await fetch(getApiUrl('/api/cluster/sync'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Usuario': currentUser || ''
+        },
+        body: JSON.stringify({ usuario: currentUser || '' })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Falha na sincronização');
+      }
+      const tables = data.synced ? Object.entries(data.synced).map(([k, v]) => `${k}: ${v}`).join(', ') : '';
+      clusterMessage = tables ? `Sincronizado — ${tables}` : (data.message || 'Sincronização concluída');
+    } catch (err) {
+      clusterError = err.message || 'Erro na sincronização';
+    } finally {
+      clusterSyncing = false;
     }
   }
 
@@ -1962,6 +2069,39 @@
             clearInterval(uploadPollInterval);
             uploadPollInterval = null;
           }
+          clearUploadWatchdogTimers();
+
+          // Aviso após 10 min (muitas CTOs podem levar 30–60 min no servidor)
+          uploadSoftWarnTimeoutId = setTimeout(() => {
+            if (uploadingBase && uploadProgress.stage !== 'completed' && uploadProgress.stage !== 'error') {
+              uploadSuccess = true;
+              uploadMessage = 'O servidor ainda está processando a base (muitas CTOs para atualizar). Isso pode levar 30–60 minutos. Aguarde — esta tela continua acompanhando automaticamente.';
+            }
+          }, 600000);
+
+          // Parar acompanhamento na tela só após 2 horas sem conclusão
+          uploadHardStopTimeoutId = setTimeout(() => {
+            if (!uploadingBase) return;
+            if (uploadPollInterval) {
+              clearInterval(uploadPollInterval);
+              uploadPollInterval = null;
+            }
+            clearUploadWatchdogTimers();
+            if (animationFrameId) {
+              cancelAnimationFrame(animationFrameId);
+              animationFrameId = null;
+            }
+            if (animationTimeoutId) {
+              clearTimeout(animationTimeoutId);
+              animationTimeoutId = null;
+            }
+            uploadingBase = false;
+            uploadSuccess = false;
+            uploadMessage = 'O acompanhamento na tela expirou após 2 horas. O servidor pode ainda estar processando — verifique os logs do Railway.';
+            displayedPercent = 0;
+            targetPercent = 0;
+            lastUploadPercent = 0;
+          }, 7200000);
           
           // Iniciar polling do progresso (mais frequente para atualização suave)
           uploadPollInterval = setInterval(async () => {
@@ -1988,6 +2128,7 @@
                   // Não precisamos atualizar uploadMessage aqui, será calculado no template
                   if (progressData.stage === 'completed') {
                     // Processo completo!
+                    clearUploadWatchdogTimers();
                     clearInterval(uploadPollInterval);
                     uploadPollInterval = null;
                     // Garantir que o progresso chegue a 100%
@@ -2029,6 +2170,7 @@
                       }
                     }
                   } else if (progressData.stage === 'error') {
+                    clearUploadWatchdogTimers();
                     clearInterval(uploadPollInterval);
                     uploadPollInterval = null;
                     if (animationFrameId) {
@@ -2053,30 +2195,6 @@
               // Continuar tentando
             }
           }, 500); // Verificar a cada 500ms para atualização mais suave e responsiva
-          
-          // Timeout de segurança (5 minutos)
-          setTimeout(() => {
-            if (uploadPollInterval) {
-              clearInterval(uploadPollInterval);
-              uploadPollInterval = null;
-            }
-            if (uploadingBase) {
-              if (animationFrameId) {
-                cancelAnimationFrame(animationFrameId);
-                animationFrameId = null;
-              }
-              if (animationTimeoutId) {
-                clearTimeout(animationTimeoutId);
-                animationTimeoutId = null;
-              }
-              uploadingBase = false;
-              uploadSuccess = false;
-              uploadMessage = 'Processamento demorou mais que o esperado. Verifique os logs do servidor.';
-              displayedPercent = 0;
-              targetPercent = 0;
-              lastUploadPercent = 0;
-            }
-          }, 300000); // 5 minutos
           
           event.target.value = '';
           return; // Não limpar uploadingBase ainda
@@ -2360,6 +2478,65 @@
           </button>
         </div>
       </div>
+
+      {#if userTipo === 'admin'}
+        <div class="settings-section">
+          <h3>Cluster Supabase</h3>
+          {#if clusterLoading && !clusterMode}
+            <p class="empty-message">Carregando...</p>
+          {:else}
+            <p class="cluster-status-line">
+              Status:
+              {#if !clusterEnabled}
+                <span class="cluster-badge cluster-badge-off">Desabilitado</span>
+              {:else if !clusterAvailable}
+                <span class="cluster-badge cluster-badge-warn">Réplica não configurada</span>
+              {:else}
+                <span class="cluster-badge cluster-badge-on">Ativo</span>
+              {/if}
+            </p>
+            <p class="cluster-help">
+              Escolha qual backend a Viabilidade usa. No modo Réplica, o B2 precisa estar sincronizado com o B1.
+            </p>
+            <div class="cluster-mode-buttons">
+              {#each ['primary', 'replica', 'alternate'] as mode}
+                <button
+                  type="button"
+                  class="cluster-mode-btn"
+                  class:cluster-mode-btn-active={clusterMode === mode}
+                  disabled={clusterLoading || clusterSyncing || !clusterEnabled || !clusterAvailable}
+                  on:click={() => changeClusterMode(mode)}
+                  title={clusterModeLabels[mode]}
+                >
+                  {clusterModeLabels[mode]}
+                </button>
+              {/each}
+            </div>
+            {#if clusterMode === 'alternate' && clusterEnabled && clusterAvailable}
+              <div style="margin-top: 1rem;">
+                <button
+                  type="button"
+                  class="btn-add"
+                  disabled={clusterSyncing || clusterLoading}
+                  on:click={syncClusterReplica}
+                >
+                  {#if clusterSyncing}
+                    ⏳ Sincronizando B1 → B2...
+                  {:else}
+                    🪞 Sincronizar réplica agora
+                  {/if}
+                </button>
+              </div>
+            {/if}
+            {#if clusterMessage}
+              <p class="cluster-message success">{clusterMessage}</p>
+            {/if}
+            {#if clusterError}
+              <p class="cluster-message error">{clusterError}</p>
+            {/if}
+          {/if}
+        </div>
+      {/if}
 
       <div class="settings-section">
         <h3>Base de Dados</h3>
@@ -3024,6 +3201,86 @@
     margin: 0 0 1.5rem 0;
     padding-bottom: 0.75rem;
     border-bottom: 2px solid #7B68EE;
+  }
+
+  .cluster-status-line {
+    margin: 0 0 0.75rem 0;
+    color: #444;
+    font-size: 0.95rem;
+  }
+
+  .cluster-help {
+    margin: 0 0 1rem 0;
+    color: #666;
+    font-size: 0.85rem;
+    line-height: 1.4;
+  }
+
+  .cluster-badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-left: 0.35rem;
+  }
+
+  .cluster-badge-on { background: #d4edda; color: #155724; }
+  .cluster-badge-off { background: #f8d7da; color: #721c24; }
+  .cluster-badge-warn { background: #fff3cd; color: #856404; }
+
+  .cluster-mode-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .cluster-mode-btn {
+    width: 100%;
+    padding: 0.65rem 0.85rem;
+    border: 2px solid rgba(123, 104, 238, 0.35);
+    border-radius: 8px;
+    background: white;
+    color: #444;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.2s;
+  }
+
+  .cluster-mode-btn:hover:not(:disabled) {
+    border-color: #7B68EE;
+    background: rgba(123, 104, 238, 0.06);
+  }
+
+  .cluster-mode-btn-active {
+    border-color: #7B68EE;
+    background: linear-gradient(135deg, rgba(123, 104, 238, 0.15) 0%, rgba(100, 149, 237, 0.12) 100%);
+    color: #5a4fcf;
+    font-weight: 600;
+  }
+
+  .cluster-mode-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .cluster-message {
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    padding: 0.6rem 0.75rem;
+    border-radius: 6px;
+  }
+
+  .cluster-message.success {
+    background: rgba(40, 167, 69, 0.1);
+    color: #155724;
+  }
+
+  .cluster-message.error {
+    background: rgba(220, 53, 69, 0.1);
+    color: #721c24;
   }
 
   .empty-message {
@@ -3930,3 +4187,4 @@
       0 4px 6px rgba(244, 67, 54, 0.3);
   }
 </style>
+
