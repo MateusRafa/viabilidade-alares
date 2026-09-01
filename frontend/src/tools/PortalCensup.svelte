@@ -24,11 +24,9 @@
   export let currentUser = '';
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
-  export let onOpenTool = null;
   export let onBackRequest = null;
 
   const VIABILIDADE_ALARES_TOOL_ID = 'viabilidade-alares';
-  const PORTAL_CENSUP_TOOL_ID = 'portal-censup';
 
   const REFRESH_INTERVAL_MS = 30000;
   const pageSize = 50;
@@ -130,11 +128,10 @@
   }
 
   function abrirViabilidadeAvulsa() {
-    if (typeof onOpenTool !== 'function') {
-      console.warn('[PortalCENSUP] onOpenTool não disponível para abrir Viabilidade Alares.');
-      return;
-    }
-    onOpenTool(VIABILIDADE_ALARES_TOOL_ID, { returnTo: PORTAL_CENSUP_TOOL_ID });
+    if (typeof window === 'undefined') return;
+    const currentUrl = window.location.origin + window.location.pathname;
+    const toolUrl = `${currentUrl}#/${VIABILIDADE_ALARES_TOOL_ID}`;
+    window.open(toolUrl, '_blank', 'noopener,noreferrer');
   }
 
   async function carregarChamados({ silent = false } = {}) {
