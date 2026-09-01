@@ -91,6 +91,7 @@
   let clusterSyncing = false;
   let clusterMessage = '';
   let clusterError = '';
+  let showClusterInfo = false;
   const clusterModeLabels = {
     primary: 'Backend Principal (B1)',
     replica: 'Backend Secundário (B2)',
@@ -2481,7 +2482,22 @@
 
       {#if userTipo === 'admin'}
         <div class="settings-section">
-          <h3>Cluster Supabase</h3>
+          <div class="cluster-section-header">
+            <h3>Cluster Supabase</h3>
+            <button
+              type="button"
+              class="info-icon"
+              on:click={() => (showClusterInfo = true)}
+              title="Informação"
+              aria-label="Informação sobre o cluster Supabase"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="12" cy="12" r="10" fill="#7B68EE" stroke="#7B68EE" stroke-width="1"/>
+                <path d="M12 16V12" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                <circle cx="12" cy="8" r="1" fill="white"/>
+              </svg>
+            </button>
+          </div>
           {#if clusterLoading && !clusterMode}
             <p class="empty-message">Carregando...</p>
           {:else}
@@ -2494,9 +2510,6 @@
               {:else}
                 <span class="cluster-badge cluster-badge-on">Ativo</span>
               {/if}
-            </p>
-            <p class="cluster-help">
-              Escolha qual backend a Viabilidade usa. No modo Réplica, o B2 precisa estar sincronizado com o B1.
             </p>
             <div class="cluster-mode-buttons tools-permissions-grid">
               {#each ['primary', 'replica', 'alternate'] as mode}
@@ -2540,6 +2553,46 @@
             {/if}
           {/if}
         </div>
+
+        {#if showClusterInfo}
+          <div
+            class="info-modal-overlay"
+            on:click={() => (showClusterInfo = false)}
+            on:keydown={(e) => e.key === 'Escape' && (showClusterInfo = false)}
+            role="button"
+            tabindex="-1"
+            aria-label="Fechar modal de informação"
+          >
+            <div
+              class="info-modal-box"
+              on:click|stopPropagation
+              on:keydown={(e) => e.key === 'Enter' && e.stopPropagation()}
+              role="dialog"
+              tabindex="0"
+              aria-modal="true"
+            >
+              <div class="info-modal-header">
+                <h3>Cluster Supabase</h3>
+                <button
+                  type="button"
+                  class="info-modal-close"
+                  on:click={() => (showClusterInfo = false)}
+                  aria-label="Fechar"
+                >×</button>
+              </div>
+              <div class="info-modal-body">
+                <p>
+                  Escolha qual backend a Viabilidade usa. No modo <strong>Réplica</strong>, o B2 precisa estar
+                  sincronizado com o B1 antes de selecionar essa opção.
+                </p>
+                <p>
+                  No modo <strong>Ambos em alternância</strong>, as leituras alternam entre B1 e B2 e as escritas
+                  vão para os dois. Use <strong>Sincronizar réplica agora</strong> para espelhar os dados do B1 no B2.
+                </p>
+              </div>
+            </div>
+          </div>
+        {/if}
       {/if}
 
       <div class="settings-section">
@@ -3207,17 +3260,27 @@
     border-bottom: 2px solid #7B68EE;
   }
 
+  .cluster-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 2px solid #7B68EE;
+  }
+
+  .cluster-section-header h3 {
+    margin: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+    flex: 1;
+  }
+
   .cluster-status-line {
     margin: 0 0 0.75rem 0;
     color: #444;
     font-size: 0.95rem;
-  }
-
-  .cluster-help {
-    margin: 0 0 1rem 0;
-    color: #666;
-    font-size: 0.85rem;
-    line-height: 1.4;
   }
 
   .cluster-badge {
@@ -3247,6 +3310,11 @@
     -webkit-appearance: none;
   }
 
+  .cluster-mode-card::before,
+  .cluster-mode-card.active::before {
+    display: none;
+  }
+
   .cluster-mode-card:disabled {
     opacity: 0.55;
     cursor: not-allowed;
@@ -3274,6 +3342,134 @@
   .cluster-message.error {
     background: rgba(220, 53, 69, 0.1);
     color: #721c24;
+  }
+
+  .info-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    opacity: 0.9;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+
+  .info-icon svg {
+    width: 100%;
+    height: 100%;
+    transition: all 0.2s ease;
+  }
+
+  .info-icon:hover {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+
+  .info-icon:focus {
+    outline: 2px solid #7B68EE;
+    outline-offset: 2px;
+    border-radius: 50%;
+  }
+
+  .info-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    animation: clusterInfoFadeIn 0.2s ease;
+  }
+
+  @keyframes clusterInfoFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  .info-modal-box {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    max-width: 500px;
+    width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: clusterInfoSlideUp 0.3s ease;
+  }
+
+  @keyframes clusterInfoSlideUp {
+    from {
+      transform: translateY(20px);
+      opacity: 0;
+    }
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+
+  .info-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem;
+    border-bottom: 2px solid #7B68EE;
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
+    color: white;
+  }
+
+  .info-modal-header h3 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: white;
+    border: none;
+    padding: 0;
+  }
+
+  .info-modal-close {
+    background: none;
+    border: none;
+    color: white;
+    font-size: 2rem;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: background 0.3s;
+    line-height: 1;
+  }
+
+  .info-modal-close:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .info-modal-body {
+    padding: 1.5rem;
+    color: #333;
+    line-height: 1.6;
+  }
+
+  .info-modal-body p {
+    margin: 0 0 1rem 0;
+  }
+
+  .info-modal-body p:last-child {
+    margin-bottom: 0;
   }
 
   .empty-message {
