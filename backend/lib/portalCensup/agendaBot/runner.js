@@ -15,7 +15,7 @@ import {
 } from './scraper.js';
 import { ensureAgendaSessionFile, saveSessionFromPayload, sessionFileExists as sessionExistsOnDisk } from './sessionStore.js';
 import { ensurePlaywrightBrowsers } from './playwrightEnsure.js';
-import { findChamadoByPedidoOrCode, upsertChamadoFromAgenda } from '../chamadosService.js';
+import { findChamadoByPedidoOrCode, reconcileChamadosComAgenda, upsertChamadoFromAgenda } from '../chamadosService.js';
 
 let browser = null;
 let context = null;
@@ -111,7 +111,7 @@ async function runSingleCycle() {
 
   cycleRunning = true;
   const startedAt = new Date().toISOString();
-  const cycleStats = { rowsFound: 0, newChamados: 0, updatedChamados: 0, skipped: 0 };
+  const cycleStats = { rowsFound: 0, newChamados: 0, updatedChamados: 0, skipped: 0, archivedFromAgenda: 0 };
 
   await patchAgendaBotState({
     lastPollAt: startedAt,
@@ -197,6 +197,15 @@ async function runSingleCycle() {
       }
     }
 
+    const activePedidos = rows.map((row) => String(row.pedido || '').trim()).filter(Boolean);
+    const reconcileResult = await reconcileChamadosComAgenda(activePedidos);
+    cycleStats.archivedFromAgenda = reconcileResult?.updated || 0;
+    if (cycleStats.archivedFromAgenda > 0) {
+      console.log(
+        `🗂️ [AgendaBot] ${cycleStats.archivedFromAgenda} chamado(s) sumiram da Agenda e foram ocultados no Portal.`
+      );
+    }
+
     await saveSessionSnapshot();
 
     await patchAgendaBotState({
@@ -207,7 +216,7 @@ async function runSingleCycle() {
     });
 
     console.log(
-      `✅ [AgendaBot] Ciclo concluído — novos: ${cycleStats.newChamados}, atualizados: ${cycleStats.updatedChamados}, ignorados: ${cycleStats.skipped}`
+      `✅ [AgendaBot] Ciclo concluído — novos: ${cycleStats.newChamados}, atualizados: ${cycleStats.updatedChamados}, ignorados: ${cycleStats.skipped}, arquivados: ${cycleStats.archivedFromAgenda}`
     );
   } catch (err) {
     console.error('❌ [AgendaBot] Erro no ciclo:', err.message);
