@@ -122,7 +122,7 @@ export function registerPortalCensupRoutes(app) {
         return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
       }
 
-      const chamado = await getChamadoById(req.params.id);
+      const chamado = await getChamadoById(req.params.id, { usuario });
       res.json({ success: true, chamado });
     } catch (err) {
       console.error('❌ [PortalCENSUP] GET chamado:', err);
