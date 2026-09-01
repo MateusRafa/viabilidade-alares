@@ -1,5 +1,11 @@
 <script>
-  import { toolShellHeaderAction, toolShellSearch, toolShellThemeToggle, toolShellViewToggle } from '../toolShellStore.js';
+  import {
+    toolShellHeaderAction,
+    toolShellHeaderShortcut,
+    toolShellSearch,
+    toolShellThemeToggle,
+    toolShellViewToggle
+  } from '../toolShellStore.js';
   import { theme } from '../themeStore.js';
 
   export let toolTitle = 'Ferramenta';
@@ -12,6 +18,7 @@
 
   $: headerAction = $toolShellHeaderAction;
   $: searchConfig = $toolShellSearch;
+  $: headerShortcut = $toolShellHeaderShortcut;
   $: viewToggle = $toolShellViewToggle;
   $: showThemeToggle = $toolShellThemeToggle;
   $: isDark = $theme === 'dark';
@@ -95,6 +102,30 @@
             </svg>
           </button>
         </div>
+      {/if}
+
+      {#if headerShortcut?.onClick}
+        <button
+          class="header-action-button header-shortcut"
+          class:active={headerShortcut.active}
+          on:click|stopPropagation={headerShortcut.onClick}
+          aria-label={headerShortcut.label || 'Atalho'}
+          title={headerShortcut.title || headerShortcut.label || 'Atalho'}
+          type="button"
+          disabled={headerShortcut.disabled}
+        >
+          {#if headerShortcut.icon === 'viabilidade'}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M12 21s6-5.2 6-10a6 6 0 1 0-12 0c0 4.8 6 10 6 10Z"
+                stroke="currentColor"
+                stroke-width="2.2"
+                stroke-linejoin="round"
+              />
+              <circle cx="12" cy="11" r="2.2" fill="currentColor" />
+            </svg>
+          {/if}
+        </button>
       {/if}
 
       {#if viewToggle?.onClick}
