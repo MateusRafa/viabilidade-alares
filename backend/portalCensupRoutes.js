@@ -6,6 +6,7 @@ import {
   analisarChamadoEmBackground,
   getChamadoById,
   listChamados,
+  reconcileChamadosComAgenda,
   registerFeedback,
   syncFilaToSupabase,
   upsertChamado
@@ -111,6 +112,23 @@ export function registerPortalCensupRoutes(app) {
       res.json({ success: true, ...result });
     } catch (err) {
       console.error('❌ [PortalCENSUP] GET chamados:', err);
+      sendError(res, err);
+    }
+  });
+
+  /** Reconcilia fila do Portal com pedidos ativos na Agenda (extensão / bot). */
+  app.post('/api/portal-censup/chamados/reconcile', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const pedidos = Array.isArray(req.body?.pedidos) ? req.body.pedidos : [];
+      const result = await reconcileChamadosComAgenda(pedidos);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST chamados/reconcile:', err);
       sendError(res, err);
     }
   });
