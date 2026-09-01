@@ -202,6 +202,7 @@
     try {
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
       syncShellChrome();
+      await carregarChamados({ silent: true });
       const precisaAnalise =
         !selectedChamado?.tabulacaoFinal ||
         selectedChamado?.analiseStatus === 'aguardando_analise' ||
@@ -574,7 +575,7 @@
                   <td>{item.dataSituacaoLabel || '—'}</td>
                   <td>{item.pdv}</td>
                   <td>{item.motivo}</td>
-                  <td>{item.situacao}</td>
+                  <td>{item.situacaoLabel || item.situacao || 'Pendente Analise'}</td>
                   <td class="col-action">
                     <div class="col-action-buttons">
                       <button
