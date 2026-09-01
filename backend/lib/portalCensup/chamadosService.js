@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { analisarLocalizacaoChamado } from './analiseLocalizacao.js';
 import { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
-import { dbFindChamado, dbListAllChamados, dbListChamadosNaFila, dbUpsertChamado } from './chamadosDb.js';
+import { dbFindChamado, dbListAllChamados, dbListChamadosNaFila, dbReconcileChamadosComAgenda, dbUpsertChamado } from './chamadosDb.js';
 
 const FAKE_SEED_ID = '5303036a-6e14-4ca1-b5a7-46207c301735';
 const FAKE_SEED_PEDIDO = '1745000';
@@ -751,9 +751,56 @@ export async function upsertChamadoFromAgenda(payload) {
         }
       }
     }
+
+    if (existing.filaStatus === 'executada_agenda') {
+      merged.filaStatus = 'na_fila';
+    } else if (existing.filaStatus === 'finalizada') {
+      merged.filaStatus = 'finalizada';
+    }
   }
 
   return upsertChamado(merged);
+}
+
+/**
+ * Chamados que sumiram da Agenda (aprovados/reprovados lá) saem das views do Portal.
+ * Não vão para Resolvidos — apenas fila_status = executada_agenda (oculto).
+ */
+export async function reconcileChamadosComAgenda(activePedidos = []) {
+  const activeSet = new Set(
+    (activePedidos || []).map((pedido) => String(pedido || '').trim()).filter(Boolean)
+  );
+
+  let updated = 0;
+
+  if (isPortalCensupSupabaseAvailable()) {
+    const dbResult = await dbReconcileChamadosComAgenda(activeSet);
+    updated = dbResult?.updated || 0;
+    if (updated > 0) {
+      await syncJsonFromSupabase().catch((err) => {
+        console.warn('⚠️ [PortalCENSUP] JSON local não atualizado após reconciliação:', err.message);
+      });
+    }
+    return { updated, activeInAgenda: activeSet.size };
+  }
+
+  const store = await readStore();
+  for (const item of store.chamados) {
+    const status = item.filaStatus || 'na_fila';
+    if (status !== 'na_fila' && status !== 'finalizada') continue;
+    const pedido = String(item.pedido || '').trim();
+    if (!pedido || activeSet.has(pedido)) continue;
+    item.filaStatus = 'executada_agenda';
+    item.executadaAgendaAt = new Date().toISOString();
+    updated += 1;
+  }
+
+  if (updated > 0) {
+    await writeStore(store);
+    console.log(`✅ [PortalCENSUP] ${updated} chamado(s) arquivado(s) — executados na Agenda.`);
+  }
+
+  return { updated, activeInAgenda: activeSet.size };
 }
 
 function isUuid(value) {
