@@ -214,6 +214,41 @@ function isUuid(value) {
   );
 }
 
+export async function dbReconcileChamadosComAgenda(activePedidos = new Set()) {
+  if (!isPortalCensupSupabaseAvailable()) return { updated: 0 };
+
+  const activeSet =
+    activePedidos instanceof Set
+      ? activePedidos
+      : new Set(
+          (activePedidos || []).map((pedido) => String(pedido || '').trim()).filter(Boolean)
+        );
+
+  const { data, error } = await client()
+    .from(TABLE)
+    .select('id, pedido, fila_status')
+    .in('fila_status', ['na_fila', 'finalizada']);
+  throwIfError(error, 'listar chamados para reconciliação com Agenda');
+
+  const toArchive = (data || []).filter((row) => {
+    const pedido = String(row.pedido || '').trim();
+    return pedido && !activeSet.has(pedido);
+  });
+
+  if (!toArchive.length) return { updated: 0 };
+
+  const ids = toArchive.map((row) => row.id);
+  const now = new Date().toISOString();
+  const { error: updateError } = await client()
+    .from(TABLE)
+    .update({ fila_status: 'executada_agenda', updated_at: now })
+    .in('id', ids);
+  throwIfError(updateError, 'arquivar chamados executados na Agenda');
+
+  console.log(`✅ [PortalCENSUP][Supabase] ${ids.length} chamado(s) arquivado(s) — executados na Agenda.`);
+  return { updated: ids.length };
+}
+
 export async function dbUpsertChamado(chamado) {
   if (!isPortalCensupSupabaseAvailable()) return null;
 
