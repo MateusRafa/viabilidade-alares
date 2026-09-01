@@ -1,18 +1,16 @@
-import { getPrimaryClient, getReplicaClient } from './clients.js';
-import { isClusterEnabled } from './flags.js';
+import {
+  CLUSTER_TABLES,
+  buildDeleteQuery,
+  getTableOrderColumn,
+  stripReplicaPrimaryKey
+} from './tables.js';
 
 const PAGE_SIZE = 1000;
-const DEFAULT_TABLES = [
-  'coverage_calculation_progress',
-  'coverage_polygons',
-  'condominios',
-  'ctos'
-];
 
-async function fetchAllRows(client, table) {
+export async function fetchAllRows(client, table) {
   const rows = [];
   let from = 0;
-  const orderCol = table === 'coverage_calculation_progress' ? 'calculation_id' : 'id';
+  const orderCol = getTableOrderColumn(table);
 
   while (true) {
     const to = from + PAGE_SIZE - 1;
@@ -30,15 +28,8 @@ async function fetchAllRows(client, table) {
   return rows;
 }
 
-async function deleteAll(client, table) {
-  const strategies = {
-    ctos: () => client.from(table).delete({ count: 'exact' }).gte('id', 0),
-    condominios: () => client.from(table).delete({ count: 'exact' }).gte('id', 0),
-    coverage_polygons: () => client.from(table).delete({ count: 'exact' }).gte('id', 0),
-    coverage_calculation_progress: () =>
-      client.from(table).delete({ count: 'exact' }).neq('calculation_id', '')
-  };
-  const run = strategies[table] || (() => client.from(table).delete({ count: 'exact' }).gte('id', 0));
+export async function deleteAllRows(client, table) {
+  const run = buildDeleteQuery(client, table);
   let total = 0;
   for (let i = 0; i < 500; i++) {
     const { error, count } = await run();
@@ -49,16 +40,13 @@ async function deleteAll(client, table) {
   return total;
 }
 
-async function insertBatches(client, table, rows) {
+export async function insertBatches(client, table, rows) {
   if (rows.length === 0) return 0;
   let inserted = 0;
   for (let i = 0; i < rows.length; i += PAGE_SIZE) {
-    const batch = rows.slice(i, i + PAGE_SIZE).map((row) => {
-      const copy = { ...row };
-      // Deixa o serial da réplica gerar id próprio (evita conflito de PK)
-      if (table !== 'coverage_calculation_progress') delete copy.id;
-      return copy;
-    });
+    const batch = rows
+      .slice(i, i + PAGE_SIZE)
+      .map((row) => stripReplicaPrimaryKey(table, row));
     const { error } = await client.from(table).insert(batch);
     if (error) throw new Error(`${table} insert lote ${i / PAGE_SIZE + 1}: ${error.message}`);
     inserted += batch.length;
@@ -67,37 +55,25 @@ async function insertBatches(client, table, rows) {
 }
 
 /**
- * Espelha tabelas do cluster B1 → B2 (após upload/calculate no primary).
- * @param {{ tables?: string[] }} [opts]
- * @returns {Promise<{ success: boolean, synced?: Record<string, number>, error?: string, skipped?: boolean }>}
+ * Espelha tabelas do primary para a réplica.
+ * @param {import('@supabase/supabase-js').SupabaseClient} primary
+ * @param {import('@supabase/supabase-js').SupabaseClient} replica
+ * @param {{ tables?: string[], onTableDone?: (table: string, count: number) => void }} [opts]
  */
-export async function mirrorClusterTables(opts = {}) {
-  if (!isClusterEnabled()) {
-    return { success: true, skipped: true, reason: 'cluster disabled' };
-  }
-
-  const primary = getPrimaryClient();
-  const replica = getReplicaClient();
-  if (!primary || !replica) {
-    return { success: false, error: 'Primary ou réplica não configurados' };
-  }
-
-  const tables = (opts.tables || DEFAULT_TABLES).filter((t) => DEFAULT_TABLES.includes(t));
+export async function mirrorTablesBetween(primary, replica, opts = {}) {
+  const allowed = new Set(CLUSTER_TABLES);
+  const tables = (opts.tables || CLUSTER_TABLES).filter((t) => allowed.has(t));
   const synced = {};
 
-  console.log(`🪞 [Cluster] Espelhando B1→B2: ${tables.join(', ')}`);
-
-  try {
-    for (const table of tables) {
-      const rows = await fetchAllRows(primary, table);
-      await deleteAll(replica, table);
-      const inserted = await insertBatches(replica, table, rows);
-      synced[table] = inserted;
-      console.log(`  ✅ [Cluster] mirror ${table}: ${inserted} linhas`);
-    }
-    return { success: true, synced };
-  } catch (err) {
-    console.error('❌ [Cluster] mirror falhou:', err.message);
-    return { success: false, error: err.message, synced };
+  for (const table of tables) {
+    const rows = await fetchAllRows(primary, table);
+    await deleteAllRows(replica, table);
+    const inserted = await insertBatches(replica, table, rows);
+    synced[table] = inserted;
+    opts.onTableDone?.(table, inserted);
   }
+
+  return synced;
 }
+
+export { CLUSTER_TABLES, PAGE_SIZE };
