@@ -15,7 +15,11 @@
   export let currentUser = '';
   export let userTipo = 'user';
   export let onBackToDashboard = () => {};
+  export let onOpenTool = null;
   export let onBackRequest = null;
+
+  const VIABILIDADE_ALARES_TOOL_ID = 'viabilidade-alares';
+  const PORTAL_CENSUP_TOOL_ID = 'portal-censup';
 
   const REFRESH_INTERVAL_MS = 30000;
   const pageSize = 50;
@@ -100,6 +104,14 @@
     listView = listView === 'resolvidos' ? 'pendentes' : 'resolvidos';
     page = 1;
     carregarChamados();
+  }
+
+  function abrirViabilidadeAvulsa() {
+    if (typeof onOpenTool !== 'function') {
+      console.warn('[PortalCENSUP] onOpenTool não disponível para abrir Viabilidade Alares.');
+      return;
+    }
+    onOpenTool(VIABILIDADE_ALARES_TOOL_ID, { returnTo: PORTAL_CENSUP_TOOL_ID });
   }
 
   async function carregarChamados({ silent = false } = {}) {
@@ -503,6 +515,27 @@
         <p class="load-error" role="alert">{listError}</p>
       {/if}
 
+      <div class="queue-toolbar">
+        <button
+          type="button"
+          class="btn-viabilidade-avulsa"
+          on:click={abrirViabilidadeAvulsa}
+          aria-label="Abrir Viabilidade Alares para busca avulsa"
+          title="Viabilidade Alares — busca avulsa"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M12 21s6-5.2 6-10a6 6 0 1 0-12 0c0 4.8 6 10 6 10Z"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linejoin="round"
+            />
+            <circle cx="12" cy="11" r="2.2" fill="currentColor" />
+          </svg>
+          <span>Viabilidade Alares</span>
+        </button>
+      </div>
+
       <div class="table-wrap">
         <table class="chamados-table">
           <thead>
@@ -541,18 +574,20 @@
                   <td>{item.motivo}</td>
                   <td>{item.situacao}</td>
                   <td class="col-action">
-                    <button
-                      type="button"
-                      class="btn-lupa"
-                      on:click={() => abrirChamado(item)}
-                      aria-label="Abrir tabulação do pedido {item.pedido}"
-                      title="Abrir tabulação"
-                    >
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2.5" />
-                        <path d="M20 20L16.5 16.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-                      </svg>
-                    </button>
+                    <div class="col-action-buttons">
+                      <button
+                        type="button"
+                        class="btn-lupa"
+                        on:click={() => abrirChamado(item)}
+                        aria-label="Abrir tabulação do pedido {item.pedido}"
+                        title="Abrir tabulação"
+                      >
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2.5" />
+                          <path d="M20 20L16.5 16.5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
+                        </svg>
+                      </button>
+                    </div>
                   </td>
                 </tr>
               {/each}
@@ -849,6 +884,44 @@
   .col-action {
     width: 72px;
     text-align: center;
+    vertical-align: middle;
+  }
+
+  .col-action-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .queue-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    flex-shrink: 0;
+  }
+
+  .btn-viabilidade-avulsa {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    height: 42px;
+    padding: 0 0.9rem;
+    border: none;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 3px 10px rgba(16, 185, 129, 0.35);
+  }
+
+  .btn-viabilidade-avulsa span {
+    line-height: 1;
+  }
+
+  .btn-viabilidade-avulsa:hover {
+    filter: brightness(1.06);
+    transform: translateY(-1px);
   }
 
   .empty-cell {
