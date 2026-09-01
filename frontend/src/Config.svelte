@@ -2498,17 +2498,21 @@
             <p class="cluster-help">
               Escolha qual backend a Viabilidade usa. No modo Réplica, o B2 precisa estar sincronizado com o B1.
             </p>
-            <div class="cluster-mode-buttons">
+            <div class="cluster-mode-buttons tools-permissions-grid">
               {#each ['primary', 'replica', 'alternate'] as mode}
                 <button
                   type="button"
-                  class="cluster-mode-btn"
-                  class:cluster-mode-btn-active={clusterMode === mode}
+                  class="tool-permission-card cluster-mode-card"
+                  class:active={clusterMode === mode}
                   disabled={clusterLoading || clusterSyncing || !clusterEnabled || !clusterAvailable}
                   on:click={() => changeClusterMode(mode)}
                   title={clusterModeLabels[mode]}
+                  aria-pressed={clusterMode === mode}
                 >
-                  {clusterModeLabels[mode]}
+                  <span class="tool-permission-label">
+                    <span class="tool-checkbox-custom" aria-hidden="true"></span>
+                    <span class="tool-title">{clusterModeLabels[mode]}</span>
+                  </span>
                 </button>
               {/each}
             </div>
@@ -3230,40 +3234,29 @@
   .cluster-badge-warn { background: #fff3cd; color: #856404; }
 
   .cluster-mode-buttons {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
+    margin-top: 0.25rem;
   }
 
-  .cluster-mode-btn {
+  .cluster-mode-card {
     width: 100%;
-    padding: 0.65rem 0.85rem;
-    border: 2px solid rgba(123, 104, 238, 0.35);
-    border-radius: 8px;
-    background: white;
-    color: #444;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
+    margin: 0;
+    padding: 0;
+    font-family: inherit;
     text-align: left;
-    transition: all 0.2s;
+    appearance: none;
+    -webkit-appearance: none;
   }
 
-  .cluster-mode-btn:hover:not(:disabled) {
-    border-color: #7B68EE;
-    background: rgba(123, 104, 238, 0.06);
-  }
-
-  .cluster-mode-btn-active {
-    border-color: #7B68EE;
-    background: linear-gradient(135deg, rgba(123, 104, 238, 0.15) 0%, rgba(100, 149, 237, 0.12) 100%);
-    color: #5a4fcf;
-    font-weight: 600;
-  }
-
-  .cluster-mode-btn:disabled {
+  .cluster-mode-card:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+    transform: none !important;
+    box-shadow: none !important;
+  }
+
+  .cluster-mode-card:disabled:hover {
+    border-color: #E2E8F0;
+    transform: none;
   }
 
   .cluster-message {
