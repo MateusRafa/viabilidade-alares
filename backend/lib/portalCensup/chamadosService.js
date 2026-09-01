@@ -103,6 +103,60 @@ function formatDataSituacao(iso) {
   });
 }
 
+function extractAnalistaFromSituacao(situacao) {
+  const match = String(situacao || '').match(/em\s+an[aá]lise\s+por\s+(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function isDateLikeSituacao(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.toLowerCase() === 'null') return true;
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}/.test(raw)) return true;
+  const parsed = Date.parse(raw);
+  return !Number.isNaN(parsed) && /\d{4}/.test(raw);
+}
+
+function isPendenteNaAgenda(situacao) {
+  const raw = String(situacao || '').trim();
+  if (!raw || raw.toLowerCase() === 'null') return true;
+  if (/pendente/i.test(raw)) return true;
+  return isDateLikeSituacao(raw);
+}
+
+export function formatSituacaoLabel(chamado) {
+  const raw = String(chamado?.situacao ?? '').trim();
+  const analista = extractAnalistaFromSituacao(raw) || String(chamado?.usuarioAnalise ?? '').trim();
+
+  if (analista) {
+    return `Em análise por ${analista}`;
+  }
+
+  if (isPendenteNaAgenda(raw)) {
+    return 'Pendente Analise';
+  }
+
+  return raw || 'Pendente Analise';
+}
+
+export async function claimChamadoForAnalise(id, usuario) {
+  const chamado = await findChamadoByPedidoOrCode({ id });
+  const nome = String(usuario || '').trim();
+  if (!chamado || !nome) return chamado;
+
+  if (extractAnalistaFromSituacao(chamado.situacao) || chamado.usuarioAnalise) {
+    return chamado;
+  }
+
+  if (!isPendenteNaAgenda(chamado.situacao)) {
+    return chamado;
+  }
+
+  return upsertChamado({
+    ...chamado,
+    usuarioAnalise: nome
+  });
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -572,7 +626,8 @@ function paginateStore(store, { q = '', page = 1, limit = 10, filaStatus = 'na_f
   const start = (safePage - 1) * safeLimit;
   const items = filtered.slice(start, start + safeLimit).map((item) => ({
     ...item,
-    dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
+    dataSituacaoLabel: formatDataSituacao(item.dataSituacao),
+    situacaoLabel: formatSituacaoLabel(item)
   }));
 
   return {
@@ -589,7 +644,8 @@ function paginateStore(store, { q = '', page = 1, limit = 10, filaStatus = 'na_f
 function withListLabels(chamados) {
   return (chamados || []).map((item) => ({
     ...item,
-    dataSituacaoLabel: formatDataSituacao(item.dataSituacao)
+    dataSituacaoLabel: formatDataSituacao(item.dataSituacao),
+    situacaoLabel: formatSituacaoLabel(item)
   }));
 }
 
@@ -624,9 +680,9 @@ export async function listChamados({ q = '', page = 1, limit = 10, view = 'pende
   });
 }
 
-export async function getChamadoById(id) {
+export async function getChamadoById(id, { usuario } = {}) {
   const fromDb = await trySupabase('buscar chamado', () => dbFindChamado({ id, pedido: id }));
-  const chamado = isPortalCensupSupabaseAvailable()
+  let chamado = isPortalCensupSupabaseAvailable()
     ? fromDb.data
     : fromDb.data ||
       (await readStore()).chamados.find((item) => item.id === id || String(item.pedido) === String(id));
@@ -637,9 +693,14 @@ export async function getChamadoById(id) {
     throw err;
   }
 
+  if (usuario) {
+    chamado = (await claimChamadoForAnalise(id, usuario)) || chamado;
+  }
+
   return {
     ...chamado,
     dataSituacaoLabel: formatDataSituacao(chamado.dataSituacao),
+    situacaoLabel: formatSituacaoLabel(chamado),
     pdfHtml: buildChamadoPdfHtml(chamado)
   };
 }
