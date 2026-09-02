@@ -157,7 +157,6 @@
   let draggingId = null;
   let dragOffset = { x: 0, y: 0 };
   let dragMoved = false;
-  let snapAssist = true;
   let alignGuides = { x: null, y: null };
 
   $: isDark = $theme === 'dark';
@@ -225,36 +224,7 @@
     }
   }
 
-  /** Organiza em grade, mantendo a ordem visual atual. Não trava o arraste. */
-  function alinharCards() {
-    const ordered = [...projetos].sort((a, b) => {
-      const pa = cardPositions[a.id] || { x: 0, y: 0 };
-      const pb = cardPositions[b.id] || { x: 0, y: 0 };
-      if (Math.abs(pa.y - pb.y) > 48) return pa.y - pb.y;
-      return pa.x - pb.x;
-    });
-    const width = boardEl?.clientWidth || 1100;
-    const cols = Math.max(1, Math.floor((width - 24) / (CARD_W + CARD_GAP)));
-    const next = {};
-    ordered.forEach((p, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      next[p.id] = {
-        x: 12 + col * (CARD_W + CARD_GAP),
-        y: 12 + row * (CARD_H_EST + CARD_GAP)
-      };
-    });
-    cardPositions = next;
-    alignGuides = { x: null, y: null };
-    saveLayout();
-  }
-
   function snapToNeighbors(id, x, y) {
-    if (!snapAssist) {
-      alignGuides = { x: null, y: null };
-      return { x, y };
-    }
-
     let nextX = x;
     let nextY = y;
     let guideX = null;
@@ -391,15 +361,6 @@
 
 <div class="cia-root" class:theme-dark={isDark}>
   <div class="cia-scroll">
-    <div class="cia-align-bar">
-      <button type="button" class="cia-align-btn" on:click={alinharCards} title="Organiza os cards em grade. Depois você pode arrastar de novo.">
-        Alinhar
-      </button>
-      <label class="cia-snap-toggle" title="Quando estiver perto de outro card, sugere o alinhamento. Não trava a posição.">
-        <input type="checkbox" bind:checked={snapAssist} />
-        Guia
-      </label>
-    </div>
     <section
       class="cia-board"
       bind:this={boardEl}
@@ -589,47 +550,9 @@
   .cia-scroll {
     flex: 1;
     overflow-y: auto;
-    padding: 0.75rem 1.75rem 1rem;
+    padding: 1.5rem 1.75rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.65rem;
-  }
-
-  .cia-align-bar {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    flex-shrink: 0;
-  }
-
-  .cia-align-btn {
-    border: none;
-    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
-    color: #fff;
-    font-size: 0.8rem;
-    font-weight: 700;
-    padding: 0.4rem 0.9rem;
-    border-radius: 8px;
-    cursor: pointer;
-  }
-
-  .cia-align-btn:hover {
-    filter: brightness(1.08);
-  }
-
-  .cia-snap-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: var(--cia-muted);
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .cia-snap-toggle input {
-    accent-color: #7B68EE;
   }
 
   .cia-guide {
