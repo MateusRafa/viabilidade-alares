@@ -214,20 +214,16 @@
           class="cia-card"
           on:click={() => openProjeto(projeto)}
         >
+          <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
           <div class="cia-card-hero {statusClass(projeto.status)}">
-            <div class="cia-card-status">{projeto.status}</div>
-            <div class="cia-card-visual">
-              <span>{projeto.nome}</span>
-            </div>
+            <span class="cia-card-nome">{projeto.nome}</span>
+            <span class="cia-card-date">Data: {projeto.data}</span>
           </div>
-          <div class="cia-card-meta">
-            <div class="cia-card-date">Data: {projeto.data}</div>
-            <div class="cia-card-body">
-              <p class="cia-card-type">Intenção de Ampliação</p>
-              <p><strong>Responsável:</strong> {projeto.responsavel}</p>
-              <p><strong>Local:</strong> {projeto.cidade}</p>
-              <p class="cia-card-resumo">{projeto.resumo}</p>
-            </div>
+          <div class="cia-card-body">
+            <p class="cia-card-type">Intenção de Ampliação</p>
+            <p><strong>Responsável:</strong> {projeto.responsavel}</p>
+            <p><strong>Local:</strong> {projeto.cidade}</p>
+            <p class="cia-card-resumo">{projeto.resumo}</p>
           </div>
           <div class="cia-card-action {statusClass(projeto.status)}">Ver detalhes</div>
         </button>
@@ -404,10 +400,10 @@
     flex-direction: column;
     padding: 0;
     border: none;
-    border-radius: 12px;
+    border-radius: 10px;
     overflow: hidden;
-    background: #12162a;
-    box-shadow: 0 2px 10px rgba(30, 27, 75, 0.18);
+    background: #1a1f33;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
     cursor: pointer;
     text-align: left;
     color: #fff;
@@ -419,88 +415,69 @@
     box-shadow: 0 10px 24px rgba(76, 29, 149, 0.28);
   }
 
-  /* Topo estilo imagem 1: status + nome com gradiente por tipo */
-  .cia-card-hero {
-    display: flex;
-    flex-direction: column;
-    min-height: 118px;
-    color: #fff;
-  }
-
-  .cia-card-hero.status-aprovado {
-    background: linear-gradient(180deg, #22c55e 0%, #15803d 42%, #1e1b4b 100%);
-  }
-
-  .cia-card-hero.status-reprovado {
-    background: linear-gradient(180deg, #ef4444 0%, #b91c1c 42%, #1e1b4b 100%);
-  }
-
-  .cia-card-hero.status-espera {
-    background: linear-gradient(180deg, #facc15 0%, #ca8a04 42%, #1e1b4b 100%);
-  }
-
+  /* Faixa fina do status */
   .cia-card-status {
     text-align: center;
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.04em;
-    padding: 0.55rem 0.5rem 0.15rem;
+    padding: 0.45rem 0.5rem;
     color: #fff;
-    background: transparent;
   }
 
-  .cia-card-hero.status-espera .cia-card-status {
+  .cia-card-status.status-aprovado { background: #16a34a; }
+  .cia-card-status.status-reprovado { background: #dc2626; }
+  .cia-card-status.status-espera {
+    background: #eab308;
     color: #422006;
   }
 
-  .cia-card-visual {
-    flex: 1;
+  /* Área grande com gradiente + nome + data (padrão da imagem) */
+  .cia-card-hero {
+    min-height: 132px;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 0.35rem 1rem 0.9rem;
-    color: #fff;
-    font-weight: 700;
+    gap: 0.45rem;
+    padding: 1.1rem 1rem;
     text-align: center;
-    font-size: 0.95rem;
-    background: transparent;
   }
 
-  .cia-card-hero.status-espera .cia-card-visual {
+  .cia-card-hero.status-aprovado {
+    background: linear-gradient(145deg, #22c55e 0%, #4c1d95 55%, #1e1b4b 100%);
+  }
+
+  .cia-card-hero.status-reprovado {
+    background: linear-gradient(145deg, #ef4444 0%, #4c1d95 55%, #1e1b4b 100%);
+  }
+
+  .cia-card-hero.status-espera {
+    background: linear-gradient(145deg, #facc15 0%, #4c1d95 55%, #1e1b4b 100%);
+  }
+
+  .cia-card-nome {
     color: #fff;
+    font-weight: 700;
+    font-size: 0.98rem;
+    line-height: 1.25;
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
   }
 
-  /* Meio escuro com as infos (padrão imagem 1) */
-  .cia-card-meta {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    background: #151a2e;
-    color: #fff;
-  }
-
   .cia-card-date {
-    background: transparent;
-    color: rgba(255, 255, 255, 0.9);
-    text-align: center;
+    color: #fde68a;
     font-size: 0.8rem;
     font-weight: 600;
-    padding: 0.65rem 0.75rem 0.35rem;
   }
 
-  .theme-dark .cia-card-date {
-    color: rgba(255, 255, 255, 0.9);
-    background: transparent;
-  }
-
+  /* Bloco escuro com infos */
   .cia-card-body {
-    padding: 0.25rem 1rem 1rem;
+    padding: 0.85rem 1rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.28rem;
     flex: 1;
-    background: transparent;
+    background: #151a2e;
   }
 
   .cia-card-type {
@@ -533,11 +510,11 @@
     color: #fff;
   }
 
-  .cia-card-action.status-aprovado { background: var(--cia-aprovado); color: #fff; }
-  .cia-card-action.status-reprovado { background: var(--cia-reprovado); color: #fff; }
+  .cia-card-action.status-aprovado { background: #16a34a; color: #fff; }
+  .cia-card-action.status-reprovado { background: #dc2626; color: #fff; }
   .cia-card-action.status-espera {
-    background: var(--cia-espera);
-    color: var(--cia-espera-text);
+    background: #eab308;
+    color: #422006;
   }
 
   .cia-ticker {
