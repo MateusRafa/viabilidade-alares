@@ -147,6 +147,7 @@
 
   $: isDark = $theme === 'dark';
   $: proximosEmAnalise = projetosMock.filter((p) => p.status === STATUS.EM_ESPERA);
+  $: tickerItems = [...proximosEmAnalise, ...proximosEmAnalise];
 
   function statusClass(status) {
     if (status === STATUS.APROVADO) return 'status-aprovado';
@@ -209,16 +210,15 @@
   <div class="cia-scroll">
     <section class="cia-grid" aria-label="Projetos">
       {#each projetosMock as projeto (projeto.id)}
-        <button
-          type="button"
-          class="cia-card"
-          on:click={() => openProjeto(projeto)}
-        >
+        <button type="button" class="cia-card" on:click={() => openProjeto(projeto)}>
           <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
-          <div class="cia-card-hero {statusClass(projeto.status)}">
-            <span class="cia-card-nome">{projeto.nome}</span>
-            <span class="cia-card-date">Data: {projeto.data}</span>
+          <div
+            class="cia-card-visual"
+            style="background: linear-gradient(145deg, {projeto.imagens[0].color} 0%, #1e1b4b 100%);"
+          >
+            <span>{projeto.nome}</span>
           </div>
+          <div class="cia-card-date">Data: {projeto.data}</div>
           <div class="cia-card-body">
             <p class="cia-card-type">Intenção de Ampliação</p>
             <p><strong>Responsável:</strong> {projeto.responsavel}</p>
@@ -236,22 +236,12 @@
     <div class="cia-ticker-track-wrap">
       {#if proximosEmAnalise.length}
         <div class="cia-ticker-track">
-          <div class="cia-ticker-group">
-            {#each proximosEmAnalise as item (item.id)}
-              <button type="button" class="cia-ticker-item" on:click={() => openProjeto(item)}>
-                <span class="dot"></span>
-                {item.nome} — {item.cidade} · {item.data}
-              </button>
-            {/each}
-          </div>
-          <div class="cia-ticker-group" aria-hidden="true">
-            {#each proximosEmAnalise as item (item.id + '-dup')}
-              <button type="button" class="cia-ticker-item" tabindex="-1" on:click={() => openProjeto(item)}>
-                <span class="dot"></span>
-                {item.nome} — {item.cidade} · {item.data}
-              </button>
-            {/each}
-          </div>
+          {#each tickerItems as item, i (item.id + '-' + i)}
+            <button type="button" class="cia-ticker-item" on:click={() => openProjeto(item)}>
+              <span class="dot"></span>
+              {item.nome} — {item.cidade} · {item.data}
+            </button>
+          {/each}
         </div>
       {:else}
         <span class="cia-ticker-empty">Nenhum projeto em espera no momento.</span>
@@ -359,10 +349,9 @@
     --cia-muted: #64748b;
     --cia-border: rgba(123, 104, 238, 0.18);
     --cia-accent: #7B68EE;
-    --cia-aprovado: #16a34a;
+    --cia-aprovado: #059669;
     --cia-reprovado: #dc2626;
-    --cia-espera: #eab308;
-    --cia-espera-text: #713f12;
+    --cia-espera: #0d9488;
     width: 100%;
     height: 100%;
     display: flex;
@@ -399,98 +388,79 @@
     display: flex;
     flex-direction: column;
     padding: 0;
-    border: none;
-    border-radius: 10px;
+    border: 1px solid var(--cia-border);
+    border-radius: 12px;
     overflow: hidden;
-    background: #1a1f33;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+    background: var(--cia-surface);
+    box-shadow: 0 2px 10px rgba(30, 27, 75, 0.06);
     cursor: pointer;
     text-align: left;
-    color: #fff;
+    color: inherit;
     transition: transform 0.18s ease, box-shadow 0.18s ease;
   }
 
   .cia-card:hover {
     transform: translateY(-3px);
-    box-shadow: 0 10px 24px rgba(76, 29, 149, 0.28);
+    box-shadow: 0 10px 24px rgba(76, 29, 149, 0.14);
   }
 
-  /* Faixa fina do status */
   .cia-card-status {
     text-align: center;
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.04em;
-    padding: 0.45rem 0.5rem;
+    padding: 0.45rem;
     color: #fff;
   }
 
-  .cia-card-status.status-aprovado { background: #16a34a; }
-  .cia-card-status.status-reprovado { background: #dc2626; }
-  .cia-card-status.status-espera {
-    background: #eab308;
-    color: #422006;
-  }
+  .status-aprovado { background: var(--cia-aprovado); }
+  .status-reprovado { background: var(--cia-reprovado); }
+  .status-espera { background: var(--cia-espera); }
 
-  /* Área grande com gradiente + nome + data (padrão da imagem) */
-  .cia-card-hero {
-    min-height: 132px;
+  .cia-card-visual {
+    min-height: 120px;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 0.45rem;
-    padding: 1.1rem 1rem;
-    text-align: center;
-  }
-
-  .cia-card-hero.status-aprovado {
-    background: linear-gradient(145deg, #22c55e 0%, #4c1d95 55%, #1e1b4b 100%);
-  }
-
-  .cia-card-hero.status-reprovado {
-    background: linear-gradient(145deg, #ef4444 0%, #4c1d95 55%, #1e1b4b 100%);
-  }
-
-  .cia-card-hero.status-espera {
-    background: linear-gradient(145deg, #facc15 0%, #4c1d95 55%, #1e1b4b 100%);
-  }
-
-  .cia-card-nome {
+    padding: 1rem;
     color: #fff;
     font-weight: 700;
-    font-size: 0.98rem;
-    line-height: 1.25;
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    text-align: center;
+    font-size: 0.95rem;
   }
 
   .cia-card-date {
-    color: #fde68a;
+    background: rgba(123, 104, 238, 0.12);
+    color: #4c1d95;
+    text-align: center;
     font-size: 0.8rem;
     font-weight: 600;
+    padding: 0.4rem;
   }
 
-  /* Bloco escuro com infos */
+  .theme-dark .cia-card-date {
+    color: #c4b5fd;
+    background: rgba(123, 104, 238, 0.2);
+  }
+
   .cia-card-body {
     padding: 0.85rem 1rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 0.28rem;
+    gap: 0.25rem;
     flex: 1;
-    background: #151a2e;
   }
 
   .cia-card-type {
     margin: 0;
     font-weight: 700;
     font-size: 0.88rem;
-    color: #fff;
   }
 
   .cia-card-body p {
     margin: 0;
     font-size: 0.8rem;
-    color: rgba(255, 255, 255, 0.88);
+    color: var(--cia-muted);
   }
 
   .cia-card-resumo {
@@ -503,18 +473,11 @@
 
   .cia-card-action {
     text-align: center;
+    color: #fff;
     font-weight: 700;
     font-size: 0.82rem;
-    padding: 0.75rem;
+    padding: 0.7rem;
     letter-spacing: 0.02em;
-    color: #fff;
-  }
-
-  .cia-card-action.status-aprovado { background: #16a34a; color: #fff; }
-  .cia-card-action.status-reprovado { background: #dc2626; color: #fff; }
-  .cia-card-action.status-espera {
-    background: #eab308;
-    color: #422006;
   }
 
   .cia-ticker {
@@ -527,7 +490,7 @@
   }
 
   .cia-ticker-label {
-    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
+    background: #4c1d95;
     color: #fff;
     font-size: 0.72rem;
     font-weight: 800;
@@ -537,7 +500,6 @@
     align-items: center;
     padding: 0 0.9rem;
     white-space: nowrap;
-    z-index: 1;
   }
 
   .cia-ticker-track-wrap {
@@ -545,33 +507,23 @@
     overflow: hidden;
     display: flex;
     align-items: center;
-    min-width: 0;
-    container-type: inline-size;
   }
 
   .cia-ticker-track {
     display: flex;
+    gap: 2rem;
     width: max-content;
-    will-change: transform;
-    animation: cia-marquee 32s linear infinite;
+    animation: cia-marquee 28s linear infinite;
+    padding-left: 1rem;
   }
 
   .cia-ticker-track:hover {
     animation-play-state: paused;
   }
 
-  .cia-ticker-group {
-    display: flex;
-    align-items: center;
-    flex-shrink: 0;
-    gap: 1.75rem;
-    padding-right: 1.75rem;
-  }
-
-  /* Começa no canto direito; avança exatamente 1 grupo (−50%) para loop contínuo com pequeno espaço */
   @keyframes cia-marquee {
-    from { transform: translateX(100cqi); }
-    to { transform: translateX(calc(100cqi - 50%)); }
+    from { transform: translateX(0); }
+    to { transform: translateX(-50%); }
   }
 
   .cia-ticker-item {
@@ -592,7 +544,6 @@
     height: 7px;
     border-radius: 50%;
     background: var(--cia-espera);
-    flex-shrink: 0;
   }
 
   .cia-ticker-empty {
@@ -645,13 +596,6 @@
     padding: 0.2rem 0.55rem;
     border-radius: 999px;
     margin-bottom: 0.35rem;
-  }
-
-  .cia-modal-badge.status-aprovado { background: var(--cia-aprovado); }
-  .cia-modal-badge.status-reprovado { background: var(--cia-reprovado); }
-  .cia-modal-badge.status-espera {
-    background: var(--cia-espera);
-    color: var(--cia-espera-text);
   }
 
   .cia-modal-header h3 {
