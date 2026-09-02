@@ -212,10 +212,7 @@
       {#each projetosMock as projeto (projeto.id)}
         <button type="button" class="cia-card" on:click={() => openProjeto(projeto)}>
           <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
-          <div
-            class="cia-card-visual"
-            style="background: linear-gradient(145deg, {projeto.imagens[0].color} 0%, #1e1b4b 100%);"
-          >
+          <div class="cia-card-visual {statusClass(projeto.status)}">
             <span>{projeto.nome}</span>
           </div>
           <div class="cia-card-date">Data: {projeto.data}</div>
@@ -427,6 +424,19 @@
     font-weight: 700;
     text-align: center;
     font-size: 0.95rem;
+  }
+
+  /* Cor interna do box (entre título e data) — mesmo padrão do Reprovado, por status */
+  .cia-card-visual.status-aprovado {
+    background: linear-gradient(145deg, #22c55e 0%, #1e1b4b 100%);
+  }
+
+  .cia-card-visual.status-reprovado {
+    background: linear-gradient(145deg, #ef4444 0%, #1e1b4b 100%);
+  }
+
+  .cia-card-visual.status-espera {
+    background: linear-gradient(145deg, #facc15 0%, #1e1b4b 100%);
   }
 
   .cia-card-date {
