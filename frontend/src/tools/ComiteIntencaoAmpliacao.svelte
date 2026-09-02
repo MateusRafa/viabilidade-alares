@@ -728,7 +728,7 @@
   }
 
   .cia-card-visual.status-espera {
-    background: linear-gradient(145deg, #facc15 0%, #1e1b4b 100%);
+    background: linear-gradient(145deg, #c4ae62 0%, #1e1b4b 100%);
   }
 
   .cia-card-date {
