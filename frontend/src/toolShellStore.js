@@ -21,6 +21,9 @@ export const toolShellViewToggle = writable(null);
 /** Mostra botão de tema claro/escuro no header. */
 export const toolShellThemeToggle = writable(false);
 
+/** Botão de adicionar no header (ao lado do tema). */
+export const toolShellAddAction = writable(null);
+
 export function clearToolShell() {
   toolShellTitle.set(null);
   toolShellBackHandler.set(null);
@@ -29,4 +32,5 @@ export function clearToolShell() {
   toolShellHeaderShortcut.set(null);
   toolShellViewToggle.set(null);
   toolShellThemeToggle.set(false);
+  toolShellAddAction.set(null);
 }
