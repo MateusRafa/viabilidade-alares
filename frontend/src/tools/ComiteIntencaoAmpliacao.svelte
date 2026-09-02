@@ -626,7 +626,7 @@
   .status-reprovado { background: var(--cia-reprovado); }
   .status-espera {
     background: var(--cia-espera);
-    color: var(--cia-espera-text);
+    color: #fff;
   }
 
   .cia-card-visual {
