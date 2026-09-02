@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { theme } from '../themeStore.js';
+  import { clearToolShell, toolShellThemeToggle } from '../toolShellStore.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -143,13 +144,8 @@
   let selectedProjeto = null;
   let slideIndex = 0;
   let carouselTimer = null;
-  let filterStatus = 'todos';
 
   $: isDark = $theme === 'dark';
-  $: projetosFiltrados =
-    filterStatus === 'todos'
-      ? projetosMock
-      : projetosMock.filter((p) => p.status === filterStatus);
   $: proximosEmAnalise = projetosMock.filter((p) => p.status === STATUS.EM_ESPERA);
   $: tickerItems = [...proximosEmAnalise, ...proximosEmAnalise];
 
@@ -199,51 +195,21 @@
   onMount(() => {
     if (onSettingsRequest) onSettingsRequest(null);
     if (onSettingsHover) onSettingsHover(null);
+    toolShellThemeToggle.set(true);
     window.addEventListener('keydown', onKeydown);
   });
 
   onDestroy(() => {
     stopCarousel();
+    clearToolShell();
     window.removeEventListener('keydown', onKeydown);
   });
 </script>
 
 <div class="cia-root" class:theme-dark={isDark}>
   <div class="cia-scroll">
-    <section class="cia-hero">
-      <div>
-        <p class="cia-eyebrow">C.I.A.</p>
-        <h2>Comitê de Intenção de Ampliação</h2>
-        <p class="cia-subtitle">
-          Portal de apresentação dos projetos em análise e deliberação do comitê.
-        </p>
-      </div>
-      <div class="cia-filters" role="tablist" aria-label="Filtrar por status">
-        <button
-          type="button"
-          class:active={filterStatus === 'todos'}
-          on:click={() => (filterStatus = 'todos')}
-        >Todos</button>
-        <button
-          type="button"
-          class:active={filterStatus === STATUS.APROVADO}
-          on:click={() => (filterStatus = STATUS.APROVADO)}
-        >Aprovado</button>
-        <button
-          type="button"
-          class:active={filterStatus === STATUS.REPROVADO}
-          on:click={() => (filterStatus = STATUS.REPROVADO)}
-        >Reprovado</button>
-        <button
-          type="button"
-          class:active={filterStatus === STATUS.EM_ESPERA}
-          on:click={() => (filterStatus = STATUS.EM_ESPERA)}
-        >Em Espera</button>
-      </div>
-    </section>
-
     <section class="cia-grid" aria-label="Projetos">
-      {#each projetosFiltrados as projeto (projeto.id)}
+      {#each projetosMock as projeto (projeto.id)}
         <button type="button" class="cia-card" on:click={() => openProjeto(projeto)}>
           <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
           <div
@@ -261,8 +227,6 @@
           </div>
           <div class="cia-card-action {statusClass(projeto.status)}">Ver detalhes</div>
         </button>
-      {:else}
-        <p class="cia-empty">Nenhum projeto com este status.</p>
       {/each}
     </section>
   </div>
@@ -414,74 +378,10 @@
     gap: 1.25rem;
   }
 
-  .cia-hero {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-
-  .cia-eyebrow {
-    margin: 0 0 0.25rem;
-    font-size: 0.75rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    color: var(--cia-accent);
-    text-transform: uppercase;
-  }
-
-  .cia-hero h2 {
-    margin: 0;
-    font-size: 1.65rem;
-    color: #4c1d95;
-  }
-
-  .theme-dark .cia-hero h2 {
-    color: #c4b5fd;
-  }
-
-  .cia-subtitle {
-    margin: 0.4rem 0 0;
-    color: var(--cia-muted);
-    font-size: 0.95rem;
-    max-width: 36rem;
-  }
-
-  .cia-filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-  }
-
-  .cia-filters button {
-    border: 1px solid var(--cia-border);
-    background: var(--cia-surface);
-    color: var(--cia-muted);
-    border-radius: 999px;
-    padding: 0.4rem 0.85rem;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .cia-filters button.active {
-    background: linear-gradient(135deg, #7B68EE, #6366F1);
-    color: #fff;
-    border-color: transparent;
-  }
-
   .cia-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 1rem;
-  }
-
-  .cia-empty {
-    grid-column: 1 / -1;
-    text-align: center;
-    color: var(--cia-muted);
-    padding: 2rem;
   }
 
   .cia-card {
@@ -898,10 +798,6 @@
   @media (max-width: 640px) {
     .cia-scroll {
       padding: 1rem;
-    }
-
-    .cia-hero h2 {
-      font-size: 1.3rem;
     }
   }
 </style>
