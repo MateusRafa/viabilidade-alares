@@ -214,11 +214,13 @@
           class="cia-card"
           on:click={() => openProjeto(projeto)}
         >
-          <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
-          <div class="cia-card-content">
+          <div class="cia-card-hero {statusClass(projeto.status)}">
+            <div class="cia-card-status">{projeto.status}</div>
             <div class="cia-card-visual">
               <span>{projeto.nome}</span>
             </div>
+          </div>
+          <div class="cia-card-meta">
             <div class="cia-card-date">Data: {projeto.data}</div>
             <div class="cia-card-body">
               <p class="cia-card-type">Intenção de Ampliação</p>
@@ -404,7 +406,7 @@
     border: none;
     border-radius: 12px;
     overflow: hidden;
-    background: #1a1f33;
+    background: #12162a;
     box-shadow: 0 2px 10px rgba(30, 27, 75, 0.18);
     cursor: pointer;
     text-align: left;
@@ -417,41 +419,65 @@
     box-shadow: 0 10px 24px rgba(76, 29, 149, 0.28);
   }
 
+  /* Topo estilo imagem 1: status + nome com gradiente por tipo */
+  .cia-card-hero {
+    display: flex;
+    flex-direction: column;
+    min-height: 118px;
+    color: #fff;
+  }
+
+  .cia-card-hero.status-aprovado {
+    background: linear-gradient(180deg, #22c55e 0%, #15803d 42%, #1e1b4b 100%);
+  }
+
+  .cia-card-hero.status-reprovado {
+    background: linear-gradient(180deg, #ef4444 0%, #b91c1c 42%, #1e1b4b 100%);
+  }
+
+  .cia-card-hero.status-espera {
+    background: linear-gradient(180deg, #facc15 0%, #ca8a04 42%, #1e1b4b 100%);
+  }
+
   .cia-card-status {
     text-align: center;
     font-size: 0.78rem;
     font-weight: 700;
     letter-spacing: 0.04em;
-    padding: 0.5rem;
+    padding: 0.55rem 0.5rem 0.15rem;
     color: #fff;
+    background: transparent;
   }
 
-  .cia-card-status.status-aprovado { background: var(--cia-aprovado); }
-  .cia-card-status.status-reprovado { background: var(--cia-reprovado); }
-  .cia-card-status.status-espera {
-    background: var(--cia-espera);
-    color: var(--cia-espera-text);
-  }
-
-  .cia-card-content {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    background: linear-gradient(160deg, #5b4fcf 0%, #3b2a8a 45%, #1e1b4b 100%);
-    color: #fff;
+  .cia-card-hero.status-espera .cia-card-status {
+    color: #422006;
   }
 
   .cia-card-visual {
-    min-height: 72px;
+    flex: 1;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 1rem 1rem 0.35rem;
+    padding: 0.35rem 1rem 0.9rem;
     color: #fff;
     font-weight: 700;
     text-align: center;
     font-size: 0.95rem;
     background: transparent;
+  }
+
+  .cia-card-hero.status-espera .cia-card-visual {
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  }
+
+  /* Meio escuro com as infos (padrão imagem 1) */
+  .cia-card-meta {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: #151a2e;
+    color: #fff;
   }
 
   .cia-card-date {
@@ -460,7 +486,7 @@
     text-align: center;
     font-size: 0.8rem;
     font-weight: 600;
-    padding: 0.25rem 0.75rem 0.55rem;
+    padding: 0.65rem 0.75rem 0.35rem;
   }
 
   .theme-dark .cia-card-date {
@@ -469,7 +495,7 @@
   }
 
   .cia-card-body {
-    padding: 0.35rem 1rem 1rem;
+    padding: 0.25rem 1rem 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
