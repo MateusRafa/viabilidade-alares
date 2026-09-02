@@ -636,19 +636,22 @@
     position: absolute;
     pointer-events: none;
     z-index: 30;
-    background: #7B68EE;
+    background: none;
+    opacity: 0.55;
   }
 
   .cia-guide.vertical {
     top: 0;
     bottom: 0;
-    width: 1px;
+    width: 0;
+    border-left: 1.5px dashed #7B68EE;
   }
 
   .cia-guide.horizontal {
     left: 0;
     right: 0;
-    height: 1px;
+    height: 0;
+    border-top: 1.5px dashed #7B68EE;
   }
 
   .cia-board {
