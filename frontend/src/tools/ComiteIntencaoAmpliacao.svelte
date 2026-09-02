@@ -348,7 +348,8 @@
     --cia-accent: #7B68EE;
     --cia-aprovado: #059669;
     --cia-reprovado: #dc2626;
-    --cia-espera: #0d9488;
+    --cia-espera: #eab308;
+    --cia-espera-text: #422006;
     width: 100%;
     height: 100%;
     display: flex;
@@ -412,7 +413,10 @@
 
   .status-aprovado { background: var(--cia-aprovado); }
   .status-reprovado { background: var(--cia-reprovado); }
-  .status-espera { background: var(--cia-espera); }
+  .status-espera {
+    background: var(--cia-espera);
+    color: var(--cia-espera-text);
+  }
 
   .cia-card-visual {
     min-height: 120px;
