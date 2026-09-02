@@ -147,7 +147,6 @@
 
   $: isDark = $theme === 'dark';
   $: proximosEmAnalise = projetosMock.filter((p) => p.status === STATUS.EM_ESPERA);
-  $: tickerItems = [...proximosEmAnalise, ...proximosEmAnalise];
 
   function statusClass(status) {
     if (status === STATUS.APROVADO) return 'status-aprovado';
@@ -210,12 +209,13 @@
   <div class="cia-scroll">
     <section class="cia-grid" aria-label="Projetos">
       {#each projetosMock as projeto (projeto.id)}
-        <button type="button" class="cia-card" on:click={() => openProjeto(projeto)}>
+        <button
+          type="button"
+          class="cia-card {statusClass(projeto.status)}"
+          on:click={() => openProjeto(projeto)}
+        >
           <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
-          <div
-            class="cia-card-visual"
-            style="background: linear-gradient(145deg, {projeto.imagens[0].color} 0%, #1e1b4b 100%);"
-          >
+          <div class="cia-card-visual">
             <span>{projeto.nome}</span>
           </div>
           <div class="cia-card-date">Data: {projeto.data}</div>
@@ -236,12 +236,22 @@
     <div class="cia-ticker-track-wrap">
       {#if proximosEmAnalise.length}
         <div class="cia-ticker-track">
-          {#each tickerItems as item, i (item.id + '-' + i)}
-            <button type="button" class="cia-ticker-item" on:click={() => openProjeto(item)}>
-              <span class="dot"></span>
-              {item.nome} — {item.cidade} · {item.data}
-            </button>
-          {/each}
+          <div class="cia-ticker-group">
+            {#each proximosEmAnalise as item (item.id)}
+              <button type="button" class="cia-ticker-item" on:click={() => openProjeto(item)}>
+                <span class="dot"></span>
+                {item.nome} — {item.cidade} · {item.data}
+              </button>
+            {/each}
+          </div>
+          <div class="cia-ticker-group" aria-hidden="true">
+            {#each proximosEmAnalise as item (item.id + '-dup')}
+              <button type="button" class="cia-ticker-item" tabindex="-1" on:click={() => openProjeto(item)}>
+                <span class="dot"></span>
+                {item.nome} — {item.cidade} · {item.data}
+              </button>
+            {/each}
+          </div>
         </div>
       {:else}
         <span class="cia-ticker-empty">Nenhum projeto em espera no momento.</span>
@@ -349,9 +359,10 @@
     --cia-muted: #64748b;
     --cia-border: rgba(123, 104, 238, 0.18);
     --cia-accent: #7B68EE;
-    --cia-aprovado: #059669;
+    --cia-aprovado: #16a34a;
     --cia-reprovado: #dc2626;
-    --cia-espera: #0d9488;
+    --cia-espera: #eab308;
+    --cia-espera-text: #713f12;
     width: 100%;
     height: 100%;
     display: flex;
@@ -388,7 +399,7 @@
     display: flex;
     flex-direction: column;
     padding: 0;
-    border: 1px solid var(--cia-border);
+    border: 2px solid var(--cia-border);
     border-radius: 12px;
     overflow: hidden;
     background: var(--cia-surface);
@@ -398,6 +409,10 @@
     color: inherit;
     transition: transform 0.18s ease, box-shadow 0.18s ease;
   }
+
+  .cia-card.status-aprovado { border-color: var(--cia-aprovado); }
+  .cia-card.status-reprovado { border-color: var(--cia-reprovado); }
+  .cia-card.status-espera { border-color: var(--cia-espera); }
 
   .cia-card:hover {
     transform: translateY(-3px);
@@ -415,7 +430,10 @@
 
   .status-aprovado { background: var(--cia-aprovado); }
   .status-reprovado { background: var(--cia-reprovado); }
-  .status-espera { background: var(--cia-espera); }
+  .status-espera {
+    background: var(--cia-espera);
+    color: var(--cia-espera-text);
+  }
 
   .cia-card-visual {
     min-height: 120px;
@@ -427,6 +445,7 @@
     font-weight: 700;
     text-align: center;
     font-size: 0.95rem;
+    background: linear-gradient(145deg, #7B68EE 0%, #4c1d95 100%);
   }
 
   .cia-card-date {
@@ -480,6 +499,10 @@
     letter-spacing: 0.02em;
   }
 
+  .cia-card-action.status-espera {
+    color: var(--cia-espera-text);
+  }
+
   .cia-ticker {
     display: flex;
     align-items: stretch;
@@ -490,7 +513,7 @@
   }
 
   .cia-ticker-label {
-    background: #4c1d95;
+    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
     color: #fff;
     font-size: 0.72rem;
     font-weight: 800;
@@ -500,6 +523,7 @@
     align-items: center;
     padding: 0 0.9rem;
     white-space: nowrap;
+    z-index: 1;
   }
 
   .cia-ticker-track-wrap {
@@ -507,23 +531,33 @@
     overflow: hidden;
     display: flex;
     align-items: center;
+    min-width: 0;
+    container-type: inline-size;
   }
 
   .cia-ticker-track {
     display: flex;
-    gap: 2rem;
     width: max-content;
-    animation: cia-marquee 28s linear infinite;
-    padding-left: 1rem;
+    will-change: transform;
+    animation: cia-marquee 32s linear infinite;
   }
 
   .cia-ticker-track:hover {
     animation-play-state: paused;
   }
 
+  .cia-ticker-group {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 1.75rem;
+    padding-right: 1.75rem;
+  }
+
+  /* Começa no canto direito; avança exatamente 1 grupo (−50%) para loop contínuo com pequeno espaço */
   @keyframes cia-marquee {
-    from { transform: translateX(0); }
-    to { transform: translateX(-50%); }
+    from { transform: translateX(100cqi); }
+    to { transform: translateX(calc(100cqi - 50%)); }
   }
 
   .cia-ticker-item {
@@ -544,6 +578,7 @@
     height: 7px;
     border-radius: 50%;
     background: var(--cia-espera);
+    flex-shrink: 0;
   }
 
   .cia-ticker-empty {
