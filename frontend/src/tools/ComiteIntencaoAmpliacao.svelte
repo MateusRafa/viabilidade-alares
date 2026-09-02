@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { theme } from '../themeStore.js';
-  import { clearToolShell, toolShellThemeToggle } from '../toolShellStore.js';
+  import { clearToolShell, toolShellThemeToggle, toolShellAddAction } from '../toolShellStore.js';
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -151,6 +151,7 @@
   let projetos = [...projetosMock];
   let cardPositions = {};
   let selectedProjeto = null;
+  let showAddModal = false;
   let slideIndex = 0;
   let carouselTimer = null;
   let boardEl;
@@ -289,8 +290,37 @@
     startCarousel();
   }
 
+  function openAddModal() {
+    showAddModal = true;
+    syncAddButton();
+  }
+
+  function closeAddModal() {
+    showAddModal = false;
+    syncAddButton();
+  }
+
+  function toggleAddModal() {
+    showAddModal = !showAddModal;
+    syncAddButton();
+  }
+
+  function syncAddButton() {
+    toolShellAddAction.set({
+      label: 'Adicionar novo arquivo',
+      title: 'Adicionar novo arquivo',
+      active: showAddModal,
+      onClick: toggleAddModal
+    });
+  }
+
   function onKeydown(event) {
-    if (event.key === 'Escape' && selectedProjeto) closeProjeto();
+    if (event.key !== 'Escape') return;
+    if (showAddModal) {
+      closeAddModal();
+      return;
+    }
+    if (selectedProjeto) closeProjeto();
   }
 
   function boardPoint(event) {
@@ -348,6 +378,7 @@
     if (onSettingsRequest) onSettingsRequest(null);
     if (onSettingsHover) onSettingsHover(null);
     toolShellThemeToggle.set(true);
+    syncAddButton();
     window.addEventListener('keydown', onKeydown);
     if (!loadLayout()) applyDefaultLayout();
   });
@@ -513,6 +544,38 @@
             </div>
           </section>
         </aside>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showAddModal}
+  <div
+    class="cia-modal-overlay"
+    class:theme-dark={isDark}
+    role="presentation"
+    on:click={closeAddModal}
+  >
+    <div
+      class="cia-modal cia-add-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="cia-add-title"
+      on:click|stopPropagation
+    >
+      <header class="cia-modal-header">
+        <div>
+          <h3 id="cia-add-title">Adicionar novo arquivo</h3>
+          <p>Preencha os dados do novo projeto do comitê.</p>
+        </div>
+        <button type="button" class="cia-modal-close" on:click={closeAddModal} aria-label="Fechar">
+          ×
+        </button>
+      </header>
+      <div class="cia-add-body">
+        <p class="cia-add-placeholder">
+          Área do formulário — vamos definir os campos no próximo passo.
+        </p>
       </div>
     </div>
   </div>
@@ -803,6 +866,26 @@
   .cia-modal-overlay.theme-dark .cia-modal {
     background: #1a1f33;
     color: #e8eaf6;
+  }
+
+  .cia-add-modal {
+    width: min(560px, 100%);
+    max-height: min(80vh, 640px);
+  }
+
+  .cia-add-body {
+    padding: 1.25rem;
+  }
+
+  .cia-add-placeholder {
+    margin: 0;
+    padding: 1.5rem;
+    border: 1px dashed rgba(123, 104, 238, 0.35);
+    border-radius: 10px;
+    color: var(--cia-muted, #64748b);
+    font-size: 0.9rem;
+    text-align: center;
+    background: rgba(123, 104, 238, 0.06);
   }
 
   .cia-modal-header {
