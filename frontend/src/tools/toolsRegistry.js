@@ -108,6 +108,15 @@ const portalToolsMeta = [
     icon: '📥',
     color: '#6366F1',
     available: true
+  },
+  {
+    id: 'comite-intencao-ampliacao',
+    title: 'Comitê de Intenção de Ampliação',
+    description:
+      'Portal de apresentação dos projetos do comitê com status, imagens e indicadores técnicos',
+    icon: '🏛️',
+    color: '#4c1d95',
+    available: true
   }
 ];
 
@@ -126,7 +135,8 @@ const TOOL_COMPONENT_FILES = {
   'dashboard-projetos': './DashboardProjetos.svelte',
   'dashboard-implantacao': './DashboardImplantacao.svelte',
   'ia-auditoria-diagramacao': './IaAuditoriaDiagramacao.svelte',
-  'portal-censup': './PortalCensup.svelte'
+  'portal-censup': './PortalCensup.svelte',
+  'comite-intencao-ampliacao': './ComiteIntencaoAmpliacao.svelte'
 };
 
 const FAVICON_BY_TOOL = {
