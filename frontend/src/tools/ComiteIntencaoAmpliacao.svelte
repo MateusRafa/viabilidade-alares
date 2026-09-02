@@ -141,18 +141,84 @@
     }
   ];
 
+  const LAYOUT_KEY = 'cia-card-layout-v1';
+  const CARD_W = 250;
+  const CARD_GAP = 16;
+  const CARD_H_EST = 360;
+
+  let projetos = [...projetosMock];
+  let cardPositions = {};
   let selectedProjeto = null;
   let slideIndex = 0;
   let carouselTimer = null;
+  let boardEl;
+  let draggingId = null;
+  let dragOffset = { x: 0, y: 0 };
+  let dragMoved = false;
 
   $: isDark = $theme === 'dark';
-  $: proximosEmAnalise = projetosMock.filter((p) => p.status === STATUS.EM_ESPERA);
+  $: proximosEmAnalise = projetos.filter((p) => p.status === STATUS.EM_ESPERA);
   $: tickerItems = [...proximosEmAnalise, ...proximosEmAnalise];
+  $: boardMinHeight = Math.max(
+    480,
+    ...Object.values(cardPositions).map((p) => (p?.y || 0) + CARD_H_EST + 24)
+  );
 
   function statusClass(status) {
     if (status === STATUS.APROVADO) return 'status-aprovado';
     if (status === STATUS.REPROVADO) return 'status-reprovado';
     return 'status-espera';
+  }
+
+  function applyDefaultLayout() {
+    const width = boardEl?.clientWidth || 1100;
+    const cols = Math.max(1, Math.floor((width - 24) / (CARD_W + CARD_GAP)));
+    const next = {};
+    projetos.forEach((p, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      next[p.id] = {
+        x: 12 + col * (CARD_W + CARD_GAP),
+        y: 12 + row * (CARD_H_EST + CARD_GAP)
+      };
+    });
+    cardPositions = next;
+  }
+
+  function loadLayout() {
+    try {
+      const raw = localStorage.getItem(LAYOUT_KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return false;
+      const next = {};
+      let ok = false;
+      for (const p of projetos) {
+        if (parsed[p.id] && typeof parsed[p.id].x === 'number' && typeof parsed[p.id].y === 'number') {
+          next[p.id] = { x: parsed[p.id].x, y: parsed[p.id].y };
+          ok = true;
+        }
+      }
+      if (!ok) return false;
+      // Preenche faltantes
+      projetos.forEach((p, i) => {
+        if (!next[p.id]) {
+          next[p.id] = { x: 12 + (i % 3) * (CARD_W + CARD_GAP), y: 12 + Math.floor(i / 3) * (CARD_H_EST + CARD_GAP) };
+        }
+      });
+      cardPositions = next;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function saveLayout() {
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(cardPositions));
+    } catch {
+      /* ignore */
+    }
   }
 
   function openProjeto(projeto) {
@@ -192,11 +258,61 @@
     if (event.key === 'Escape' && selectedProjeto) closeProjeto();
   }
 
+  function boardPoint(event) {
+    const rect = boardEl.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
+    };
+  }
+
+  function onCardPointerDown(event, projeto) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const pos = cardPositions[projeto.id] || { x: 0, y: 0 };
+    const point = boardPoint(event);
+    draggingId = projeto.id;
+    dragMoved = false;
+    dragOffset = { x: point.x - pos.x, y: point.y - pos.y };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function onCardPointerMove(event, projeto) {
+    if (draggingId !== projeto.id) return;
+    const point = boardPoint(event);
+    const nextX = Math.max(0, point.x - dragOffset.x);
+    const nextY = Math.max(0, point.y - dragOffset.y);
+    const prev = cardPositions[projeto.id] || { x: 0, y: 0 };
+    if (Math.abs(nextX - prev.x) > 3 || Math.abs(nextY - prev.y) > 3) {
+      dragMoved = true;
+    }
+    cardPositions = {
+      ...cardPositions,
+      [projeto.id]: { x: nextX, y: nextY }
+    };
+  }
+
+  function onCardPointerUp(event, projeto) {
+    if (draggingId !== projeto.id) return;
+    draggingId = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+    if (dragMoved) {
+      saveLayout();
+    } else {
+      openProjeto(projeto);
+    }
+  }
+
   onMount(() => {
     if (onSettingsRequest) onSettingsRequest(null);
     if (onSettingsHover) onSettingsHover(null);
     toolShellThemeToggle.set(true);
     window.addEventListener('keydown', onKeydown);
+    if (!loadLayout()) applyDefaultLayout();
   });
 
   onDestroy(() => {
@@ -208,9 +324,30 @@
 
 <div class="cia-root" class:theme-dark={isDark}>
   <div class="cia-scroll">
-    <section class="cia-grid" aria-label="Projetos">
-      {#each projetosMock as projeto (projeto.id)}
-        <button type="button" class="cia-card" on:click={() => openProjeto(projeto)}>
+    <section
+      class="cia-board"
+      bind:this={boardEl}
+      aria-label="Projetos — arraste para reposicionar"
+      style="min-height: {boardMinHeight}px;"
+    >
+      {#each projetos as projeto (projeto.id)}
+        <div
+          role="button"
+          tabindex="0"
+          class="cia-card"
+          class:dragging={draggingId === projeto.id}
+          style="left: {cardPositions[projeto.id]?.x ?? 0}px; top: {cardPositions[projeto.id]?.y ?? 0}px; width: {CARD_W}px;"
+          on:pointerdown={(e) => onCardPointerDown(e, projeto)}
+          on:pointermove={(e) => onCardPointerMove(e, projeto)}
+          on:pointerup={(e) => onCardPointerUp(e, projeto)}
+          on:pointercancel={(e) => onCardPointerUp(e, projeto)}
+          on:keydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              openProjeto(projeto);
+            }
+          }}
+        >
           <div class="cia-card-status {statusClass(projeto.status)}">{projeto.status}</div>
           <div class="cia-card-visual {statusClass(projeto.status)}">
             <span>{projeto.nome}</span>
@@ -223,7 +360,7 @@
             <p class="cia-card-resumo">{projeto.resumo}</p>
           </div>
           <div class="cia-card-action {statusClass(projeto.status)}">Ver detalhes</div>
-        </button>
+        </div>
       {/each}
     </section>
   </div>
@@ -376,13 +513,16 @@
     gap: 1.25rem;
   }
 
-  .cia-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 1rem;
+  .cia-board {
+    position: relative;
+    width: 100%;
+    min-height: 480px;
+    user-select: none;
+    touch-action: none;
   }
 
   .cia-card {
+    position: absolute;
     display: flex;
     flex-direction: column;
     padding: 0;
@@ -391,14 +531,21 @@
     overflow: hidden;
     background: var(--cia-surface);
     box-shadow: 0 2px 10px rgba(30, 27, 75, 0.06);
-    cursor: pointer;
+    cursor: grab;
     text-align: left;
     color: inherit;
-    transition: transform 0.18s ease, box-shadow 0.18s ease;
+    transition: box-shadow 0.18s ease;
+    z-index: 1;
+  }
+
+  .cia-card.dragging {
+    cursor: grabbing;
+    z-index: 20;
+    box-shadow: 0 12px 28px rgba(76, 29, 149, 0.28);
+    opacity: 0.96;
   }
 
   .cia-card:hover {
-    transform: translateY(-3px);
     box-shadow: 0 10px 24px rgba(76, 29, 149, 0.14);
   }
 
