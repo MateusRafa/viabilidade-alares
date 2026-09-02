@@ -146,6 +146,8 @@
   const CARD_GAP = 16;
   const CARD_H_EST = 360;
 
+  const SNAP = 12;
+
   let projetos = [...projetosMock];
   let cardPositions = {};
   let selectedProjeto = null;
@@ -155,6 +157,8 @@
   let draggingId = null;
   let dragOffset = { x: 0, y: 0 };
   let dragMoved = false;
+  let snapAssist = true;
+  let alignGuides = { x: null, y: null };
 
   $: isDark = $theme === 'dark';
   $: proximosEmAnalise = projetos.filter((p) => p.status === STATUS.EM_ESPERA);
@@ -219,6 +223,67 @@
     } catch {
       /* ignore */
     }
+  }
+
+  /** Organiza em grade, mantendo a ordem visual atual. Não trava o arraste. */
+  function alinharCards() {
+    const ordered = [...projetos].sort((a, b) => {
+      const pa = cardPositions[a.id] || { x: 0, y: 0 };
+      const pb = cardPositions[b.id] || { x: 0, y: 0 };
+      if (Math.abs(pa.y - pb.y) > 48) return pa.y - pb.y;
+      return pa.x - pb.x;
+    });
+    const width = boardEl?.clientWidth || 1100;
+    const cols = Math.max(1, Math.floor((width - 24) / (CARD_W + CARD_GAP)));
+    const next = {};
+    ordered.forEach((p, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      next[p.id] = {
+        x: 12 + col * (CARD_W + CARD_GAP),
+        y: 12 + row * (CARD_H_EST + CARD_GAP)
+      };
+    });
+    cardPositions = next;
+    alignGuides = { x: null, y: null };
+    saveLayout();
+  }
+
+  function snapToNeighbors(id, x, y) {
+    if (!snapAssist) {
+      alignGuides = { x: null, y: null };
+      return { x, y };
+    }
+
+    let nextX = x;
+    let nextY = y;
+    let guideX = null;
+    let guideY = null;
+
+    for (const p of projetos) {
+      if (p.id === id) continue;
+      const pos = cardPositions[p.id];
+      if (!pos) continue;
+
+      const targetsX = [pos.x, pos.x + CARD_W + CARD_GAP];
+      for (const tx of targetsX) {
+        if (Math.abs(x - tx) <= SNAP) {
+          nextX = tx;
+          guideX = tx;
+        }
+      }
+
+      const targetsY = [pos.y, pos.y + CARD_H_EST + CARD_GAP];
+      for (const ty of targetsY) {
+        if (Math.abs(y - ty) <= SNAP) {
+          nextY = ty;
+          guideY = ty;
+        }
+      }
+    }
+
+    alignGuides = { x: guideX, y: guideY };
+    return { x: Math.max(0, nextX), y: Math.max(0, nextY) };
   }
 
   function openProjeto(projeto) {
@@ -286,15 +351,17 @@
     if (Math.abs(nextX - prev.x) > 3 || Math.abs(nextY - prev.y) > 3) {
       dragMoved = true;
     }
+    const next = snapToNeighbors(projeto.id, nextX, nextY);
     cardPositions = {
       ...cardPositions,
-      [projeto.id]: { x: nextX, y: nextY }
+      [projeto.id]: next
     };
   }
 
   function onCardPointerUp(event, projeto) {
     if (draggingId !== projeto.id) return;
     draggingId = null;
+    alignGuides = { x: null, y: null };
     try {
       event.currentTarget.releasePointerCapture(event.pointerId);
     } catch {
@@ -324,12 +391,27 @@
 
 <div class="cia-root" class:theme-dark={isDark}>
   <div class="cia-scroll">
+    <div class="cia-align-bar">
+      <button type="button" class="cia-align-btn" on:click={alinharCards} title="Organiza os cards em grade. Depois você pode arrastar de novo.">
+        Alinhar
+      </button>
+      <label class="cia-snap-toggle" title="Quando estiver perto de outro card, sugere o alinhamento. Não trava a posição.">
+        <input type="checkbox" bind:checked={snapAssist} />
+        Guia
+      </label>
+    </div>
     <section
       class="cia-board"
       bind:this={boardEl}
       aria-label="Projetos — arraste para reposicionar"
       style="min-height: {boardMinHeight}px;"
     >
+      {#if alignGuides.x != null}
+        <div class="cia-guide vertical" style="left: {alignGuides.x}px;"></div>
+      {/if}
+      {#if alignGuides.y != null}
+        <div class="cia-guide horizontal" style="top: {alignGuides.y}px;"></div>
+      {/if}
       {#each projetos as projeto (projeto.id)}
         <div
           role="button"
@@ -507,10 +589,66 @@
   .cia-scroll {
     flex: 1;
     overflow-y: auto;
-    padding: 1.5rem 1.75rem 1rem;
+    padding: 0.75rem 1.75rem 1rem;
     display: flex;
     flex-direction: column;
-    gap: 1.25rem;
+    gap: 0.65rem;
+  }
+
+  .cia-align-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-shrink: 0;
+  }
+
+  .cia-align-btn {
+    border: none;
+    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 700;
+    padding: 0.4rem 0.9rem;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .cia-align-btn:hover {
+    filter: brightness(1.08);
+  }
+
+  .cia-snap-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--cia-muted);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .cia-snap-toggle input {
+    accent-color: #7B68EE;
+  }
+
+  .cia-guide {
+    position: absolute;
+    pointer-events: none;
+    z-index: 30;
+    background: #7B68EE;
+  }
+
+  .cia-guide.vertical {
+    top: 0;
+    bottom: 0;
+    width: 1px;
+  }
+
+  .cia-guide.horizontal {
+    left: 0;
+    right: 0;
+    height: 1px;
   }
 
   .cia-board {
