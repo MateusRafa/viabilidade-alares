@@ -4,6 +4,7 @@
     toolShellHeaderShortcut,
     toolShellSearch,
     toolShellThemeToggle,
+    toolShellAddAction,
     toolShellViewToggle
   } from '../toolShellStore.js';
   import { theme } from '../themeStore.js';
@@ -21,6 +22,7 @@
   $: headerShortcut = $toolShellHeaderShortcut;
   $: viewToggle = $toolShellViewToggle;
   $: showThemeToggle = $toolShellThemeToggle;
+  $: addAction = $toolShellAddAction;
   $: isDark = $theme === 'dark';
 
   function toggleSearch() {
@@ -184,6 +186,32 @@
               />
             </svg>
           {/if}
+        </button>
+      {/if}
+
+      {#if addAction?.onClick}
+        <button
+          class="header-action-button header-add"
+          class:active={addAction.active}
+          on:click|stopPropagation={addAction.onClick}
+          aria-label={addAction.label || 'Adicionar'}
+          title={addAction.title || addAction.label || 'Adicionar'}
+          type="button"
+          disabled={addAction.disabled}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle
+              cx="12"
+              cy="12"
+              r="8.2"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-dasharray="46 6"
+              stroke-dashoffset="2"
+              stroke-linecap="round"
+            />
+            <path d="M12 8.2v7.6M8.2 12h7.6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+          </svg>
         </button>
       {/if}
 
