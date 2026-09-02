@@ -465,6 +465,7 @@
     role="presentation"
     on:click={closeProjeto}
   >
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
     <div
       class="cia-modal"
       role="dialog"
@@ -556,6 +557,7 @@
     role="presentation"
     on:click={closeAddModal}
   >
+    <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
     <div
       class="cia-modal cia-add-modal"
       role="dialog"
