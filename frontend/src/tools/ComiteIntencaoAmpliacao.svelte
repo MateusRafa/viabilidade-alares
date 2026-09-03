@@ -706,7 +706,7 @@
       aria-labelledby="cia-add-title"
       on:click|stopPropagation
     >
-      <header class="cia-modal-header">
+      <header class="cia-modal-header cia-add-header">
         <div>
           <h3 id="cia-add-title">Adicionar novo arquivo</h3>
           <p>Preencha os dados do novo projeto do comitê.</p>
@@ -1162,26 +1162,67 @@
   .cia-add-modal {
     width: min(920px, 100%);
     max-height: min(92vh, 900px);
+    border: 1px solid rgba(123, 104, 238, 0.25);
+  }
+
+  .cia-add-header {
+    align-items: center;
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
+    border-bottom: 2px solid #7B68EE;
+    color: #fff;
+  }
+
+  .cia-add-header h3 {
+    color: #fff;
+    font-weight: 600;
+  }
+
+  .cia-add-header p {
+    color: rgba(255, 255, 255, 0.88);
+  }
+
+  .cia-add-header .cia-modal-close {
+    color: #fff;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+  }
+
+  .cia-add-header .cia-modal-close:hover {
+    background: rgba(255, 255, 255, 0.2);
   }
 
   .cia-add-body {
-    padding: 1rem 1.25rem 1.25rem;
+    padding: 1.25rem 1.5rem 1.5rem;
     overflow: auto;
+    background: #f8f7fc;
+  }
+
+  .cia-modal-overlay.theme-dark .cia-add-body {
+    background: #151a2e;
   }
 
   .cia-form-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.75rem 1rem;
+    gap: 0.85rem 1rem;
   }
 
   .cia-field {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    font-size: 0.78rem;
+    font-size: 0.8rem;
     font-weight: 600;
-    color: var(--cia-muted, #64748b);
+    color: #4c1d95;
+  }
+
+  .cia-modal-overlay.theme-dark .cia-field {
+    color: #c4b5fd;
   }
 
   .cia-field-full {
@@ -1190,28 +1231,36 @@
 
   .cia-field input,
   .cia-field select {
-    border: 1px solid rgba(123, 104, 238, 0.28);
+    border: 1px solid rgba(123, 104, 238, 0.35);
     border-radius: 8px;
-    padding: 0.55rem 0.7rem;
+    padding: 0.6rem 0.75rem;
     font-size: 0.9rem;
     font-weight: 500;
-    color: var(--cia-text, #1e1b4b);
+    color: #1e1b4b;
     background: #fff;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+
+  .cia-field input:focus,
+  .cia-field select:focus {
+    outline: none;
+    border-color: #7B68EE;
+    box-shadow: 0 0 0 3px rgba(123, 104, 238, 0.18);
   }
 
   .cia-modal-overlay.theme-dark .cia-field input,
   .cia-modal-overlay.theme-dark .cia-field select {
     background: #232a42;
     color: #e8eaf6;
-    border-color: rgba(123, 104, 238, 0.35);
+    border-color: rgba(123, 104, 238, 0.4);
   }
 
   .cia-images-box {
-    margin-top: 1rem;
-    padding: 0.9rem;
-    border: 1px dashed rgba(123, 104, 238, 0.4);
+    margin-top: 1.15rem;
+    padding: 1rem;
+    border: 1px dashed #7B68EE;
     border-radius: 10px;
-    background: rgba(123, 104, 238, 0.05);
+    background: linear-gradient(180deg, rgba(123, 104, 238, 0.1) 0%, rgba(100, 149, 237, 0.06) 100%);
   }
 
   .cia-images-head {
@@ -1222,13 +1271,17 @@
   }
 
   .cia-images-head strong {
-    color: var(--cia-text, #1e1b4b);
-    font-size: 0.9rem;
+    color: #4c1d95;
+    font-size: 0.92rem;
+  }
+
+  .cia-modal-overlay.theme-dark .cia-images-head strong {
+    color: #c4b5fd;
   }
 
   .cia-images-head span {
     font-size: 0.78rem;
-    color: var(--cia-muted, #64748b);
+    color: #64748b;
   }
 
   .cia-file-input {
@@ -1237,13 +1290,21 @@
 
   .cia-images-add {
     border: none;
-    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
     color: #fff;
-    font-weight: 700;
-    font-size: 0.82rem;
-    padding: 0.55rem 0.9rem;
+    font-weight: 600;
+    font-size: 0.85rem;
+    padding: 0.65rem 1.1rem;
     border-radius: 8px;
     cursor: pointer;
+    box-shadow: 0 4px 6px rgba(123, 104, 238, 0.3);
+    transition: transform 0.2s, box-shadow 0.2s, filter 0.2s;
+  }
+
+  .cia-images-add:hover {
+    filter: brightness(1.06);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 12px rgba(123, 104, 238, 0.4);
   }
 
   .cia-images-grid {
@@ -1258,7 +1319,7 @@
     aspect-ratio: 1;
     border-radius: 8px;
     overflow: hidden;
-    border: 1px solid rgba(123, 104, 238, 0.25);
+    border: 1px solid rgba(123, 104, 238, 0.35);
   }
 
   .cia-image-thumb img {
@@ -1276,7 +1337,7 @@
     height: 22px;
     border: none;
     border-radius: 50%;
-    background: rgba(15, 18, 32, 0.7);
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
     color: #fff;
     cursor: pointer;
     line-height: 1;
@@ -1285,7 +1346,7 @@
   .cia-images-empty {
     margin: 0.65rem 0 0;
     font-size: 0.8rem;
-    color: var(--cia-muted, #64748b);
+    color: #64748b;
   }
 
   .cia-form-error {
@@ -1298,29 +1359,47 @@
   .cia-form-actions {
     display: flex;
     justify-content: flex-end;
-    gap: 0.6rem;
-    margin-top: 1rem;
+    gap: 0.75rem;
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(123, 104, 238, 0.2);
   }
 
   .cia-btn-primary,
   .cia-btn-secondary {
     border: none;
     border-radius: 8px;
-    padding: 0.6rem 1rem;
-    font-weight: 700;
-    font-size: 0.85rem;
+    padding: 0.7rem 1.35rem;
+    font-weight: 600;
+    font-size: 0.9rem;
     cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s, background 0.2s, filter 0.2s;
   }
 
   .cia-btn-primary {
-    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
     color: #fff;
+    box-shadow: 0 4px 6px rgba(123, 104, 238, 0.3);
+  }
+
+  .cia-btn-primary:hover {
+    filter: brightness(1.06);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 12px rgba(123, 104, 238, 0.4);
   }
 
   .cia-btn-secondary {
-    background: transparent;
-    border: 1px solid rgba(123, 104, 238, 0.35);
-    color: var(--cia-text, #1e1b4b);
+    background: #e8e4f8;
+    color: #4c1d95;
+  }
+
+  .cia-btn-secondary:hover {
+    background: #ddd6f5;
+  }
+
+  .cia-modal-overlay.theme-dark .cia-btn-secondary {
+    background: #2a3150;
+    color: #e8eaf6;
   }
 
   @media (max-width: 700px) {
