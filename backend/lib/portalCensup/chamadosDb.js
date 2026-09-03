@@ -27,8 +27,7 @@ const CORE_KEYS = new Set([
   'updatedAt',
   'dataSituacaoLabel',
   'persistedToSupabase',
-  'supabaseError',
-  'pdfHtml'
+  'supabaseError'
 ]);
 
 function parseDataSituacao(value) {
