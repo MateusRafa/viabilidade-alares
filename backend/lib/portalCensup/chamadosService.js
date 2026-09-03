@@ -949,7 +949,8 @@ export async function analisarChamadoById(id, { force = false } = {}) {
 
   try {
     const current = await findChamadoByPedidoOrCode({ id });
-    const result = await analisarLocalizacaoChamado(current);
+    const learned = await findLearnedTabulacaoForChamado(current);
+    const result = await analisarLocalizacaoChamado(current, { learned });
     await upsertChamado({
       ...current,
       analiseStatus: result.analiseStatus,
@@ -992,7 +993,7 @@ export function analisarChamadoEmBackground(id) {
   }, 50);
 }
 
-export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigida = null }) {
+export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigida = null, enderecoSnapshot = null, cidadeSnapshot = null, origem = 'manual', tabulacaoSugeridaOverride = null }) {
   const chamado = await findChamadoByPedidoOrCode({ id });
   if (!chamado) {
     const err = new Error('Chamado não encontrado');
@@ -1000,14 +1001,27 @@ export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigid
     throw err;
   }
 
+  const end = chamado.endereco || {};
   const feedbackEntry = {
     id: crypto.randomUUID(),
     chamadoId: id,
     pedido: chamado.pedido,
     usuario,
     correto: correto === true,
-    tabulacaoSugerida: chamado.tabulacaoFinal,
-    tabulacaoCorrigida: correto === true ? chamado.tabulacaoFinal : tabulacaoCorrigida,
+    tabulacaoSugerida:
+      tabulacaoSugeridaOverride ||
+      chamado.analiseIa?.tabulacaoSugerida ||
+      chamado.tabulacaoFinal ||
+      null,
+    tabulacaoCorrigida: correto === true
+      ? (tabulacaoSugeridaOverride || chamado.tabulacaoFinal)
+      : tabulacaoCorrigida,
+    endereco:
+      enderecoSnapshot ||
+      end.completo ||
+      null,
+    cidade: cidadeSnapshot || end.cidade || chamado.cidade || null,
+    origem: origem || 'manual',
     createdAt: new Date().toISOString()
   };
 
@@ -1030,10 +1044,168 @@ export async function registerFeedback(id, { usuario, correto, tabulacaoCorrigid
   const store = await readStore();
   store.feedback = Array.isArray(store.feedback) ? store.feedback : [];
   store.feedback.unshift(feedbackEntry);
+  store.feedback = store.feedback.slice(0, 2000);
   await writeStore(store);
 
   return {
     chamado: await getChamadoById(id),
     feedback: feedbackEntry
+  };
+}
+
+function normalizeLearnText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export async function findLearnedTabulacaoForChamado(chamado) {
+  const store = await readStore();
+  const feedback = Array.isArray(store.feedback) ? store.feedback : [];
+  if (!feedback.length) return null;
+
+  const endereco = normalizeLearnText(chamado?.endereco?.completo);
+  const cidade = normalizeLearnText(chamado?.endereco?.cidade || chamado?.cidade);
+
+  const exact = feedback.find((fb) => {
+    if (!fb?.tabulacaoCorrigida || fb.correto === true) return false;
+    const fbEnd = normalizeLearnText(fb.endereco);
+    return endereco && fbEnd && fbEnd === endereco;
+  });
+  if (exact) {
+    return {
+      tabulacaoFinal: exact.tabulacaoCorrigida,
+      confianca: 0.88,
+      motivo: `Mesmo endereço já corrigido anteriormente para “${exact.tabulacaoCorrigida}”.`
+    };
+  }
+
+  const byCityCounts = {};
+  for (const fb of feedback) {
+    if (!fb?.tabulacaoCorrigida || fb.correto === true) continue;
+    const fbCity = normalizeLearnText(fb.cidade);
+    if (!fbCity || fbCity !== cidade) continue;
+    byCityCounts[fb.tabulacaoCorrigida] = (byCityCounts[fb.tabulacaoCorrigida] || 0) + 1;
+  }
+
+  if (cidade) {
+    const ranked = Object.entries(byCityCounts).sort((a, b) => b[1] - a[1]);
+    if (ranked[0] && ranked[0][1] >= 3) {
+      return {
+        tabulacaoFinal: ranked[0][0],
+        confianca: 0.72,
+        motivo: `Padrão de correções na cidade ${chamado?.cidade || cidade}: “${ranked[0][0]}”.`
+      };
+    }
+  }
+
+  return null;
+}
+
+export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persist = true } = {}) {
+  const chamado = await findChamadoByPedidoOrCode({ id });
+  if (!chamado) {
+    const err = new Error('Chamado não encontrado');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const numeroALA = String(report.numeroALA || chamado.pedido || '').replace(/\D/g, '');
+  const cidade = String(report.cidade || chamado.endereco?.cidade || chamado.cidade || '').trim();
+  const enderecoCompleto = String(report.enderecoCompleto || chamado.endereco?.completo || '').trim();
+  const numeroEndereco = String(report.numeroEndereco || chamado.endereco?.numero || '').trim();
+  const cep = String(report.cep || chamado.endereco?.cep || '').trim();
+  const tabulacaoFinal = String(report.tabulacaoFinal || '').trim();
+  const projetista = String(report.projetista || usuario || '').trim();
+  const sugeridaOriginal = String(
+    report.tabulacaoSugeridaOriginal ||
+      chamado.analiseIa?.tabulacaoSugerida ||
+      chamado.tabulacaoFinal ||
+      ''
+  ).trim();
+
+  if (!tabulacaoFinal) {
+    const err = new Error('Tabulação Final é obrigatória');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const next = {
+    ...chamado,
+    pedido: numeroALA || chamado.pedido,
+    cidade: cidade || chamado.cidade,
+    endereco: {
+      ...(chamado.endereco || {}),
+      completo: enderecoCompleto || chamado.endereco?.completo || null,
+      numero: numeroEndereco || chamado.endereco?.numero || null,
+      cep: cep || chamado.endereco?.cep || null,
+      cidade: cidade || chamado.endereco?.cidade || null
+    },
+    tabulacaoFinal,
+    viabilidadeResumo: {
+      ...(chamado.viabilidadeResumo || {}),
+      projetista: projetista || chamado.viabilidadeResumo?.projetista || null
+    },
+    relatorio: {
+      numeroALA: numeroALA || null,
+      cidade,
+      enderecoCompleto,
+      numeroEndereco,
+      cep,
+      tabulacaoFinal,
+      projetista,
+      savedAt: new Date().toISOString(),
+      savedBy: usuario || null
+    },
+    updatedAt: new Date().toISOString()
+  };
+
+  const pdfHtml = buildChamadoPdfHtml(next);
+  next.pdfHtml = pdfHtml;
+
+  let corrected = false;
+  if (persist) {
+    const suggested = sugeridaOriginal || chamado.tabulacaoFinal || '';
+    corrected =
+      !!suggested &&
+      normalizeLearnText(suggested) !== normalizeLearnText(tabulacaoFinal);
+
+    next.tabulacaoStatus = corrected ? 'corrigida' : 'aprovada';
+    next.filaStatus = 'finalizada';
+    next.relatorioSalvo = true;
+    next.relatorioSalvoAt = next.updatedAt;
+
+    await upsertChamado(next);
+
+    if (corrected) {
+      await registerFeedback(id, {
+        usuario,
+        correto: false,
+        tabulacaoCorrigida: tabulacaoFinal,
+        tabulacaoSugeridaOverride: suggested,
+        enderecoSnapshot: enderecoCompleto,
+        cidadeSnapshot: cidade,
+        origem: 'workbench_implicito'
+      });
+    } else {
+      await registerFeedback(id, {
+        usuario,
+        correto: true,
+        tabulacaoSugeridaOverride: suggested || tabulacaoFinal,
+        enderecoSnapshot: enderecoCompleto,
+        cidadeSnapshot: cidade,
+        origem: 'workbench_implicito'
+      });
+    }
+  }
+
+  return {
+    chamado: persist ? await getChamadoById(id) : { ...next, pdfHtml },
+    pdfHtml,
+    corrected,
+    persisted: persist === true
   };
 }
