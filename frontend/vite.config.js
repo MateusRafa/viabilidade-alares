@@ -1,5 +1,9 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   plugins: [
@@ -37,6 +41,10 @@ export default defineConfig({
     // Configurar timeouts maiores para builds pesados
     buildTimeout: 300000, // 5 minutos de timeout
     rollupOptions: {
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        embed: resolve(__dirname, 'embed.html')
+      },
       output: {
         manualChunks: (id) => {
           // Separar node_modules em chunks menores para melhor cache
