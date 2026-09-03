@@ -214,8 +214,8 @@ function isUuid(value) {
   );
 }
 
-export async function dbReconcileChamadosComAgenda(activePedidos = new Set()) {
-  if (!isPortalCensupSupabaseAvailable()) return { updated: 0 };
+export async function dbReconcileChamadosComAgenda(activePedidos = new Set(), situacaoMap = new Map()) {
+  if (!isPortalCensupSupabaseAvailable()) return { updated: 0, situacoesAtualizadas: 0 };
 
   const activeSet =
     activePedidos instanceof Set
@@ -226,7 +226,7 @@ export async function dbReconcileChamadosComAgenda(activePedidos = new Set()) {
 
   const { data, error } = await client()
     .from(TABLE)
-    .select('id, pedido, fila_status')
+    .select('id, pedido, fila_status, situacao')
     .in('fila_status', ['na_fila', 'finalizada']);
   throwIfError(error, 'listar chamados para reconciliação com Agenda');
 
@@ -235,18 +235,46 @@ export async function dbReconcileChamadosComAgenda(activePedidos = new Set()) {
     return pedido && !activeSet.has(pedido);
   });
 
-  if (!toArchive.length) return { updated: 0 };
+  let updated = 0;
+  if (toArchive.length) {
+    const ids = toArchive.map((row) => row.id);
+    const now = new Date().toISOString();
+    const { error: updateError } = await client()
+      .from(TABLE)
+      .update({ fila_status: 'executada_agenda', updated_at: now })
+      .in('id', ids);
+    throwIfError(updateError, 'arquivar chamados executados na Agenda');
 
-  const ids = toArchive.map((row) => row.id);
-  const now = new Date().toISOString();
-  const { error: updateError } = await client()
-    .from(TABLE)
-    .update({ fila_status: 'executada_agenda', updated_at: now })
-    .in('id', ids);
-  throwIfError(updateError, 'arquivar chamados executados na Agenda');
+    console.log(`✅ [PortalCENSUP][Supabase] ${ids.length} chamado(s) arquivado(s) — executados na Agenda.`);
+    updated = ids.length;
+  }
 
-  console.log(`✅ [PortalCENSUP][Supabase] ${ids.length} chamado(s) arquivado(s) — executados na Agenda.`);
-  return { updated: ids.length };
+  // Atualizar situação dos chamados ativos cuja situação mudou na Agenda
+  let situacoesAtualizadas = 0;
+  if (situacaoMap.size > 0) {
+    const now = new Date().toISOString();
+    for (const row of (data || [])) {
+      const pedido = String(row.pedido || '').trim();
+      if (!pedido || !situacaoMap.has(pedido)) continue;
+      const novaSituacao = situacaoMap.get(pedido);
+      if (!novaSituacao || novaSituacao === (row.situacao || '')) continue;
+
+      const { error: upErr } = await client()
+        .from(TABLE)
+        .update({ situacao: novaSituacao, updated_at: now })
+        .eq('id', row.id);
+      if (upErr) {
+        console.warn(`⚠️ [PortalCENSUP][Supabase] Falha ao atualizar situação do pedido ${pedido}:`, upErr.message);
+        continue;
+      }
+      situacoesAtualizadas += 1;
+    }
+    if (situacoesAtualizadas > 0) {
+      console.log(`✅ [PortalCENSUP][Supabase] ${situacoesAtualizadas} situação(ões) atualizada(s) da Agenda.`);
+    }
+  }
+
+  return { updated, situacoesAtualizadas };
 }
 
 export async function dbUpsertChamado(chamado) {
