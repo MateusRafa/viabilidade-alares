@@ -766,41 +766,66 @@ export async function upsertChamadoFromAgenda(payload) {
  * Chamados que sumiram da Agenda (aprovados/reprovados lá) saem das views do Portal.
  * Não vão para Resolvidos — apenas fila_status = executada_agenda (oculto).
  */
-export async function reconcileChamadosComAgenda(activePedidos = []) {
+export async function reconcileChamadosComAgenda(activePedidos = [], situacoes = []) {
   const activeSet = new Set(
     (activePedidos || []).map((pedido) => String(pedido || '').trim()).filter(Boolean)
   );
 
+  // Mapa pedido → situação vinda da Agenda
+  const situacaoMap = new Map();
+  for (const item of (situacoes || [])) {
+    const pedido = String(item?.pedido || '').trim();
+    const situacao = String(item?.situacao || '').trim();
+    if (pedido && situacao) situacaoMap.set(pedido, situacao);
+  }
+
   let updated = 0;
+  let situacoesAtualizadas = 0;
 
   if (isPortalCensupSupabaseAvailable()) {
-    const dbResult = await dbReconcileChamadosComAgenda(activeSet);
+    const dbResult = await dbReconcileChamadosComAgenda(activeSet, situacaoMap);
     updated = dbResult?.updated || 0;
-    if (updated > 0) {
+    situacoesAtualizadas = dbResult?.situacoesAtualizadas || 0;
+    if (updated > 0 || situacoesAtualizadas > 0) {
       await syncJsonFromSupabase().catch((err) => {
         console.warn('⚠️ [PortalCENSUP] JSON local não atualizado após reconciliação:', err.message);
       });
     }
-    return { updated, activeInAgenda: activeSet.size };
+    return { updated, situacoesAtualizadas, activeInAgenda: activeSet.size };
   }
 
   const store = await readStore();
   for (const item of store.chamados) {
     const status = item.filaStatus || 'na_fila';
-    if (status !== 'na_fila' && status !== 'finalizada') continue;
     const pedido = String(item.pedido || '').trim();
+
+    // Atualizar situação se mudou
+    if (pedido && situacaoMap.has(pedido)) {
+      const novaSituacao = situacaoMap.get(pedido);
+      if (novaSituacao && novaSituacao !== item.situacao) {
+        item.situacao = novaSituacao;
+        situacoesAtualizadas += 1;
+      }
+    }
+
+    if (status !== 'na_fila' && status !== 'finalizada') continue;
     if (!pedido || activeSet.has(pedido)) continue;
     item.filaStatus = 'executada_agenda';
     item.executadaAgendaAt = new Date().toISOString();
     updated += 1;
   }
 
-  if (updated > 0) {
+  if (updated > 0 || situacoesAtualizadas > 0) {
     await writeStore(store);
-    console.log(`✅ [PortalCENSUP] ${updated} chamado(s) arquivado(s) — executados na Agenda.`);
+    if (updated > 0) {
+      console.log(`✅ [PortalCENSUP] ${updated} chamado(s) arquivado(s) — executados na Agenda.`);
+    }
+    if (situacoesAtualizadas > 0) {
+      console.log(`✅ [PortalCENSUP] ${situacoesAtualizadas} situação(ões) atualizada(s) da Agenda.`);
+    }
   }
 
-  return { updated, activeInAgenda: activeSet.size };
+  return { updated, situacoesAtualizadas, activeInAgenda: activeSet.size };
 }
 
 function isUuid(value) {
