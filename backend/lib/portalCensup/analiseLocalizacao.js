@@ -175,7 +175,18 @@ async function checkCoverage(lat, lng) {
   };
 }
 
-function suggestTabulacao(coverage) {
+function suggestTabulacao(coverage, learned = null) {
+  if (learned?.tabulacaoFinal) {
+    return {
+      tabulacaoFinal: learned.tabulacaoFinal,
+      tabulacaoConfianca: learned.confianca ?? 0.78,
+      tabulacaoStatus: 'pendente_revisao',
+      motivo:
+        learned.motivo ||
+        `Sugestão ajustada com base em correção anterior semelhante (${learned.tabulacaoFinal}).`
+    };
+  }
+
   if (!coverage?.success) {
     return {
       tabulacaoFinal: null,
@@ -222,7 +233,7 @@ function suggestTabulacao(coverage) {
  * 3) geocode de referências do mapa (ex.: Fazenda Nova Era + cidade)
  * 4) check cobertura → tabulação sugerida
  */
-export async function analisarLocalizacaoChamado(chamado) {
+export async function analisarLocalizacaoChamado(chamado, { learned = null } = {}) {
   const passos = [];
   const endereco = chamado.endereco || {};
   const cidade = endereco.cidade || chamado.cidade || '';
@@ -351,7 +362,7 @@ export async function analisarLocalizacaoChamado(chamado) {
     message: coverage.message || null
   });
 
-  const suggestion = suggestTabulacao(coverage);
+  const suggestion = suggestTabulacao(coverage, learned);
   const metodoLabel =
     resolved.metodo === 'referencia_mapa'
       ? `referência do mapa (“${resolved.referencia}”)`
