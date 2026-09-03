@@ -709,7 +709,6 @@
       <header class="cia-modal-header cia-add-header">
         <div>
           <h3 id="cia-add-title">Adicionar novo arquivo</h3>
-          <p>Preencha os dados do novo projeto do comitê.</p>
         </div>
         <button type="button" class="cia-modal-close" on:click={closeAddModal} aria-label="Fechar">
           ×
@@ -1162,23 +1161,24 @@
   .cia-add-modal {
     width: min(920px, 100%);
     max-height: min(92vh, 900px);
-    border: 1px solid rgba(123, 104, 238, 0.25);
+    border: none;
+    background: #fff;
+    box-shadow: 0 24px 60px rgba(15, 18, 32, 0.45);
   }
 
   .cia-add-header {
     align-items: center;
-    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
-    border-bottom: 2px solid #7B68EE;
+    background: linear-gradient(135deg, #7B68EE 0%, #6B5BEE 100%);
+    border-bottom: none;
     color: #fff;
   }
 
   .cia-add-header h3 {
     color: #fff;
-    font-weight: 600;
-  }
-
-  .cia-add-header p {
-    color: rgba(255, 255, 255, 0.88);
+    font-weight: 700;
+    font-size: 1.25rem;
+    text-shadow: none;
+    opacity: 1;
   }
 
   .cia-add-header .cia-modal-close {
@@ -1199,11 +1199,15 @@
   .cia-add-body {
     padding: 1.25rem 1.5rem 1.5rem;
     overflow: auto;
-    background: #f8f7fc;
+    background: #fff;
+  }
+
+  .cia-modal-overlay.theme-dark .cia-add-modal {
+    background: #1a1f33;
   }
 
   .cia-modal-overlay.theme-dark .cia-add-body {
-    background: #151a2e;
+    background: #1a1f33;
   }
 
   .cia-form-grid {
