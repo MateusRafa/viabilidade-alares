@@ -15,6 +15,41 @@
     EM_ESPERA: 'Em Espera'
   };
 
+  const TIPOS_SOLICITACAO = ['Alívio Proativo', 'Crescimento Orgânico', 'MDU'];
+  const DESAFIOS_OCUPACAO = ['Cenário 01', 'Cenário 02', 'Cenário 03'];
+  const STATUS_OPTS = [STATUS.APROVADO, STATUS.REPROVADO, STATUS.EM_ESPERA];
+  const LEILOES_OPTS = ['1ª', '2ª', '3ª', '4ª'];
+
+  function emptyForm() {
+    return {
+      nroChamado: '',
+      hiperlinkChamado: '',
+      dataAbertura: '',
+      solicitanteEmail: '',
+      cidadeUf: '',
+      tipoSolicitacao: '',
+      nomeProjeto: '',
+      hps: '',
+      facilidadesPrevistas: '',
+      capex: '',
+      opex: '',
+      desafioOcupacao: '',
+      posicionamentoFpa: '',
+      posicionamentoEngenharia: '',
+      posicionamentoComercial: '',
+      dataDefesa: '',
+      status: STATUS.EM_ESPERA,
+      quantidadeLeiloes: ''
+    };
+  }
+
+  function formatDateBr(iso) {
+    if (!iso) return '';
+    const [y, m, d] = iso.split('-');
+    if (!y || !m || !d) return iso;
+    return `${d}/${m}/${y}`;
+  }
+
   /** Dados mock — serão substituídos pela ferramenta de cadastro */
   const projetosMock = [
     {
@@ -152,6 +187,10 @@
   let cardPositions = {};
   let selectedProjeto = null;
   let showAddModal = false;
+  let form = emptyForm();
+  let formImages = [];
+  let formError = '';
+  let imageInputEl;
   let slideIndex = 0;
   let carouselTimer = null;
   let boardEl;
@@ -291,18 +330,22 @@
   }
 
   function openAddModal() {
+    form = emptyForm();
+    formImages = [];
+    formError = '';
     showAddModal = true;
     syncAddButton();
   }
 
   function closeAddModal() {
     showAddModal = false;
+    formError = '';
     syncAddButton();
   }
 
   function toggleAddModal() {
-    showAddModal = !showAddModal;
-    syncAddButton();
+    if (showAddModal) closeAddModal();
+    else openAddModal();
   }
 
   function syncAddButton() {
@@ -312,6 +355,71 @@
       active: showAddModal,
       onClick: toggleAddModal
     });
+  }
+
+  function onImagesSelected(event) {
+    const files = Array.from(event.target.files || []).filter((f) => f.type.startsWith('image/'));
+    if (!files.length) return;
+    files.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        formImages = [
+          ...formImages,
+          { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, label: file.name, url: reader.result }
+        ];
+      };
+      reader.readAsDataURL(file);
+    });
+    event.target.value = '';
+  }
+
+  function removeFormImage(id) {
+    formImages = formImages.filter((img) => img.id !== id);
+  }
+
+  function submitNovoProjeto() {
+    formError = '';
+    if (!(form.nomeProjeto || '').trim()) {
+      formError = 'Informe o Nome do Projeto.';
+      return;
+    }
+    if (!form.status) {
+      formError = 'Selecione o Status.';
+      return;
+    }
+
+    const id = `cia-${Date.now()}`;
+    const imagens =
+      formImages.length > 0
+        ? formImages.map((img) => ({ label: img.label, url: img.url }))
+        : [{ label: 'Sem imagem', color: '#7B68EE' }];
+
+    const novo = {
+      id,
+      nome: form.nomeProjeto.trim(),
+      cidade: (form.cidadeUf || '').trim() || '—',
+      responsavel: (form.solicitanteEmail || '').trim() || '—',
+      data: formatDateBr(form.dataDefesa) || formatDateBr(form.dataAbertura) || '—',
+      status: form.status,
+      resumo: form.facilidadesPrevistas || form.tipoSolicitacao || 'Projeto cadastrado no comitê.',
+      campos: { ...form },
+      tecnicos: {
+        area: form.facilidadesPrevistas || '—',
+        ctos: form.hps || '—',
+        clientesEstimados: form.hps || '—',
+        investimento: form.capex ? `CAPEX ${form.capex}` : '—'
+      },
+      estatisticas: { cobertura: 0, demanda: 0, prioridade: 0 },
+      imagens
+    };
+
+    projetos = [novo, ...projetos];
+    cardPositions = {
+      ...cardPositions,
+      [id]: { x: 12, y: 12 }
+    };
+    saveLayout();
+    closeAddModal();
   }
 
   function onKeydown(event) {
@@ -492,9 +600,14 @@
             <div
               class="cia-slide"
               class:active={i === slideIndex}
-              style="background: linear-gradient(160deg, {img.color} 0%, #0f172a 100%);"
+              class:has-image={!!img.url}
+              style={img.url
+                ? `background-image: url('${img.url}');`
+                : `background: linear-gradient(160deg, ${img.color || '#7B68EE'} 0%, #0f172a 100%);`}
             >
-              <span class="cia-slide-label">{img.label}</span>
+              {#if !img.url}
+                <span class="cia-slide-label">{img.label}</span>
+              {/if}
               <span class="cia-slide-count">{i + 1} / {selectedProjeto.imagens.length}</span>
             </div>
           {/each}
@@ -517,33 +630,61 @@
         <aside class="cia-side">
           <section>
             <h4>Informações técnicas</h4>
-            <dl>
-              <div><dt>Área</dt><dd>{selectedProjeto.tecnicos.area}</dd></div>
-              <div><dt>CTOs</dt><dd>{selectedProjeto.tecnicos.ctos}</dd></div>
-              <div><dt>Clientes est.</dt><dd>{selectedProjeto.tecnicos.clientesEstimados}</dd></div>
-              <div><dt>Investimento</dt><dd>{selectedProjeto.tecnicos.investimento}</dd></div>
-              <div><dt>Responsável</dt><dd>{selectedProjeto.responsavel}</dd></div>
-            </dl>
-            <p class="cia-side-resumo">{selectedProjeto.resumo}</p>
+            {#if selectedProjeto.campos}
+              <dl>
+                <div><dt>Nro do Chamado</dt><dd>{selectedProjeto.campos.nroChamado || '—'}</dd></div>
+                <div><dt>Tipo</dt><dd>{selectedProjeto.campos.tipoSolicitacao || '—'}</dd></div>
+                <div><dt>HPs</dt><dd>{selectedProjeto.campos.hps || '—'}</dd></div>
+                <div><dt>CAPEX</dt><dd>{selectedProjeto.campos.capex || '—'}</dd></div>
+                <div><dt>OPEX</dt><dd>{selectedProjeto.campos.opex || '—'}</dd></div>
+                <div><dt>Desafio</dt><dd>{selectedProjeto.campos.desafioOcupacao || '—'}</dd></div>
+                <div><dt>FP&A</dt><dd>{selectedProjeto.campos.posicionamentoFpa || '—'}</dd></div>
+                <div><dt>Engenharia</dt><dd>{selectedProjeto.campos.posicionamentoEngenharia || '—'}</dd></div>
+                <div><dt>Comercial</dt><dd>{selectedProjeto.campos.posicionamentoComercial || '—'}</dd></div>
+                <div><dt>Leilões</dt><dd>{selectedProjeto.campos.quantidadeLeiloes || '—'}</dd></div>
+                <div><dt>Solicitante</dt><dd>{selectedProjeto.campos.solicitanteEmail || '—'}</dd></div>
+              </dl>
+              {#if selectedProjeto.campos.hiperlinkChamado}
+                <p class="cia-side-resumo">
+                  <a href={selectedProjeto.campos.hiperlinkChamado} target="_blank" rel="noopener noreferrer">
+                    Abrir chamado
+                  </a>
+                </p>
+              {/if}
+              {#if selectedProjeto.campos.facilidadesPrevistas}
+                <p class="cia-side-resumo">{selectedProjeto.campos.facilidadesPrevistas}</p>
+              {/if}
+            {:else}
+              <dl>
+                <div><dt>Área</dt><dd>{selectedProjeto.tecnicos.area}</dd></div>
+                <div><dt>CTOs</dt><dd>{selectedProjeto.tecnicos.ctos}</dd></div>
+                <div><dt>Clientes est.</dt><dd>{selectedProjeto.tecnicos.clientesEstimados}</dd></div>
+                <div><dt>Investimento</dt><dd>{selectedProjeto.tecnicos.investimento}</dd></div>
+                <div><dt>Responsável</dt><dd>{selectedProjeto.responsavel}</dd></div>
+              </dl>
+              <p class="cia-side-resumo">{selectedProjeto.resumo}</p>
+            {/if}
           </section>
 
-          <section>
-            <h4>Estatísticas</h4>
-            <div class="cia-stats">
-              <div class="cia-stat">
-                <div class="cia-stat-head"><span>Cobertura</span><strong>{selectedProjeto.estatisticas.cobertura}%</strong></div>
-                <div class="cia-bar"><span style="width: {selectedProjeto.estatisticas.cobertura}%"></span></div>
+          {#if selectedProjeto.estatisticas && (selectedProjeto.estatisticas.cobertura || selectedProjeto.estatisticas.demanda || selectedProjeto.estatisticas.prioridade)}
+            <section>
+              <h4>Estatísticas</h4>
+              <div class="cia-stats">
+                <div class="cia-stat">
+                  <div class="cia-stat-head"><span>Cobertura</span><strong>{selectedProjeto.estatisticas.cobertura}%</strong></div>
+                  <div class="cia-bar"><span style="width: {selectedProjeto.estatisticas.cobertura}%"></span></div>
+                </div>
+                <div class="cia-stat">
+                  <div class="cia-stat-head"><span>Demanda</span><strong>{selectedProjeto.estatisticas.demanda}%</strong></div>
+                  <div class="cia-bar"><span style="width: {selectedProjeto.estatisticas.demanda}%"></span></div>
+                </div>
+                <div class="cia-stat">
+                  <div class="cia-stat-head"><span>Prioridade</span><strong>{selectedProjeto.estatisticas.prioridade}%</strong></div>
+                  <div class="cia-bar priority"><span style="width: {selectedProjeto.estatisticas.prioridade}%"></span></div>
+                </div>
               </div>
-              <div class="cia-stat">
-                <div class="cia-stat-head"><span>Demanda</span><strong>{selectedProjeto.estatisticas.demanda}%</strong></div>
-                <div class="cia-bar"><span style="width: {selectedProjeto.estatisticas.demanda}%"></span></div>
-              </div>
-              <div class="cia-stat">
-                <div class="cia-stat-head"><span>Prioridade</span><strong>{selectedProjeto.estatisticas.prioridade}%</strong></div>
-                <div class="cia-bar priority"><span style="width: {selectedProjeto.estatisticas.prioridade}%"></span></div>
-              </div>
-            </div>
-          </section>
+            </section>
+          {/if}
         </aside>
       </div>
     </div>
@@ -575,9 +716,157 @@
         </button>
       </header>
       <div class="cia-add-body">
-        <p class="cia-add-placeholder">
-          Área do formulário — vamos definir os campos no próximo passo.
-        </p>
+        <form class="cia-form" on:submit|preventDefault={submitNovoProjeto}>
+          <div class="cia-form-grid">
+            <label class="cia-field">
+              <span>Nro do Chamado</span>
+              <input type="text" bind:value={form.nroChamado} />
+            </label>
+            <label class="cia-field">
+              <span>Hiperlink do Chamado</span>
+              <input type="url" placeholder="https://" bind:value={form.hiperlinkChamado} />
+            </label>
+            <label class="cia-field">
+              <span>Data de Abertura</span>
+              <input type="date" bind:value={form.dataAbertura} />
+            </label>
+            <label class="cia-field">
+              <span>Solicitante / e-mail</span>
+              <input type="text" bind:value={form.solicitanteEmail} />
+            </label>
+            <label class="cia-field">
+              <span>Cidade/UF</span>
+              <input type="text" placeholder="Ex.: João Pessoa/PB" bind:value={form.cidadeUf} />
+            </label>
+            <label class="cia-field">
+              <span>Tipo de Solicitação</span>
+              <select bind:value={form.tipoSolicitacao}>
+                <option value="">Selecione</option>
+                {#each TIPOS_SOLICITACAO as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="cia-field cia-field-full">
+              <span>Nome do Projeto</span>
+              <input type="text" required bind:value={form.nomeProjeto} />
+            </label>
+            <label class="cia-field">
+              <span>HPs</span>
+              <input type="text" bind:value={form.hps} />
+            </label>
+            <label class="cia-field">
+              <span>Facilidades Previstas</span>
+              <input type="text" bind:value={form.facilidadesPrevistas} />
+            </label>
+            <label class="cia-field">
+              <span>CAPEX</span>
+              <input type="text" bind:value={form.capex} />
+            </label>
+            <label class="cia-field">
+              <span>OPEX</span>
+              <input type="text" bind:value={form.opex} />
+            </label>
+            <label class="cia-field">
+              <span>Desafio de Ocupação</span>
+              <select bind:value={form.desafioOcupacao}>
+                <option value="">Selecione</option>
+                {#each DESAFIOS_OCUPACAO as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="cia-field">
+              <span>Posicionamento FP&A</span>
+              <select bind:value={form.posicionamentoFpa}>
+                <option value="">Selecione</option>
+                {#each STATUS_OPTS as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="cia-field">
+              <span>Posicionamento Engenharia</span>
+              <select bind:value={form.posicionamentoEngenharia}>
+                <option value="">Selecione</option>
+                {#each STATUS_OPTS as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="cia-field">
+              <span>Posicionamento Comercial</span>
+              <select bind:value={form.posicionamentoComercial}>
+                <option value="">Selecione</option>
+                {#each STATUS_OPTS as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="cia-field">
+              <span>Data da Defesa</span>
+              <input type="date" bind:value={form.dataDefesa} />
+            </label>
+            <label class="cia-field">
+              <span>Status</span>
+              <select bind:value={form.status} required>
+                {#each STATUS_OPTS as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+            <label class="cia-field">
+              <span>Quantidade de Leilões</span>
+              <select bind:value={form.quantidadeLeiloes}>
+                <option value="">Selecione</option>
+                {#each LEILOES_OPTS as opt}
+                  <option value={opt}>{opt}</option>
+                {/each}
+              </select>
+            </label>
+          </div>
+
+          <div class="cia-images-box">
+            <div class="cia-images-head">
+              <strong>Imagens do post</strong>
+              <span>Adicione quantas quiser — elas passam em loop na visualização</span>
+            </div>
+            <input
+              bind:this={imageInputEl}
+              class="cia-file-input"
+              type="file"
+              accept="image/*"
+              multiple
+              on:change={onImagesSelected}
+            />
+            <button type="button" class="cia-images-add" on:click={() => imageInputEl?.click()}>
+              + Adicionar imagens
+            </button>
+            {#if formImages.length}
+              <div class="cia-images-grid">
+                {#each formImages as img (img.id)}
+                  <div class="cia-image-thumb">
+                    <img src={img.url} alt={img.label} />
+                    <button type="button" class="cia-image-remove" on:click={() => removeFormImage(img.id)} aria-label="Remover imagem">
+                      ×
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {:else}
+              <p class="cia-images-empty">Nenhuma imagem selecionada ainda.</p>
+            {/if}
+          </div>
+
+          {#if formError}
+            <p class="cia-form-error">{formError}</p>
+          {/if}
+
+          <div class="cia-form-actions">
+            <button type="button" class="cia-btn-secondary" on:click={closeAddModal}>Cancelar</button>
+            <button type="submit" class="cia-btn-primary">Criar post</button>
+          </div>
+        </form>
       </div>
     </div>
   </div>
@@ -871,23 +1160,173 @@
   }
 
   .cia-add-modal {
-    width: min(560px, 100%);
-    max-height: min(80vh, 640px);
+    width: min(920px, 100%);
+    max-height: min(92vh, 900px);
   }
 
   .cia-add-body {
-    padding: 1.25rem;
+    padding: 1rem 1.25rem 1.25rem;
+    overflow: auto;
   }
 
-  .cia-add-placeholder {
-    margin: 0;
-    padding: 1.5rem;
-    border: 1px dashed rgba(123, 104, 238, 0.35);
-    border-radius: 10px;
+  .cia-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem 1rem;
+  }
+
+  .cia-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    font-size: 0.78rem;
+    font-weight: 600;
     color: var(--cia-muted, #64748b);
+  }
+
+  .cia-field-full {
+    grid-column: 1 / -1;
+  }
+
+  .cia-field input,
+  .cia-field select {
+    border: 1px solid rgba(123, 104, 238, 0.28);
+    border-radius: 8px;
+    padding: 0.55rem 0.7rem;
     font-size: 0.9rem;
-    text-align: center;
-    background: rgba(123, 104, 238, 0.06);
+    font-weight: 500;
+    color: var(--cia-text, #1e1b4b);
+    background: #fff;
+  }
+
+  .cia-modal-overlay.theme-dark .cia-field input,
+  .cia-modal-overlay.theme-dark .cia-field select {
+    background: #232a42;
+    color: #e8eaf6;
+    border-color: rgba(123, 104, 238, 0.35);
+  }
+
+  .cia-images-box {
+    margin-top: 1rem;
+    padding: 0.9rem;
+    border: 1px dashed rgba(123, 104, 238, 0.4);
+    border-radius: 10px;
+    background: rgba(123, 104, 238, 0.05);
+  }
+
+  .cia-images-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .cia-images-head strong {
+    color: var(--cia-text, #1e1b4b);
+    font-size: 0.9rem;
+  }
+
+  .cia-images-head span {
+    font-size: 0.78rem;
+    color: var(--cia-muted, #64748b);
+  }
+
+  .cia-file-input {
+    display: none;
+  }
+
+  .cia-images-add {
+    border: none;
+    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.82rem;
+    padding: 0.55rem 0.9rem;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .cia-images-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+    gap: 0.55rem;
+    margin-top: 0.75rem;
+  }
+
+  .cia-image-thumb {
+    position: relative;
+    aspect-ratio: 1;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid rgba(123, 104, 238, 0.25);
+  }
+
+  .cia-image-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .cia-image-remove {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 50%;
+    background: rgba(15, 18, 32, 0.7);
+    color: #fff;
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  .cia-images-empty {
+    margin: 0.65rem 0 0;
+    font-size: 0.8rem;
+    color: var(--cia-muted, #64748b);
+  }
+
+  .cia-form-error {
+    margin: 0.75rem 0 0;
+    color: #dc2626;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .cia-form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.6rem;
+    margin-top: 1rem;
+  }
+
+  .cia-btn-primary,
+  .cia-btn-secondary {
+    border: none;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-weight: 700;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+
+  .cia-btn-primary {
+    background: linear-gradient(135deg, #7B68EE 0%, #4c1d95 100%);
+    color: #fff;
+  }
+
+  .cia-btn-secondary {
+    background: transparent;
+    border: 1px solid rgba(123, 104, 238, 0.35);
+    color: var(--cia-text, #1e1b4b);
+  }
+
+  @media (max-width: 700px) {
+    .cia-form-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .cia-modal-header {
@@ -956,10 +1395,22 @@
     justify-content: center;
     color: #fff;
     padding: 1.5rem;
+    background-size: cover;
+    background-position: center;
   }
 
   .cia-slide.active {
     opacity: 1;
+  }
+
+  .cia-slide.has-image .cia-slide-count {
+    position: absolute;
+    right: 0.75rem;
+    bottom: 0.75rem;
+    margin: 0;
+    padding: 0.2rem 0.45rem;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.45);
   }
 
   .cia-slide-label {
@@ -1062,6 +1513,16 @@
     font-size: 0.85rem;
     color: #64748b;
     line-height: 1.45;
+  }
+
+  .cia-side-resumo a {
+    color: #7B68EE;
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .cia-side-resumo a:hover {
+    text-decoration: underline;
   }
 
   .cia-stats {
