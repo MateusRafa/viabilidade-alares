@@ -359,6 +359,30 @@
     return `${Math.round(n)} m`;
   }
 
+  function imprimirRelatorioSalvo() {
+    const html = selectedChamado?.pdfHtml;
+    if (!html) {
+      feedbackMessage = 'Este chamado ainda não tem relatório salvo para imprimir.';
+      return;
+    }
+    const win = window.open('', '_blank');
+    if (!win) {
+      feedbackMessage = 'Pop-up bloqueado. Permita pop-ups para imprimir o relatório.';
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+    setTimeout(() => {
+      try {
+        win.focus();
+        win.print();
+      } catch {
+        // ignore
+      }
+    }, 400);
+  }
+
   onMount(async () => {
     syncHeaderRefresh();
     syncHeaderSearch({ enabled: true });
@@ -504,6 +528,11 @@
                   >
                     Tabulação errada
                   </button>
+                  {#if selectedChamado.pdfHtml || selectedChamado.relatorioSalvo}
+                    <button type="button" class="btn-secondary" on:click={imprimirRelatorioSalvo}>
+                      Imprimir relatório salvo
+                    </button>
+                  {/if}
                 </div>
 
                 {#if showCorrectionForm}
@@ -578,6 +607,9 @@
                   <td>{item.situacaoLabel || item.situacao || 'Pendente Analise'}</td>
                   <td class="col-action">
                     <div class="col-action-buttons">
+                      {#if item.relatorioSalvo || item.pdfHtml}
+                        <span class="report-badge" title="Relatório salvo">PDF</span>
+                      {/if}
                       <button
                         type="button"
                         class="btn-lupa"
@@ -894,6 +926,21 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    gap: 0.35rem;
+  }
+
+  .report-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2rem;
+    padding: 0.15rem 0.35rem;
+    border-radius: 6px;
+    background: #7b68ee;
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
   }
 
   .empty-cell {
