@@ -1,0 +1,6 @@
+{
+  "cleanUrls": false,
+  "rewrites": [
+    { "source": "/embed", "destination": "/embed.html" }
+  ]
+}
