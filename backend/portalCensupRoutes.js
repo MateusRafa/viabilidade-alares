@@ -125,7 +125,8 @@ export function registerPortalCensupRoutes(app) {
       }
 
       const pedidos = Array.isArray(req.body?.pedidos) ? req.body.pedidos : [];
-      const result = await reconcileChamadosComAgenda(pedidos);
+      const situacoes = Array.isArray(req.body?.situacoes) ? req.body.situacoes : [];
+      const result = await reconcileChamadosComAgenda(pedidos, situacoes);
       res.json({ success: true, ...result });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST chamados/reconcile:', err);
