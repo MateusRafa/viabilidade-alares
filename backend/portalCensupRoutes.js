@@ -8,6 +8,7 @@ import {
   listChamados,
   reconcileChamadosComAgenda,
   registerFeedback,
+  salvarRelatorioWorkbench,
   syncFilaToSupabase,
   upsertChamado
 } from './lib/portalCensup/chamadosService.js';
@@ -223,6 +224,26 @@ export function registerPortalCensupRoutes(app) {
       res.json({ success: true, ...result });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST analisar:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/chamados/:id/relatorio', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const persist = req.body?.persist !== false;
+      const result = await salvarRelatorioWorkbench(req.params.id, {
+        usuario,
+        report: req.body || {},
+        persist
+      });
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST relatorio:', err);
       sendError(res, err);
     }
   });
