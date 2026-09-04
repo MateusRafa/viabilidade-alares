@@ -4,7 +4,7 @@ import { CLUSTER_TABLES, mirrorTablesBetween } from './mirrorCore.js';
 
 /**
  * Espelha tabelas do cluster.
- * @param {{ tables?: string[], direction?: 'b1_to_b2' | 'b2_to_b1' }} [opts]
+ * @param {{ tables?: string[], direction?: 'b1_to_b2' | 'b2_to_b1', signal?: AbortSignal, onProgress?: Function }} [opts]
  */
 export async function mirrorClusterTables(opts = {}) {
   if (!isClusterEnabled()) {
@@ -31,6 +31,8 @@ export async function mirrorClusterTables(opts = {}) {
   try {
     const result = await mirrorTablesBetween(source, target, {
       tables,
+      signal: opts.signal,
+      onProgress: opts.onProgress,
       onTableDone(table, inserted) {
         synced[table] = inserted;
         console.log(`  ✅ [Cluster] mirror ${table}: ${inserted} linhas (${sourceLabel}→${targetLabel})`);
@@ -41,6 +43,17 @@ export async function mirrorClusterTables(opts = {}) {
 
     return { success: true, synced, direction, sourceLabel, targetLabel };
   } catch (err) {
+    if (err?.name === 'AbortError' || opts.signal?.aborted) {
+      return {
+        success: false,
+        cancelled: true,
+        error: 'Sincronização cancelada',
+        synced,
+        direction,
+        sourceLabel,
+        targetLabel
+      };
+    }
     console.error(`❌ [Cluster] mirror ${sourceLabel}→${targetLabel} falhou:`, err.message);
     return { success: false, error: err.message, synced, direction, sourceLabel, targetLabel };
   }
