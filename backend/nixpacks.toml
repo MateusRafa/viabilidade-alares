@@ -14,5 +14,9 @@ cmds = [
   "ls -la /app/ms-playwright || true"
 ]
 
+# Backend não usa Vite — não rodar npm run build
+[phases.build]
+cmds = ["echo '[backend] build skip — Node API pronta para start'"]
+
 [start]
 cmd = "npm start"
