@@ -120,9 +120,6 @@ const portalToolsMeta = [
   }
 ];
 
-/** Carrega apenas arquivos .svelte presentes no build (evita falha se um componente não foi enviado). */
-const toolSvelteModules = import.meta.glob('./*.svelte', { eager: true });
-
 const TOOL_COMPONENT_FILES = {
   'viabilidade-alares': './ViabilidadeAlares.svelte',
   'analise-cobertura': './AnaliseCobertura.svelte',
@@ -138,6 +135,26 @@ const TOOL_COMPONENT_FILES = {
   'portal-censup': './PortalCensup.svelte',
   'comite-intencao-ampliacao': './ComiteIntencaoAmpliacao.svelte'
 };
+
+/** Só as ferramentas do portal — não incluir CensupWorkbench (é entry do embed). */
+const toolSvelteModules = import.meta.glob(
+  [
+    './ViabilidadeAlares.svelte',
+    './AnaliseCobertura.svelte',
+    './CalculadoraOrcamento.svelte',
+    './MapaConsulta.svelte',
+    './DashboardCensup.svelte',
+    './FormularioEngenharia.svelte',
+    './FormularioEngenhariaImplantacao.svelte',
+    './RelatorioDeConstrucao.svelte',
+    './DashboardProjetos.svelte',
+    './DashboardImplantacao.svelte',
+    './IaAuditoriaDiagramacao.svelte',
+    './PortalCensup.svelte',
+    './ComiteIntencaoAmpliacao.svelte'
+  ],
+  { eager: true }
+);
 
 const FAVICON_BY_TOOL = {
   'viabilidade-alares': '/favicons/alares.png'
