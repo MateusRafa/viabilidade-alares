@@ -12,7 +12,6 @@
     toolShellViewToggle
   } from '../toolShellStore.js';
   import { theme } from '../themeStore.js';
-  import ViabilidadeAlares from './ViabilidadeAlares.svelte';
   import {
     fetchPortalCensupChamados,
     fetchPortalCensupChamadoById,
@@ -20,6 +19,15 @@
     fetchTabulacoesList,
     analisarPortalCensupChamado
   } from './portalCensupApi.js';
+
+  // Import dinâmico — evita ciclo PortalCensup ↔ ViabilidadeAlares no bundle
+  let ViabilidadeAlares = null;
+
+  async function ensureViabilidadeAlares() {
+    if (ViabilidadeAlares) return;
+    const mod = await import('./ViabilidadeAlares.svelte');
+    ViabilidadeAlares = mod.default;
+  }
 
   export let currentUser = '';
   export let userTipo = 'user';
@@ -200,6 +208,7 @@
     syncShellChrome();
 
     try {
+      await ensureViabilidadeAlares();
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
       syncShellChrome();
       await carregarChamados({ silent: true });
@@ -417,7 +426,9 @@
         {@const viabLng = selectedChamado.localizacao?.lng ?? selectedChamado.mapaCoords?.lng ?? null}
         <div class="detail-viabilidade">
           {#key `${selectedChamado.id}:${viabLat ?? ''}:${viabLng ?? ''}`}
-            <ViabilidadeAlares
+            {#if ViabilidadeAlares}
+            <svelte:component
+              this={ViabilidadeAlares}
               embedded={true}
               mapDomId="portal-censup-viab-map"
               currentUser={currentUser}
@@ -554,7 +565,10 @@
                   <p class="feedback-message" role="status">{feedbackMessage}</p>
                 {/if}
               </div>
-            </ViabilidadeAlares>
+            </svelte:component>
+            {:else}
+              <div class="detail-loading"><Loading currentMessage="Carregando mapa…" /></div>
+            {/if}
           {/key}
         </div>
       {/if}
