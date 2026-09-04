@@ -1,5 +1,6 @@
 {
   "cleanUrls": false,
+  "directoryListing": false,
   "rewrites": [
     { "source": "/embed", "destination": "/embed.html" }
   ]
