@@ -169,29 +169,35 @@ async function deleteAllCoveragePolygons() {
 }
 
 /** Escrita cluster-aware.
- * - primary: grava B1 (obrigatório) + B2 (best-effort, não bloqueia se réplica falhar)
- * - replica: só B2
+ * - primary: grava B1 (obrigatório) + B2 (best-effort)
+ * - replica: grava B2 (obrigatório) + B1 (best-effort) — evita dados só no B2
  * - alternate: dual-write estrito (B1+B2)
  */
 async function clusterAwareWrite(fn) {
   if (isClusterEnabled() && isClusterAvailable()) {
     const mode = getClusterMode();
-    if (mode === 'primary') {
+    if (mode === 'primary' || mode === 'replica') {
       const primary = getPrimaryClient() || supabasePrimary;
       const replica = getReplicaClient();
-      if (!primary) throw new Error('Nenhum cliente Supabase primary disponível');
-      const value = await fn(primary, 'primary');
-      if (replica) {
+      const mainLabel = mode === 'replica' ? 'replica' : 'primary';
+      const mirrorLabel = mode === 'replica' ? 'primary' : 'replica';
+      const mainClient = mode === 'replica' ? replica : primary;
+      const mirrorClient = mode === 'replica' ? primary : replica;
+      if (!mainClient) {
+        throw new Error(`Nenhum cliente Supabase ${mainLabel} disponível`);
+      }
+      const value = await fn(mainClient, mainLabel);
+      if (mirrorClient) {
         try {
-          await fn(replica, 'replica');
+          await fn(mirrorClient, mirrorLabel);
         } catch (err) {
           console.error(
-            '⚠️ [Cluster] Espelho VI ALA/dados no B2 falhou (B1 já gravou):',
+            `⚠️ [Cluster] Espelho ${mirrorLabel} falhou (${mainLabel} já gravou):`,
             err?.message || err
           );
         }
       }
-      return [{ label: 'primary', value }];
+      return [{ label: mainLabel, value }];
     }
     return dualWrite(fn);
   }
@@ -5131,14 +5137,21 @@ app.post('/api/cluster/sync', requireAdmin, async (req, res) => {
       });
     }
 
-    console.log(`🪞 [Cluster] Sync manual solicitado por admin (${req.body?.usuario || 'admin'})`);
-    const result = await mirrorClusterTables();
+    console.log(
+      `🪞 [Cluster] Sync manual (${req.body?.direction || 'b1_to_b2'}) por admin (${req.body?.usuario || 'admin'})`
+    );
+    const direction = req.body?.direction === 'b2_to_b1' ? 'b2_to_b1' : 'b1_to_b2';
+    const result = await mirrorClusterTables({ direction });
     if (!result.success) {
       return res.status(500).json({ success: false, ...result });
     }
     res.json({
       success: true,
-      message: 'Réplica sincronizada com o primary',
+      message:
+        direction === 'b2_to_b1'
+          ? 'B1 atualizado com os dados do B2'
+          : 'B2 atualizado com os dados do B1',
+      direction,
       synced: result.synced,
       skipped: result.skipped || false
     });
