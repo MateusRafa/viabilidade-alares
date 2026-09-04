@@ -1,12 +1,13 @@
 <script>
   import { onMount } from 'svelte';
   import { getApiUrl } from './config';
+  // Importar de toolsMeta (sem componentes) — evita ciclo:
+  // ViabilidadeAlares → Config → toolsRegistry → ViabilidadeAlares
   import {
-    toolsRegistry,
     mergePermissionsWithRegistry,
     buildPermissionsPayload,
     getToolsForPermissions
-  } from './tools/toolsRegistry.js';
+  } from './tools/toolsMeta.js';
 
   // Props
   export let onClose = () => {};
