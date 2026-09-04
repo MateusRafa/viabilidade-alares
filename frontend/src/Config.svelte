@@ -85,19 +85,22 @@
   let totalCTOsLoaded = 0; // Total de CTOs carregadas (para exibir na mensagem)
   
   // Cluster Supabase (admin)
-  let clusterMode = 'alternate';
+  let clusterMode = 'primary';
   let clusterEnabled = false;
   let clusterAvailable = false;
   let clusterLoading = false;
-  let clusterSyncing = false;
-  let clusterSyncDirection = '';
   let clusterMessage = '';
   let clusterError = '';
   let showClusterInfo = false;
+  let showClusterSwitchModal = false;
+  let clusterSwitchTarget = ''; // 'primary' | 'replica'
+  let clusterSwitchStep = 'confirm'; // 'confirm' | 'running' | 'done' | 'error' | 'cancelled'
+  let clusterSwitchPercent = 0;
+  let clusterSwitchMessage = '';
+  let clusterSwitchAbort = null;
   const clusterModeLabels = {
     primary: 'Backend Principal (B1)',
-    replica: 'Backend Secundário (B2)',
-    alternate: 'Ambos em alternância'
+    replica: 'Backend Secundário (B2)'
   };
   
   // Variáveis para cálculo de mancha (separado do upload)
@@ -1125,7 +1128,8 @@
       if (!response.ok || !data.success) {
         throw new Error(data.error || 'Falha ao carregar status do cluster');
       }
-      clusterMode = data.mode || 'alternate';
+      const mode = data.mode === 'alternate' ? 'primary' : (data.mode || 'primary');
+      clusterMode = mode === 'replica' ? 'replica' : 'primary';
       clusterEnabled = Boolean(data.status?.enabled);
       clusterAvailable = Boolean(data.status?.available);
     } catch (err) {
@@ -1135,69 +1139,162 @@
     }
   }
 
-  async function changeClusterMode(mode) {
-    if (userTipo !== 'admin' || clusterLoading || clusterSyncing) return;
-    clusterLoading = true;
-    clusterMessage = '';
+  function requestClusterSwitch(mode) {
+    if (userTipo !== 'admin' || clusterLoading || clusterSwitchStep === 'running') return;
+    if (!clusterEnabled || !clusterAvailable) return;
+    if (mode === clusterMode) return;
+    clusterSwitchTarget = mode;
+    clusterSwitchStep = 'confirm';
+    clusterSwitchPercent = 0;
+    clusterSwitchMessage = '';
     clusterError = '';
-    try {
-      const response = await fetch(getApiUrl('/api/cluster/mode'), {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Usuario': currentUser || ''
-        },
-        body: JSON.stringify({ mode, usuario: currentUser || '' })
-      });
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Falha ao alterar modo');
-      }
-      clusterMode = data.mode || mode;
-      clusterEnabled = Boolean(data.status?.enabled);
-      clusterAvailable = Boolean(data.status?.available);
-      clusterMessage = data.message || 'Modo atualizado';
-    } catch (err) {
-      clusterError = err.message || 'Erro ao alterar modo';
-    } finally {
-      clusterLoading = false;
+    clusterMessage = '';
+    showClusterSwitchModal = true;
+  }
+
+  function closeClusterSwitchModal() {
+    // Em andamento: não fecha; cancela a sincronização e mantém o pop no estado cancelado
+    if (clusterSwitchStep === 'running') {
+      cancelClusterSwitch();
+      return;
+    }
+    showClusterSwitchModal = false;
+    clusterSwitchTarget = '';
+    clusterSwitchStep = 'confirm';
+    clusterSwitchPercent = 0;
+    clusterSwitchMessage = '';
+    clusterSwitchAbort = null;
+  }
+
+  function cancelClusterSwitch() {
+    if (clusterSwitchAbort) {
+      clusterSwitchAbort.abort();
+      clusterSwitchAbort = null;
+    }
+    if (clusterSwitchStep === 'running' || clusterSwitchStep === 'confirm') {
+      clusterSwitchStep = 'cancelled';
+      clusterSwitchMessage = 'Troca cancelada. O backend anterior foi mantido.';
     }
   }
 
-  async function syncClusterReplica(direction = 'b1_to_b2') {
-    if (userTipo !== 'admin' || clusterSyncing) return;
-    const isB2toB1 = direction === 'b2_to_b1';
-    const confirmMsg = isB2toB1
-      ? 'ATENÇÃO: isso APAGA os dados do B1 e substitui pela cópia atual do B2.\n\nUse se você gerou VI ALAs só no B2 e precisa levar isso para o B1.\n\nPode levar vários minutos. Continuar?'
-      : 'ATENÇÃO: isso APAGA os dados do B2 e substitui pela cópia atual do B1.\n\nSe alguém usou só o B2, essas alterações no B2 serão perdidas — neste caso, rode antes “B2 → B1”.\n\nPode levar vários minutos. Continuar?';
-    if (!confirm(confirmMsg)) return;
-    clusterSyncing = true;
-    clusterSyncDirection = direction;
-    clusterMessage = '';
+  async function confirmClusterSwitch() {
+    if (userTipo !== 'admin' || !clusterSwitchTarget) return;
+    if (clusterSwitchStep === 'running') return;
+
+    const targetMode = clusterSwitchTarget;
+    const targetLabel = clusterModeLabels[targetMode] || targetMode;
+    const sourceLabel = targetMode === 'replica' ? 'B1' : 'B2';
+    const destLabel = targetMode === 'replica' ? 'B2' : 'B1';
+
+    clusterSwitchStep = 'running';
+    clusterSwitchPercent = 0;
+    clusterSwitchMessage = `Iniciando cópia ${sourceLabel} → ${destLabel}…`;
     clusterError = '';
+    clusterMessage = '';
+
+    const controller = new AbortController();
+    clusterSwitchAbort = controller;
+
     try {
-      const response = await fetch(getApiUrl('/api/cluster/sync'), {
+      const response = await fetch(getApiUrl('/api/cluster/switch'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Usuario': currentUser || ''
         },
-        body: JSON.stringify({ usuario: currentUser || '', direction })
+        body: JSON.stringify({ targetMode, usuario: currentUser || '' }),
+        signal: controller.signal
       });
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Falha na sincronização');
+
+      if (!response.ok) {
+        let errMsg = 'Falha ao trocar backend';
+        try {
+          const data = await response.json();
+          errMsg = data.error || errMsg;
+        } catch {
+          // ignore
+        }
+        throw new Error(errMsg);
       }
-      const tables = data.synced ? Object.entries(data.synced).map(([k, v]) => `${k}: ${v}`).join(', ') : '';
-      const dirLabel = isB2toB1 ? 'B2 → B1' : 'B1 → B2';
-      clusterMessage = tables
-        ? `Sincronizado (${dirLabel}) — ${tables}`
-        : (data.message || 'Sincronização concluída');
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json') && !contentType.includes('ndjson')) {
+        const data = await response.json();
+        if (data.skipped) {
+          clusterMode = data.mode || targetMode;
+          clusterSwitchStep = 'done';
+          clusterSwitchPercent = 100;
+          clusterSwitchMessage = data.message || 'Backend já estava ativo';
+          clusterMessage = clusterSwitchMessage;
+          return;
+        }
+        if (!data.success) throw new Error(data.error || 'Falha ao trocar backend');
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('Resposta sem stream de progresso');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalEvent = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          let event;
+          try {
+            event = JSON.parse(trimmed);
+          } catch {
+            continue;
+          }
+          if (event.type === 'progress' || event.type === 'start') {
+            clusterSwitchPercent = Math.max(clusterSwitchPercent, Number(event.percent) || 0);
+            clusterSwitchMessage = event.message || clusterSwitchMessage;
+          } else if (event.type === 'done') {
+            finalEvent = event;
+            clusterSwitchPercent = 100;
+            clusterSwitchMessage = event.message || `Backend ${targetLabel} ativo`;
+            clusterMode = event.mode || targetMode;
+            clusterSwitchStep = 'done';
+            clusterMessage = clusterSwitchMessage;
+          } else if (event.type === 'cancelled') {
+            finalEvent = event;
+            clusterSwitchStep = 'cancelled';
+            clusterSwitchMessage = event.message || 'Troca cancelada';
+          } else if (event.type === 'error') {
+            finalEvent = event;
+            throw new Error(event.error || 'Erro na sincronização');
+          }
+        }
+      }
+
+      if (clusterSwitchStep === 'running') {
+        if (finalEvent?.type === 'done') {
+          clusterSwitchStep = 'done';
+        } else if (controller.signal.aborted) {
+          clusterSwitchStep = 'cancelled';
+          clusterSwitchMessage = 'Troca cancelada. O backend anterior foi mantido.';
+        } else {
+          throw new Error('Sincronização encerrada sem confirmação');
+        }
+      }
     } catch (err) {
-      clusterError = err.message || 'Erro na sincronização';
+      if (err?.name === 'AbortError' || controller.signal.aborted) {
+        clusterSwitchStep = 'cancelled';
+        clusterSwitchMessage = 'Troca cancelada. O backend anterior foi mantido.';
+      } else {
+        clusterSwitchStep = 'error';
+        clusterSwitchMessage = err.message || 'Erro ao trocar backend';
+        clusterError = clusterSwitchMessage;
+      }
     } finally {
-      clusterSyncing = false;
-      clusterSyncDirection = '';
+      clusterSwitchAbort = null;
     }
   }
 
@@ -2523,13 +2620,13 @@
               {/if}
             </p>
             <div class="cluster-mode-buttons tools-permissions-grid">
-              {#each ['primary', 'replica', 'alternate'] as mode}
+              {#each ['primary', 'replica'] as mode}
                 <button
                   type="button"
                   class="tool-permission-card cluster-mode-card"
                   class:active={clusterMode === mode}
-                  disabled={clusterLoading || clusterSyncing || !clusterEnabled || !clusterAvailable}
-                  on:click={() => changeClusterMode(mode)}
+                  disabled={clusterLoading || clusterSwitchStep === 'running' || !clusterEnabled || !clusterAvailable}
+                  on:click={() => requestClusterSwitch(mode)}
                   title={clusterModeLabels[mode]}
                   aria-pressed={clusterMode === mode}
                 >
@@ -2540,34 +2637,6 @@
                 </button>
               {/each}
             </div>
-            {#if clusterEnabled && clusterAvailable}
-              <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
-                <button
-                  type="button"
-                  class="btn-add"
-                  disabled={clusterSyncing || clusterLoading}
-                  on:click={() => syncClusterReplica('b1_to_b2')}
-                >
-                  {#if clusterSyncing && clusterSyncDirection === 'b1_to_b2'}
-                    ⏳ Copiando B1 → B2...
-                  {:else}
-                    🪞 Copiar B1 → B2 (apaga o B2)
-                  {/if}
-                </button>
-                <button
-                  type="button"
-                  class="btn-add"
-                  disabled={clusterSyncing || clusterLoading}
-                  on:click={() => syncClusterReplica('b2_to_b1')}
-                >
-                  {#if clusterSyncing && clusterSyncDirection === 'b2_to_b1'}
-                    ⏳ Copiando B2 → B1...
-                  {:else}
-                    🪞 Copiar B2 → B1 (apaga o B1)
-                  {/if}
-                </button>
-              </div>
-            {/if}
             {#if clusterMessage}
               <p class="cluster-message success">{clusterMessage}</p>
             {/if}
@@ -2576,6 +2645,80 @@
             {/if}
           {/if}
         </div>
+
+        {#if showClusterSwitchModal}
+          <div
+            class="modal-overlay confirm-overlay cluster-switch-overlay"
+            role="presentation"
+          >
+            <div
+              class="modal-content cluster-switch-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="cluster-switch-title"
+              tabindex="-1"
+              on:click|stopPropagation
+              on:keydown={(e) => e.key === 'Escape' && clusterSwitchStep !== 'running' && closeClusterSwitchModal()}
+            >
+              <div class="modal-header">
+                <h2 id="cluster-switch-title">Trocar backend</h2>
+                {#if clusterSwitchStep !== 'running'}
+                  <button
+                    type="button"
+                    class="modal-close"
+                    on:click={closeClusterSwitchModal}
+                    aria-label="Fechar"
+                  >×</button>
+                {/if}
+              </div>
+
+              <div class="modal-body">
+                {#if clusterSwitchStep === 'confirm'}
+                  <p>
+                    Deseja realmente atualizar e trocar para
+                    <strong> {clusterModeLabels[clusterSwitchTarget]}</strong>?
+                  </p>
+                  <p class="cluster-switch-warn">
+                    Ao confirmar, os dados serão copiados
+                    <strong>
+                      {clusterSwitchTarget === 'replica' ? ' de B1 para B2' : ' de B2 para B1'}
+                    </strong>
+                    (o destino será substituído) e em seguida o backend ativo mudará.
+                  </p>
+                  <p>Isso pode levar vários minutos.</p>
+                {:else if clusterSwitchStep === 'running'}
+                  <p class="cluster-switch-status">{clusterSwitchMessage || 'Atualizando…'}</p>
+                  <div class="cluster-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(clusterSwitchPercent)}>
+                    <div class="cluster-progress-fill" style={`width: ${clusterSwitchPercent}%`}></div>
+                  </div>
+                  <p class="cluster-progress-label">{Math.round(clusterSwitchPercent)}%</p>
+                  <p class="cluster-switch-hint">Não feche esta janela até concluir. Use Cancelar para interromper.</p>
+                {:else if clusterSwitchStep === 'done'}
+                  <p class="cluster-switch-status success-text">{clusterSwitchMessage}</p>
+                  <div class="cluster-progress-track" aria-hidden="true">
+                    <div class="cluster-progress-fill" style="width: 100%"></div>
+                  </div>
+                  <p class="cluster-progress-label">100%</p>
+                {:else if clusterSwitchStep === 'cancelled'}
+                  <p class="cluster-switch-status">{clusterSwitchMessage}</p>
+                {:else}
+                  <p class="cluster-switch-status error-text">{clusterSwitchMessage}</p>
+                {/if}
+
+                <div class="modal-actions">
+                  {#if clusterSwitchStep === 'confirm'}
+                    <button type="button" class="btn-cancel" on:click={closeClusterSwitchModal}>Cancelar</button>
+                    <button type="button" class="btn-add-confirm" on:click={confirmClusterSwitch}>Confirmar</button>
+                  {:else if clusterSwitchStep === 'running'}
+                    <button type="button" class="btn-cancel" on:click={cancelClusterSwitch}>Cancelar atualização</button>
+                  {:else}
+                    <button type="button" class="btn-add-confirm" on:click={closeClusterSwitchModal}>Fechar</button>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          </div>
+        {/if}
 
         {#if showClusterInfo}
           <div
@@ -2605,22 +2748,17 @@
               </div>
               <div class="info-modal-body">
                 <p>
-                  Escolha qual backend a Viabilidade usa para <strong>leitura</strong>.
-                  As <strong>escritas</strong> novas tentam ir para os dois (B1 e B2), para não descasar.
+                  Escolha qual backend a Viabilidade usa. Ao trocar, o sistema copia os dados
+                  para o backend escolhido e só então ativa esse backend.
                 </p>
                 <p>
-                  <strong>Backend Principal (B1)</strong>: lê o B1; grava B1 + espelha no B2.
+                  <strong>Backend Principal (B1)</strong>: lê e grava somente no B1.
                 </p>
                 <p>
-                  <strong>Backend Secundário (B2)</strong>: lê o B2; grava B2 + espelha no B1.
+                  <strong>Backend Secundário (B2)</strong>: lê e grava somente no B2.
                 </p>
                 <p>
-                  <strong>Ambos em alternância</strong>: leituras alternam; escritas vão para os dois.
-                </p>
-                <p>
-                  <strong>Copiar B1 → B2</strong> apaga o B2 e coloca a cópia do B1.
-                  <strong> Copiar B2 → B1</strong> apaga o B1 e coloca a cópia do B2.
-                  Se alguém usou só o B2, rode <strong>B2 → B1</strong> antes de um B1 → B2.
+                  Não há atualização automática em segundo plano entre B1 e B2.
                 </p>
               </div>
             </div>
@@ -3375,6 +3513,71 @@
   .cluster-message.error {
     background: rgba(220, 53, 69, 0.1);
     color: #721c24;
+  }
+
+  .cluster-switch-overlay {
+    /* Clique fora não fecha — troca exige confirmação/cancelamento explícito */
+    pointer-events: auto;
+  }
+
+  .cluster-switch-modal {
+    max-width: 480px;
+  }
+
+  .cluster-switch-modal .modal-body {
+    min-height: auto;
+  }
+
+  .cluster-switch-warn {
+    color: #856404;
+    background: #fff3cd;
+    padding: 0.75rem 0.9rem;
+    border-radius: 6px;
+    font-size: 0.92rem;
+  }
+
+  .cluster-switch-status {
+    margin: 0 0 1rem 0;
+    color: #333;
+    font-size: 0.95rem;
+  }
+
+  .cluster-switch-status.success-text {
+    color: #155724;
+  }
+
+  .cluster-switch-status.error-text {
+    color: #721c24;
+  }
+
+  .cluster-switch-hint {
+    margin: 0.75rem 0 0 0;
+    font-size: 0.85rem;
+    color: #666;
+  }
+
+  .cluster-progress-track {
+    width: 100%;
+    height: 12px;
+    background: #e9ecef;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .cluster-progress-fill {
+    height: 100%;
+    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
+    border-radius: 999px;
+    transition: width 0.25s ease;
+    min-width: 0;
+  }
+
+  .cluster-progress-label {
+    margin: 0.5rem 0 0 0;
+    text-align: center;
+    font-weight: 600;
+    color: #444;
+    font-size: 0.95rem;
   }
 
   .info-icon {
