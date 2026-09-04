@@ -4276,6 +4276,14 @@ async function readVIALABase() {
   });
 }
 
+function parseVIALANumber(viAla) {
+  if (!viAla || typeof viAla !== 'string') return 0;
+  const match = viAla.match(/VI\s*ALA[-\s]*(\d+)/i);
+  if (!match) return 0;
+  const number = parseInt(match[1], 10);
+  return Number.isFinite(number) ? number : 0;
+}
+
 // Função para obter o próximo VI ALA do Supabase (nova versão)
 async function getNextVIALAFromSupabase() {
   try {
@@ -4301,65 +4309,30 @@ async function getNextVIALAFromSupabase() {
       console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (número: ${nextNumber})`);
       return nextVIALA;
     } catch (rpcError) {
-      // Fallback: buscar manualmente TODOS os registros para encontrar o maior número
-      console.log('⚠️ [Supabase] Função SQL não disponível, buscando manualmente TODOS os registros...');
-      
-      // Buscar todos os registros em lotes para garantir que pegamos o maior número
-      let maxNumber = 0;
-      let offset = 0;
-      const BATCH_SIZE = 1000;
-      let hasMore = true;
-      let totalProcessed = 0;
-      
-      // Primeiro, contar total de registros para saber quantos processar
-      const { count: totalCount } = await supabase
+      // Fallback rápido: últimos registros por id (não varrer a tabela inteira)
+      console.log('⚠️ [Supabase] Função SQL não disponível, buscando maior número nos registros recentes...');
+
+      const { data, error } = await supabase
         .from('vi_ala')
-        .select('*', { count: 'exact', head: true });
-      
-      console.log(`📊 [Supabase] Total de VI ALAs no banco: ${totalCount || 0}`);
-      
-      while (hasMore) {
-        const { data, error } = await supabase
-          .from('vi_ala')
-          .select('vi_ala')
-          .order('created_at', { ascending: false })
-          .range(offset, offset + BATCH_SIZE - 1);
-        
-        if (error) {
-          console.error('❌ [Supabase] Erro ao buscar VI ALAs:', error);
-          break;
-        }
-        
-        // Processar lote atual
-        if (data && data.length > 0) {
-          for (const row of data) {
-            const viAla = row.vi_ala || '';
-            if (viAla && typeof viAla === 'string') {
-              // Extrair número do VI ALA (formato: "VI ALA-0000001" ou "VI ALA - 0000001")
-              const match = viAla.match(/VI\s*ALA[-\s]*(\d+)/i);
-              if (match) {
-                const number = parseInt(match[1], 10);
-                if (!isNaN(number) && number > maxNumber) {
-                  maxNumber = number;
-                }
-              }
-            }
-          }
-          totalProcessed += data.length;
-        }
-        
-        // Verificar se há mais registros
-        if (!data || data.length < BATCH_SIZE) {
-          hasMore = false;
-        } else {
-          offset += BATCH_SIZE;
-        }
+        .select('vi_ala')
+        .order('id', { ascending: false })
+        .limit(200);
+
+      if (error) {
+        console.error('❌ [Supabase] Erro ao buscar VI ALAs recentes:', error);
+        return null;
       }
-      
+
+      let maxNumber = 0;
+      for (const row of data || []) {
+        const number = parseVIALANumber(row.vi_ala || '');
+        if (number > maxNumber) maxNumber = number;
+      }
+
       const nextNumber = maxNumber + 1;
       const nextVIALA = `VI ALA-${String(nextNumber).padStart(7, '0')}`;
-      
-      console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (max encontrado: ${maxNumber}, próximo: ${nextNumber}, registros processados: ${totalProcessed}/${totalCount || 0})`);
+
+      console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (max recente: ${maxNumber}, amostra: ${(data || []).length})`);
       return nextVIALA;
     }
   } catch (err) {
@@ -4561,11 +4534,16 @@ async function insertVIALABatchIntoSupabase(records) {
 
 function buildVIALARecordForSupabase(record) {
   const tabulacaoFinalValue = record['TABULAÇÃO FINAL'];
+  const horaRaw = record['HORA'];
+  const hora = (horaRaw && String(horaRaw).trim() !== '')
+    ? String(horaRaw).trim()
+    : null;
 
   return {
     vi_ala: record['VI ALA'] || '',
     ala: record['ALA'] || null,
     data: parseVIALARecordDate(record),
+    hora,
     projetista: record['PROJETISTA'] || null,
     cidade: record['CIDADE'] || null,
     endereco: record['ENDEREÇO'] || null,
@@ -4649,12 +4627,29 @@ async function saveVIALARecordToSupabase(record) {
   }
 }
 
-// Função para salvar registro na base_VI_ALA.xlsx (fallback)
+/** Lê somente o arquivo Excel local (nunca o Supabase) — usado no espelho local pós-insert. */
+async function _readVIALAExcelFileOnly() {
+  try {
+    await fsPromises.access(BASE_VI_ALA_FILE);
+  } catch {
+    await _ensureVIALABaseInternal();
+    return [];
+  }
+
+  const fileBuffer = await fsPromises.readFile(BASE_VI_ALA_FILE);
+  const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+  return XLSX.utils.sheet_to_json(worksheet) || [];
+}
+
+// Função para salvar registro na base_VI_ALA.xlsx (fallback / espelho local)
 async function saveVIALARecordToExcel(record) {
   return await withLock('vi_ala', async () => {
     try {
       await _ensureVIALABaseInternal();
-      const data = await _readVIALABaseInternal();
+      // Importante: NÃO usar _readVIALABaseInternal() aqui — ela carrega todo o Supabase e estoura timeout.
+      const data = await _readVIALAExcelFileOnly();
       const viAlaKey = String(record['VI ALA'] || '').trim();
       const alreadyExists = viAlaKey && data.some((row) => String(row['VI ALA'] || '').trim() === viAlaKey);
 
@@ -4682,13 +4677,14 @@ async function saveVIALARecord(record) {
   const supabaseResult = await saveVIALARecordToSupabase(record);
 
   if (supabaseResult.success) {
-    console.log('💾 [Save] Atualizando arquivo Excel após salvar no Supabase...');
-    try {
-      await saveVIALARecordToExcel(record);
-      console.log('✅ [Save] Arquivo Excel atualizado com sucesso');
-    } catch (excelErr) {
-      console.warn('⚠️ [Save] Erro ao atualizar Excel (não crítico):', excelErr.message);
-    }
+    // Espelho Excel em background para não atrasar a resposta ao frontend
+    console.log('💾 [Save] Agendando espelho Excel após salvar no Supabase...');
+    Promise.resolve()
+      .then(() => saveVIALARecordToExcel(record))
+      .then(() => console.log('✅ [Save] Arquivo Excel atualizado com sucesso'))
+      .catch((excelErr) => {
+        console.warn('⚠️ [Save] Erro ao atualizar Excel (não crítico):', excelErr.message);
+      });
     return { success: true, storage: 'supabase' };
   }
 
