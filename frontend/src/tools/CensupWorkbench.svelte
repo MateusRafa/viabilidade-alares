@@ -1,12 +1,14 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import ViabilidadeAlares from './ViabilidadeAlares.svelte';
   import {
     analisarPortalCensupChamado,
     fetchPortalCensupChamadoById,
     fetchTabulacoesList
   } from './portalCensupApi.js';
   import { getApiUrl } from '../config.js';
+
+  // Import dinâmico — evita ciclo com registry/Config no bundle principal
+  let ViabilidadeAlares = null;
 
   const MSG_SOURCE = 'censup-workbench';
   const PARENT_SOURCE = 'censup-extension';
@@ -253,6 +255,12 @@
   onMount(async () => {
     window.addEventListener('message', onMessage);
     try {
+      const mod = await import('./ViabilidadeAlares.svelte');
+      ViabilidadeAlares = mod.default;
+    } catch (err) {
+      console.warn('[Workbench] Falha ao carregar mapa:', err?.message || err);
+    }
+    try {
       tabulacoes = await fetchTabulacoesList();
     } catch {
       tabulacoes = [];
@@ -357,14 +365,19 @@
       {:else if mapAddress || (mapLat != null && mapLng != null)}
         {#key `${chamadoId}:${mapLat ?? ''}:${mapLng ?? ''}:${mapAddress}`}
           <div class="wb-map-host">
-            <ViabilidadeAlares
-              embedded={true}
-              mapDomId="censup-workbench-map"
-              currentUser={usuario}
-              initialAddress={mapAddress}
-              initialLat={mapLat}
-              initialLng={mapLng}
-            />
+            {#if ViabilidadeAlares}
+              <svelte:component
+                this={ViabilidadeAlares}
+                embedded={true}
+                mapDomId="censup-workbench-map"
+                currentUser={usuario}
+                initialAddress={mapAddress}
+                initialLat={mapLat}
+                initialLng={mapLng}
+              />
+            {:else}
+              <div class="wb-map-placeholder">Carregando mapa…</div>
+            {/if}
           </div>
         {/key}
       {:else}
