@@ -71,3 +71,4 @@ export default defineConfig({
     // Não usar moduleSideEffects:false — quebra init de componentes Svelte (TDZ / circular).
   },
 });
+
