@@ -55,29 +55,21 @@ export function getWriteClients() {
 
 
   if (mode === 'primary') {
-
-    return primary ? [{ label: 'primary', client: primary }] : [];
-
+    // B1 ativo para leitura, mas grava em B1+B2 para não descasar a réplica
+    const list = [];
+    if (primary) list.push({ label: 'primary', client: primary });
+    if (replica) list.push({ label: 'replica', client: replica });
+    return list;
   }
-
-
 
   if (mode === 'replica') {
-
     return replica ? [{ label: 'replica', client: replica }] : [];
-
   }
 
-
-
   const list = [];
-
   if (primary) list.push({ label: 'primary', client: primary });
-
   if (replica) list.push({ label: 'replica', client: replica });
-
   return list;
-
 }
 
 
