@@ -70,10 +70,6 @@ export default defineConfig({
       // Otimizações adicionais para evitar travamentos
       maxParallelFileOps: 5, // Limitar operações paralelas
     },
-    // Tree-shaking agressivo
-    treeshake: {
-      moduleSideEffects: false,
-      preset: 'smallest', // Usar preset menor para reduzir tamanho do bundle
-    },
+    // Não usar moduleSideEffects:false — quebra init de componentes Svelte (TDZ / circular).
   },
 });
