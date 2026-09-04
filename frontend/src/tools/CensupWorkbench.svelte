@@ -122,8 +122,9 @@
     }
 
     if (!usuario) {
-      error = 'Usuário não informado pela extensão.';
+      error = 'Informe o usuário no painel da extensão.';
       loading = false;
+      statusMsg = 'Aguardando usuário…';
       return;
     }
 
@@ -133,8 +134,9 @@
     }
 
     loading = false;
-    statusMsg = 'Aguardando chamado…';
-    error = 'Nenhum chamadoId recebido. Sincronize um pedido na Agenda e abra o workbench.';
+    chamado = null;
+    error = '';
+    statusMsg = 'Aguardando sincronização de um chamado…';
   }
 
   function buildReportPayload() {
@@ -366,7 +368,11 @@
           </div>
         {/key}
       {:else}
-        <div class="wb-map-placeholder">Sem coordenadas/endereço para o mapa.</div>
+        <div class="wb-map-placeholder">
+          {usuario
+            ? 'Sincronize um chamado na Agenda para carregar o mapa e a tabulação aqui.'
+            : 'Informe o usuário no painel ao lado para iniciar.'}
+        </div>
       {/if}
       <p class="wb-map-hint">Mapa arrastável e editável — ajuste rotas/CTOs se necessário.</p>
     </section>
