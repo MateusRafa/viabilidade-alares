@@ -3,7 +3,8 @@
   import { Loader } from '@googlemaps/js-api-loader';
   import * as XLSX from 'xlsx';
   import html2canvas from 'html2canvas';
-  import Config from '../Config.svelte';
+  // Config carregado sob demanda — evita ciclo ViabilidadeAlares ↔ Config ↔ registry
+  let ConfigComponent = null;
   import Loading from '../Loading.svelte';
   import { getApiUrl } from '../config.js';
   import { theme } from '../themeStore.js';
@@ -2030,18 +2031,24 @@
   }
 
   // Função para abrir tela de configurações
-  function openSettingsModal(event) {
+  async function openSettingsModal(event) {
     if (event) {
       event.stopPropagation();
       event.preventDefault();
+    }
+    if (!ConfigComponent) {
+      ConfigComponent = (await import('../Config.svelte')).default;
     }
     showSettingsModal = true;
   }
 
   // Wrapper para chamar openSettingsModal sem parâmetros (para ToolWrapper)
-  function openSettings() {
+  async function openSettings() {
     // Pré-carregar dados antes de abrir (se ainda não foi carregado)
     preloadSettingsData();
+    if (!ConfigComponent) {
+      ConfigComponent = (await import('../Config.svelte')).default;
+    }
     showSettingsModal = true;
   }
 
@@ -8385,8 +8392,9 @@
 {/if}
 
 <!-- Tela de Configurações -->
-{#if showSettingsModal}
-    <Config 
+{#if showSettingsModal && ConfigComponent}
+    <svelte:component
+      this={ConfigComponent}
       onClose={closeSettingsModal}
       onReloadCTOs={reloadCTOsData}
       onUpdateProjetistas={(list) => { projetistasList = list; }}
