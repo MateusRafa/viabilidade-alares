@@ -6179,7 +6179,8 @@
       console.log('💾 [Frontend] Registrando VI ALA no Supabase...', viAlaRecord);
 
       const registerController = new AbortController();
-      const registerTimeoutId = setTimeout(() => registerController.abort(), 15000);
+      // Backend pode levar mais tempo no B2 (rede/quota); 15s abortava com o insert já gravado
+      const registerTimeoutId = setTimeout(() => registerController.abort(), 60000);
 
       let registerResponse;
       try {
