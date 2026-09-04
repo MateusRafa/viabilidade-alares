@@ -1,9 +1,6 @@
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
-import { resolve, dirname } from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolve } from "path";
 
 export default defineConfig({
   plugins: [
@@ -41,9 +38,10 @@ export default defineConfig({
     // Configurar timeouts maiores para builds pesados
     buildTimeout: 300000, // 5 minutos de timeout
     rollupOptions: {
+      // Usar process.cwd() — __dirname do config pode apontar para temp no build Railway/Nixpacks
       input: {
-        main: resolve(__dirname, 'index.html'),
-        embed: resolve(__dirname, 'embed.html')
+        main: resolve(process.cwd(), 'index.html'),
+        embed: resolve(process.cwd(), 'embed.html')
       },
       output: {
         manualChunks: (id) => {
