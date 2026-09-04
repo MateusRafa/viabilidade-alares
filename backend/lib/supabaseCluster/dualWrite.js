@@ -63,7 +63,11 @@ export function getWriteClients() {
   }
 
   if (mode === 'replica') {
-    return replica ? [{ label: 'replica', client: replica }] : [];
+    // B2 ativo para leitura; grava em B2+B1 (espelho no primary via clusterAwareWrite)
+    const list = [];
+    if (replica) list.push({ label: 'replica', client: replica });
+    if (primary) list.push({ label: 'primary', client: primary });
+    return list;
   }
 
   const list = [];
