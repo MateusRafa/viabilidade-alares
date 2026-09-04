@@ -20,6 +20,8 @@ import {
   isClusterAvailable,
   isActiveDbAvailable,
   getActiveSupabaseClient,
+  getPrimaryClient,
+  getReplicaClient,
   getClusterStatus,
   getClusterMode,
   setClusterMode,
@@ -166,9 +168,31 @@ async function deleteAllCoveragePolygons() {
   }
 }
 
-/** Escrita cluster-aware: dual-write no modo alternate, backend único nos modos primary/replica. */
+/** Escrita cluster-aware.
+ * - primary: grava B1 (obrigatório) + B2 (best-effort, não bloqueia se réplica falhar)
+ * - replica: só B2
+ * - alternate: dual-write estrito (B1+B2)
+ */
 async function clusterAwareWrite(fn) {
-  if (isClusterEnabled() && isClusterAvailable() && getClusterMode() === 'alternate') {
+  if (isClusterEnabled() && isClusterAvailable()) {
+    const mode = getClusterMode();
+    if (mode === 'primary') {
+      const primary = getPrimaryClient() || supabasePrimary;
+      const replica = getReplicaClient();
+      if (!primary) throw new Error('Nenhum cliente Supabase primary disponível');
+      const value = await fn(primary, 'primary');
+      if (replica) {
+        try {
+          await fn(replica, 'replica');
+        } catch (err) {
+          console.error(
+            '⚠️ [Cluster] Espelho VI ALA/dados no B2 falhou (B1 já gravou):',
+            err?.message || err
+          );
+        }
+      }
+      return [{ label: 'primary', value }];
+    }
     return dualWrite(fn);
   }
   const client = getActiveSupabaseClient() || supabasePrimary;
