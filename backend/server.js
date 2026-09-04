@@ -20,8 +20,6 @@ import {
   isClusterAvailable,
   isActiveDbAvailable,
   getActiveSupabaseClient,
-  getPrimaryClient,
-  getReplicaClient,
   getClusterStatus,
   getClusterMode,
   setClusterMode,
@@ -33,7 +31,7 @@ import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
 import { bootstrapAgendaBotIfEnabled } from './lib/portalCensup/agendaBot/index.js';
 
-/** Cliente cluster-aware: respeita modo admin (primary/replica/alternate). */
+/** Cliente cluster-aware: respeita modo admin (primary/replica). */
 function createClusterAwareSupabase() {
   return new Proxy(
     {},
@@ -168,37 +166,9 @@ async function deleteAllCoveragePolygons() {
   }
 }
 
-/** Escrita cluster-aware.
- * - primary: grava B1 (obrigatório) + B2 (best-effort)
- * - replica: grava B2 (obrigatório) + B1 (best-effort) — evita dados só no B2
- * - alternate: dual-write estrito (B1+B2)
- */
+/** Escrita no backend ativo apenas (sem espelho em segundo plano). */
 async function clusterAwareWrite(fn) {
   if (isClusterEnabled() && isClusterAvailable()) {
-    const mode = getClusterMode();
-    if (mode === 'primary' || mode === 'replica') {
-      const primary = getPrimaryClient() || supabasePrimary;
-      const replica = getReplicaClient();
-      const mainLabel = mode === 'replica' ? 'replica' : 'primary';
-      const mirrorLabel = mode === 'replica' ? 'primary' : 'replica';
-      const mainClient = mode === 'replica' ? replica : primary;
-      const mirrorClient = mode === 'replica' ? primary : replica;
-      if (!mainClient) {
-        throw new Error(`Nenhum cliente Supabase ${mainLabel} disponível`);
-      }
-      const value = await fn(mainClient, mainLabel);
-      if (mirrorClient) {
-        try {
-          await fn(mirrorClient, mirrorLabel);
-        } catch (err) {
-          console.error(
-            `⚠️ [Cluster] Espelho ${mirrorLabel} falhou (${mainLabel} já gravou):`,
-            err?.message || err
-          );
-        }
-      }
-      return [{ label: mainLabel, value }];
-    }
     return dualWrite(fn);
   }
   const client = getActiveSupabaseClient() || supabasePrimary;
@@ -5137,10 +5107,10 @@ app.post('/api/cluster/sync', requireAdmin, async (req, res) => {
       });
     }
 
-    console.log(
-      `🪞 [Cluster] Sync manual (${req.body?.direction || 'b1_to_b2'}) por admin (${req.body?.usuario || 'admin'})`
-    );
     const direction = req.body?.direction === 'b2_to_b1' ? 'b2_to_b1' : 'b1_to_b2';
+    console.log(
+      `🪞 [Cluster] Sync manual (${direction}) por admin (${req.body?.usuario || 'admin'})`
+    );
     const result = await mirrorClusterTables({ direction });
     if (!result.success) {
       return res.status(500).json({ success: false, ...result });
@@ -5157,6 +5127,143 @@ app.post('/api/cluster/sync', requireAdmin, async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Troca de backend com sync + progresso em stream NDJSON.
+ * Body: { targetMode: 'primary'|'replica', usuario }
+ * Cancela se o cliente abortar a conexão.
+ */
+app.post('/api/cluster/switch', requireAdmin, async (req, res) => {
+  const sendEvent = (payload) => {
+    if (res.writableEnded) return;
+    res.write(`${JSON.stringify(payload)}\n`);
+  };
+
+  try {
+    if (!isClusterEnabled()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cluster desabilitado. Configure SUPABASE_CLUSTER_ENABLED=true'
+      });
+    }
+    if (!isClusterAvailable()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Réplica não configurada'
+      });
+    }
+
+    const targetMode = String(req.body?.targetMode || '').trim().toLowerCase();
+    if (targetMode !== 'primary' && targetMode !== 'replica') {
+      return res.status(400).json({
+        success: false,
+        error: 'targetMode inválido. Use primary ou replica'
+      });
+    }
+
+    const currentMode = getClusterMode();
+    if (currentMode === targetMode) {
+      return res.json({
+        success: true,
+        skipped: true,
+        mode: currentMode,
+        message: 'Backend já está ativo'
+      });
+    }
+
+    const direction = targetMode === 'replica' ? 'b1_to_b2' : 'b2_to_b1';
+    const sourceLabel = direction === 'b1_to_b2' ? 'B1' : 'B2';
+    const targetLabel = direction === 'b1_to_b2' ? 'B2' : 'B1';
+
+    res.status(200);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    const ac = new AbortController();
+    const onClose = () => {
+      if (!ac.signal.aborted) {
+        console.warn('⚠️ [Cluster] Cliente encerrou conexão — cancelando switch');
+        ac.abort();
+      }
+    };
+    req.on('close', onClose);
+    req.on('aborted', onClose);
+
+    sendEvent({
+      type: 'start',
+      direction,
+      sourceLabel,
+      targetLabel,
+      targetMode,
+      message: `Preparando cópia ${sourceLabel} → ${targetLabel}…`
+    });
+
+    const result = await mirrorClusterTables({
+      direction,
+      signal: ac.signal,
+      onProgress: (p) => {
+        sendEvent({
+          type: 'progress',
+          percent: Math.max(0, Math.min(99, Number(p.percent) || 0)),
+          message: p.message || '',
+          table: p.table || '',
+          tableIndex: p.tableIndex || 0,
+          tableTotal: p.tableTotal || 0,
+          phase: p.phase || ''
+        });
+      }
+    });
+
+    if (result.cancelled || ac.signal.aborted) {
+      sendEvent({
+        type: 'cancelled',
+        success: false,
+        message: 'Troca cancelada. O modo anterior foi mantido.'
+      });
+      return res.end();
+    }
+
+    if (!result.success) {
+      sendEvent({
+        type: 'error',
+        success: false,
+        error: result.error || 'Falha na sincronização',
+        synced: result.synced || {}
+      });
+      return res.end();
+    }
+
+    const saved = setClusterMode(targetMode);
+    sendEvent({
+      type: 'done',
+      success: true,
+      mode: saved.mode,
+      direction,
+      synced: result.synced || {},
+      percent: 100,
+      message: `Backend ${targetLabel} ativo. Cópia ${sourceLabel} → ${targetLabel} concluída.`
+    });
+    return res.end();
+  } catch (err) {
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+    try {
+      res.write(
+        `${JSON.stringify({
+          type: 'error',
+          success: false,
+          error: err.message || 'Erro ao trocar backend'
+        })}\n`
+      );
+    } catch {
+      // ignore
+    }
+    return res.end();
   }
 });
 
@@ -6227,7 +6334,7 @@ async function loadExistingCTOs(supabaseClient, progressCallback = null) {
  * @returns {Promise<Object>} - { deleted: number } - Quantidade de CTOs deletadas
  * @throws {Error} - Se houver erro ao deletar
  */
-/** Clientes para escrita de CTOs no upload (primary + replica se cluster on). */
+/** Clientes para escrita de CTOs no upload (apenas o backend ativo). */
 function getUploadWriteClients(fallbackClient) {
   const clients = getWriteClients();
   if (clients.length > 0) return clients;
@@ -6236,8 +6343,7 @@ function getUploadWriteClients(fallbackClient) {
 }
 
 /**
- * Executa a mesma operação de escrita em todos os backends do cluster.
- * Primary deve existir; falha na réplica propaga erro (não deixa B2 desatualizado em silêncio).
+ * Executa a operação de escrita no(s) cliente(s) de upload (backend ativo).
  */
 async function dualWriteUpload(fallbackClient, fn) {
   const clients = getUploadWriteClients(fallbackClient);
@@ -6245,7 +6351,7 @@ async function dualWriteUpload(fallbackClient, fn) {
     throw new Error('Nenhum cliente Supabase para escrita do upload');
   }
   if (clients.length > 1) {
-    console.log(`🪞 [Cluster] dual-write upload → ${clients.map((c) => c.label).join(' + ')}`);
+    console.log(`🪞 [Cluster] write upload → ${clients.map((c) => c.label).join(' + ')}`);
   }
   const settled = await Promise.allSettled(
     clients.map(({ client, label }) => Promise.resolve(fn(client, label)))
