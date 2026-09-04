@@ -2530,7 +2530,7 @@
                 </button>
               {/each}
             </div>
-            {#if clusterMode === 'alternate' && clusterEnabled && clusterAvailable}
+            {#if clusterEnabled && clusterAvailable}
               <div style="margin-top: 1rem;">
                 <button
                   type="button"
@@ -2541,7 +2541,7 @@
                   {#if clusterSyncing}
                     ⏳ Sincronizando B1 → B2...
                   {:else}
-                    🪞 Sincronizar réplica agora
+                    🪞 Sincronizar réplica agora (B1 → B2)
                   {/if}
                 </button>
               </div>
@@ -2583,12 +2583,17 @@
               </div>
               <div class="info-modal-body">
                 <p>
-                  Escolha qual backend a Viabilidade usa. No modo <strong>Réplica</strong>, o B2 precisa estar
-                  sincronizado com o B1 antes de selecionar essa opção.
+                  Escolha qual backend a Viabilidade usa para <strong>leitura</strong>.
                 </p>
                 <p>
-                  No modo <strong>Ambos em alternância</strong>, as leituras alternam entre B1 e B2 e as escritas
-                  vão para os dois. Use <strong>Sincronizar réplica agora</strong> para espelhar os dados do B1 no B2.
+                  <strong>Backend Principal (B1)</strong>: lê o B1 e grava em B1 + B2 (mantém a réplica alinhada).
+                </p>
+                <p>
+                  <strong>Backend Secundário (B2)</strong>: lê e grava só no B2. Antes de usar, rode
+                  <strong> Sincronizar réplica agora</strong> para copiar o B1 → B2.
+                </p>
+                <p>
+                  <strong>Ambos em alternância</strong>: leituras alternam entre B1 e B2; escritas vão para os dois.
                 </p>
               </div>
             </div>
