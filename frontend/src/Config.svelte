@@ -90,6 +90,7 @@
   let clusterAvailable = false;
   let clusterLoading = false;
   let clusterSyncing = false;
+  let clusterSyncDirection = '';
   let clusterMessage = '';
   let clusterError = '';
   let showClusterInfo = false;
@@ -1163,10 +1164,15 @@
     }
   }
 
-  async function syncClusterReplica() {
+  async function syncClusterReplica(direction = 'b1_to_b2') {
     if (userTipo !== 'admin' || clusterSyncing) return;
-    if (!confirm('Sincronizar B2 com B1? Isso pode levar vários minutos.')) return;
+    const isB2toB1 = direction === 'b2_to_b1';
+    const confirmMsg = isB2toB1
+      ? 'ATENÇÃO: isso APAGA os dados do B1 e substitui pela cópia atual do B2.\n\nUse se você gerou VI ALAs só no B2 e precisa levar isso para o B1.\n\nPode levar vários minutos. Continuar?'
+      : 'ATENÇÃO: isso APAGA os dados do B2 e substitui pela cópia atual do B1.\n\nSe alguém usou só o B2, essas alterações no B2 serão perdidas — neste caso, rode antes “B2 → B1”.\n\nPode levar vários minutos. Continuar?';
+    if (!confirm(confirmMsg)) return;
     clusterSyncing = true;
+    clusterSyncDirection = direction;
     clusterMessage = '';
     clusterError = '';
     try {
@@ -1176,18 +1182,22 @@
           'Content-Type': 'application/json',
           'X-Usuario': currentUser || ''
         },
-        body: JSON.stringify({ usuario: currentUser || '' })
+        body: JSON.stringify({ usuario: currentUser || '', direction })
       });
       const data = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.error || 'Falha na sincronização');
       }
       const tables = data.synced ? Object.entries(data.synced).map(([k, v]) => `${k}: ${v}`).join(', ') : '';
-      clusterMessage = tables ? `Sincronizado — ${tables}` : (data.message || 'Sincronização concluída');
+      const dirLabel = isB2toB1 ? 'B2 → B1' : 'B1 → B2';
+      clusterMessage = tables
+        ? `Sincronizado (${dirLabel}) — ${tables}`
+        : (data.message || 'Sincronização concluída');
     } catch (err) {
       clusterError = err.message || 'Erro na sincronização';
     } finally {
       clusterSyncing = false;
+      clusterSyncDirection = '';
     }
   }
 
@@ -2531,17 +2541,29 @@
               {/each}
             </div>
             {#if clusterEnabled && clusterAvailable}
-              <div style="margin-top: 1rem;">
+              <div style="margin-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem;">
                 <button
                   type="button"
                   class="btn-add"
                   disabled={clusterSyncing || clusterLoading}
-                  on:click={syncClusterReplica}
+                  on:click={() => syncClusterReplica('b1_to_b2')}
                 >
-                  {#if clusterSyncing}
-                    ⏳ Sincronizando B1 → B2...
+                  {#if clusterSyncing && clusterSyncDirection === 'b1_to_b2'}
+                    ⏳ Copiando B1 → B2...
                   {:else}
-                    🪞 Sincronizar réplica agora (B1 → B2)
+                    🪞 Copiar B1 → B2 (apaga o B2)
+                  {/if}
+                </button>
+                <button
+                  type="button"
+                  class="btn-add"
+                  disabled={clusterSyncing || clusterLoading}
+                  on:click={() => syncClusterReplica('b2_to_b1')}
+                >
+                  {#if clusterSyncing && clusterSyncDirection === 'b2_to_b1'}
+                    ⏳ Copiando B2 → B1...
+                  {:else}
+                    🪞 Copiar B2 → B1 (apaga o B1)
                   {/if}
                 </button>
               </div>
@@ -2584,16 +2606,21 @@
               <div class="info-modal-body">
                 <p>
                   Escolha qual backend a Viabilidade usa para <strong>leitura</strong>.
+                  As <strong>escritas</strong> novas tentam ir para os dois (B1 e B2), para não descasar.
                 </p>
                 <p>
-                  <strong>Backend Principal (B1)</strong>: lê o B1 e grava em B1 + B2 (mantém a réplica alinhada).
+                  <strong>Backend Principal (B1)</strong>: lê o B1; grava B1 + espelha no B2.
                 </p>
                 <p>
-                  <strong>Backend Secundário (B2)</strong>: lê e grava só no B2. Antes de usar, rode
-                  <strong> Sincronizar réplica agora</strong> para copiar o B1 → B2.
+                  <strong>Backend Secundário (B2)</strong>: lê o B2; grava B2 + espelha no B1.
                 </p>
                 <p>
-                  <strong>Ambos em alternância</strong>: leituras alternam entre B1 e B2; escritas vão para os dois.
+                  <strong>Ambos em alternância</strong>: leituras alternam; escritas vão para os dois.
+                </p>
+                <p>
+                  <strong>Copiar B1 → B2</strong> apaga o B2 e coloca a cópia do B1.
+                  <strong> Copiar B2 → B1</strong> apaga o B1 e coloca a cópia do B2.
+                  Se alguém usou só o B2, rode <strong>B2 → B1</strong> antes de um B1 → B2.
                 </p>
               </div>
             </div>
