@@ -27,6 +27,10 @@ import {
   initClusterMode,
   logClusterBoot
 } from './lib/supabaseCluster/index.js';
+import {
+  getNextVIALANumberUnified,
+  writeViAlaToAllClients
+} from './lib/viAlaDualDb.js';
 import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
 import { bootstrapAgendaBotIfEnabled } from './lib/portalCensup/agendaBot/index.js';
@@ -4284,60 +4288,16 @@ function parseVIALANumber(viAla) {
   return Number.isFinite(number) ? number : 0;
 }
 
-// Função para obter o próximo VI ALA do Supabase (nova versão)
+// Próximo VI ALA: max(B1, B2) + 1 quando SUPABASE_REPLICA_* estiver configurado
 async function getNextVIALAFromSupabase() {
   try {
-    if (!supabase || !isSupabaseAvailable()) {
-      return null; // Retorna null para indicar que deve usar fallback
+    if (!isDbAvailable() && !isSupabaseAvailable()) {
+      return null; // Fallback Excel
     }
-    
-    console.log('🔍 [Supabase] Obtendo próximo VI ALA do Supabase...');
-    
-    // Tentar usar a função SQL primeiro (mais eficiente)
-    try {
-      const { data, error } = await supabase.rpc('get_next_vi_ala_number');
-      
-      if (error) {
-        // Se a função não existir, buscar manualmente
-        throw error;
-      }
-      
-      // data pode ser 0 (primeiro número), então verificar explicitamente
-      const nextNumber = (data !== null && data !== undefined) ? data : 1;
-      const nextVIALA = `VI ALA-${String(nextNumber).padStart(7, '0')}`;
-      
-      console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (número: ${nextNumber})`);
-      return nextVIALA;
-    } catch (rpcError) {
-      // Fallback rápido: últimos registros por id (não varrer a tabela inteira)
-      console.log('⚠️ [Supabase] Função SQL não disponível, buscando maior número nos registros recentes...');
-
-      const { data, error } = await supabase
-        .from('vi_ala')
-        .select('vi_ala')
-        .order('id', { ascending: false })
-        .limit(200);
-
-      if (error) {
-        console.error('❌ [Supabase] Erro ao buscar VI ALAs recentes:', error);
-        return null;
-      }
-
-      let maxNumber = 0;
-      for (const row of data || []) {
-        const number = parseVIALANumber(row.vi_ala || '');
-        if (number > maxNumber) maxNumber = number;
-      }
-
-      const nextNumber = maxNumber + 1;
-      const nextVIALA = `VI ALA-${String(nextNumber).padStart(7, '0')}`;
-
-      console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (max recente: ${maxNumber}, amostra: ${(data || []).length})`);
-      return nextVIALA;
-    }
+    return await getNextVIALANumberUnified();
   } catch (err) {
     console.error('❌ [Supabase] Erro ao obter próximo VI ALA:', err);
-    return null; // Fallback para Excel
+    return null;
   }
 }
 
@@ -4466,10 +4426,31 @@ async function insertVIALAIntoSupabase(dataToSave) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await clusterAwareWrite(async (client) => {
+      // Grava no DB local + peer (SUPABASE_REPLICA_*) para manter a mesma sequência
+      const writeResults = await writeViAlaToAllClients(async (client) => {
         const { error } = await client.from('vi_ala').insert([payload]);
-        if (error) throw error;
+        if (error) {
+          const msg = `${error.message || ''} ${error.code || ''}`;
+          if (/duplicate key|unique constraint|23505/i.test(msg)) {
+            return { duplicate: true };
+          }
+          throw error;
+        }
+        return { duplicate: false };
       });
+
+      const outcomes = writeResults.map((r) => r.value).filter(Boolean);
+      const allDuplicate =
+        outcomes.length > 0 && outcomes.every((o) => o && o.duplicate === true);
+
+      if (allDuplicate) {
+        return {
+          success: false,
+          error: `duplicate key value violates unique constraint (vi_ala=${payload.vi_ala})`,
+          code: '23505'
+        };
+      }
+
       return { success: true, payload };
     } catch (error) {
       const missingColumn = getMissingSupabaseColumn(error?.message);
@@ -4503,7 +4484,7 @@ async function insertVIALABatchIntoSupabase(records) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await clusterAwareWrite(async (client) => {
+      await writeViAlaToAllClients(async (client) => {
         const { error } = await client.from('vi_ala').insert(payload);
         if (error) throw error;
       });
