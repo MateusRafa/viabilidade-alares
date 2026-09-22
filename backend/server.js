@@ -15,8 +15,6 @@ import {
   resolveReadDbForRequest,
   dualWrite,
   getWriteClients,
-  getPrimaryClient,
-  getReplicaClient,
   mirrorClusterTables,
   isClusterEnabled,
   isClusterAvailable,
@@ -32,20 +30,6 @@ import {
 import { registerRelatoriosB2bRoutes } from './relatoriosB2bRoutes.js';
 import { registerPortalCensupRoutes } from './portalCensupRoutes.js';
 import { bootstrapAgendaBotIfEnabled } from './lib/portalCensup/agendaBot/index.js';
-import { replaceMduBaseFromExcel } from './lib/condominiosMdu/uploadAndGeocode.js';
-import {
-  isDatasetStagingEnabled,
-  ensureActiveDataset,
-  getActiveDatasetId,
-  createStagingDataset,
-  getStagingDataset,
-  markDatasetFailed,
-  swapActiveDataset,
-  resolveCoverageTargetDataset,
-  applyDatasetFilter,
-  cloneCtosBetweenDatasets,
-  resolvePgUrlForActiveWrite
-} from './lib/ctoCoverageDatasets.js';
 
 /** Cliente cluster-aware: respeita modo admin (primary/replica). */
 function createClusterAwareSupabase() {
@@ -142,24 +126,20 @@ app.use((req, res, next) => {
   next();
 });
 
-// Função auxiliar para deletar polígonos de um dataset (ou todos, legado)
-async function deleteAllCoveragePolygons(datasetId = null) {
+// Função auxiliar para deletar todos os polígonos de cobertura (dual-write se cluster on)
+async function deleteAllCoveragePolygons() {
   try {
     if (!isDbAvailable()) {
       console.warn('⚠️ [Polygons] Supabase não disponível - não é possível deletar polígonos');
       return { success: false, error: 'Supabase não disponível' };
     }
 
-    console.log(
-      datasetId
-        ? `🗑️ [Polygons] Deletando polígonos do dataset ${datasetId}...`
-        : '🗑️ [Polygons] Deletando todos os polígonos de cobertura...'
-    );
+    console.log('🗑️ [Polygons] Deletando todos os polígonos de cobertura...');
 
     const results = await dualWrite(async (client, label) => {
-      let countQuery = client.from('coverage_polygons').select('*', { count: 'exact', head: true });
-      countQuery = applyDatasetFilter(countQuery, datasetId);
-      const { count: countBefore } = await countQuery;
+      const { count: countBefore } = await client
+        .from('coverage_polygons')
+        .select('*', { count: 'exact', head: true });
 
       console.log(`📊 [Polygons][${label}] antes: ${countBefore || 0}`);
 
@@ -167,13 +147,10 @@ async function deleteAllCoveragePolygons(datasetId = null) {
         return { deletedCount: 0 };
       }
 
-      let deleteQuery = client
+      const { error: deleteError, count: deleteCount } = await client
         .from('coverage_polygons')
         .delete()
         .gte('created_at', '1970-01-01T00:00:00Z');
-      deleteQuery = applyDatasetFilter(deleteQuery, datasetId);
-
-      const { error: deleteError, count: deleteCount } = await deleteQuery;
 
       if (deleteError) throw deleteError;
 
@@ -573,21 +550,6 @@ let uploadProgress = {
   processedCTOs: 0
 };
 
-// Progresso do upload da base MDU (condominios_mdu)
-let mduUploadInProgress = false;
-let mduUploadProgress = {
-  stage: 'idle', // idle | parsing | deleting | inserting | geocoding | completed | error
-  percent: 0,
-  message: '',
-  imported: 0,
-  totalRows: 0,
-  processedRows: 0,
-  missingBeforeGeocode: 0,
-  geocodedOk: 0,
-  geocodedFail: 0,
-  error: null
-};
-
 // Sistema de locks para operações críticas (prevenir race conditions)
 const fileLocks = {
   projetistas: null,
@@ -596,9 +558,9 @@ const fileLocks = {
 };
 
 // Função para executar operação com lock (garante execução sequencial)
-async function withLock(lockName, operation, options = {}) {
+async function withLock(lockName, operation) {
   const startTime = Date.now();
-  const MAX_WAIT_TIME = Number(options.maxWaitMs) > 0 ? Number(options.maxWaitMs) : 5000;
+  const MAX_WAIT_TIME = 5000; // 5 segundos máximo de espera
   
   // Aguardar lock anterior ser liberado (com timeout)
   while (fileLocks[lockName]) {
@@ -920,104 +882,6 @@ async function readCTOsFromSupabase() {
   }
 }
 
-/** Se total de portas < conectadas (ex.: 0 e 8), total passa a igualar conectadas.
- *  Também reconstrói total a partir de `livre` + `ocupado` quando `portas` vem 0/vazio.
- */
-function normalizeCtoPortFields(portas, ocupado, livre = null) {
-  let conectadas = Math.max(0, Number(ocupado) || 0);
-  let total = Math.max(0, Number(portas) || 0);
-  const livresRaw =
-    livre !== null && livre !== undefined && livre !== ''
-      ? Math.max(0, Number(livre) || 0)
-      : null;
-
-  if (total === 0 && livresRaw != null) {
-    total = livresRaw + conectadas;
-  } else if (total > 0 && (ocupado === null || ocupado === undefined || ocupado === '') && livresRaw != null) {
-    conectadas = Math.max(0, total - livresRaw);
-  }
-  if (total < conectadas) total = conectadas;
-
-  return {
-    vagas_total: total,
-    clientes_conectados: conectadas,
-    portas_disponiveis: Math.max(0, total - conectadas),
-    ...(livresRaw != null ? { livre: livresRaw } : {})
-  };
-}
-
-/** Normaliza nome de CTO para match MDU ↔ base ctos (sem acento/caixa). */
-function normalizeCtoNameKey(name) {
-  return String(name || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toUpperCase();
-}
-
-/** Chave compacta (só A-Z0-9) para tolerar hífen/ponto/espaço entre planilha MDU e base ctos. */
-function compactCtoNameKey(name) {
-  return normalizeCtoNameKey(name).replace(/[^A-Z0-9]/g, '');
-}
-
-/** True se o nome da CTO de rua bate com algum nome interno MDU (exato ou compacto). */
-function ctoNameMatchesMduInternal(ctoName, mduNameKeys, mduCompactKeys) {
-  const key = normalizeCtoNameKey(ctoName);
-  if (key && mduNameKeys.has(key)) return true;
-  const compact = compactCtoNameKey(ctoName);
-  if (compact && mduCompactKeys.has(compact)) return true;
-  return false;
-}
-
-/** "CTO A, CTO B" → lista de nomes. */
-function splitNomesCtoField(value) {
-  if (value == null || value === '') return [];
-  if (Array.isArray(value)) {
-    return value.map((v) => String(v || '').trim()).filter(Boolean);
-  }
-  return String(value)
-    .split(/[,;|/]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-/** Monta ctos_internas a partir de nomes_cto, enriquecendo com a base de CTOs quando o nome bate. */
-function buildCtosInternasFromNomes(nomesCtoRaw, situacaoCto, ctoByName) {
-  const nomes = splitNomesCtoField(nomesCtoRaw);
-  return nomes.map((nome) => {
-    const key = normalizeCtoNameKey(nome);
-    const compact = compactCtoNameKey(nome);
-    const matched =
-      ctoByName instanceof Map
-        ? ctoByName.get(key) || (compact ? ctoByName.get(compact) : null)
-        : null;
-    if (matched) {
-      const ports = normalizeCtoPortFields(matched.portas, matched.ocupado, matched.livre);
-      return {
-        nome: matched.cto || nome,
-        id: matched.id_cto || matched.id?.toString() || '',
-        ...ports,
-        status_cto: matched.status_cto || situacaoCto || '',
-        cidade: matched.cid_rede || '',
-        pop: matched.pop || '',
-        tipo: 'Interna'
-      };
-    }
-    return {
-      nome,
-      id: '',
-      vagas_total: 0,
-      clientes_conectados: 0,
-      portas_disponiveis: 0,
-      status_cto: situacaoCto || '',
-      cidade: '',
-      pop: '',
-      tipo: 'Interna'
-    };
-  });
-}
-
 // Nova rota OTIMIZADA: Buscar CTOs próximas por coordenadas (não carrega todas)
 // Esta é a solução para resolver o problema de memória - busca apenas CTOs próximas
 app.get('/api/ctos/nearby', async (req, res) => {
@@ -1054,18 +918,13 @@ app.get('/api/ctos/nearby', async (req, res) => {
         const lngMax = lng + radiusDegrees;
         
         // Buscar TODAS as CTOs dentro da bounding box (incluindo não ativas)
-        const activeDatasetId = (await isDatasetStagingEnabled(supabase))
-          ? await getActiveDatasetId(supabase)
-          : null;
-        let nearbyQuery = supabase
+        const { data, error } = await supabase
           .from('ctos')
           .select('*')
           .gte('latitude', latMin)
           .lte('latitude', latMax)
           .gte('longitude', lngMin)
           .lte('longitude', lngMax);
-        nearbyQuery = applyDatasetFilter(nearbyQuery, activeDatasetId);
-        const { data, error } = await nearbyQuery;
           // Removido filtro de status - agora retorna CTOs ativas e não ativas
         
         if (error) {
@@ -1086,12 +945,11 @@ app.get('/api/ctos/nearby', async (req, res) => {
           return R * c;
         };
         
-        // SOLUÇÃO 5: Filtrar CTOs por ID (evitar duplicatas) + por NOME (base MDU nova)
+        // SOLUÇÃO 5: Filtrar CTOs por ID (evitar duplicatas)
         // 1. Buscar TODOS os prédios dentro de um raio maior (500m) para pegar todos os IDs
         let condominiosTableExists = false;
         let prédiosIds = new Set(); // Set para verificação rápida O(1)
         let prédiosMap = new Map(); // Map para armazenar dados dos prédios por ID
-        let mduCtoNames = new Set(); // Nomes normalizados das CTOs internas (planilha MDU)
         
         try {
           const { error: tableError } = await supabase
@@ -1147,46 +1005,9 @@ app.get('/api/ctos/nearby', async (req, res) => {
         } catch (checkError) {
           console.warn('⚠️ [API] Erro ao verificar tabela condominios:', checkError.message);
         }
-
-        // Base MDU nova: filtrar CTOs de rua cujo NOME aparece em nomes_cto do condomínio
-        // (só por nome/compacto — nomes diferentes próximos ao pin continuam como CTO de rua)
-        let mduCompactNames = new Set();
-        try {
-          const mduCollectMeters = Math.max(radiusMeters + 150, 600);
-          const radiusDegreesMdu = mduCollectMeters / 111000;
-          const { data: mduRows, error: mduErr } = await supabase
-            .from('condominios_mdu')
-            .select('nomes_cto, latitude, longitude')
-            .not('latitude', 'is', null)
-            .not('longitude', 'is', null)
-            .gte('latitude', lat - radiusDegreesMdu)
-            .lte('latitude', lat + radiusDegreesMdu)
-            .gte('longitude', lng - radiusDegreesMdu)
-            .lte('longitude', lng + radiusDegreesMdu)
-            .limit(5000);
-
-          if (!mduErr && mduRows?.length) {
-            for (const row of mduRows) {
-              const nomes = splitNomesCtoField(row.nomes_cto);
-              if (!nomes.length) continue;
-              for (const nome of nomes) {
-                const key = normalizeCtoNameKey(nome);
-                if (key) mduCtoNames.add(key);
-                const compact = compactCtoNameKey(nome);
-                if (compact) mduCompactNames.add(compact);
-              }
-            }
-            console.log(
-              `🏢 [API] MDU: ${mduRows.length} condomínios próximos, ${mduCtoNames.size} nomes / ${mduCompactNames.size} compactos de CTO interna para filtrar da rua`
-            );
-          }
-        } catch (mduCheckErr) {
-          console.warn('⚠️ [API] Erro ao carregar nomes_cto de condominios_mdu:', mduCheckErr.message);
-        }
         
         // Filtrar por distância exata e calcular distâncias
         // SOLUÇÃO 5: Filtrar CTOs que têm ID igual aos prédios (evitar duplicatas)
-        // + filtrar por nome igual às CTOs internas da base MDU
         const nearbyCTOs = [];
         const ctosInternasPorPrédio = new Map(); // Agrupar CTOs internas por prédio
         
@@ -1206,15 +1027,6 @@ app.get('/api/ctos/nearby', async (req, res) => {
           const distance = calculateDistance(lat, lng, rowLat, rowLng);
           
           if (distance > radiusMeters) continue;
-
-          // Filtro MDU: CTO interna não aparece como CTO de rua (somente se o nome bater)
-          if (
-            (mduCtoNames.size > 0 || mduCompactNames.size > 0) &&
-            ctoNameMatchesMduInternal(row.cto, mduCtoNames, mduCompactNames)
-          ) {
-            console.log(`🏢 [API] CTO "${row.cto}" é interna MDU (match por nome), filtrando da rua...`);
-            continue;
-          }
           
           const ctoId = row.id_cto;
           const ctoIdNum = ctoId ? (typeof ctoId === 'number' ? ctoId : parseInt(ctoId)) : null;
@@ -1239,7 +1051,9 @@ app.get('/api/ctos/nearby', async (req, res) => {
               ctosInternasPorPrédio.get(ctoIdNum).push({
                 nome: row.cto || row.id_cto || '',
                 id: row.id_cto || row.id?.toString() || '',
-                ...normalizeCtoPortFields(row.portas, row.ocupado, row.livre),
+                vagas_total: row.portas || 0,
+                clientes_conectados: row.ocupado || 0,
+                portas_disponiveis: (row.portas || 0) - (row.ocupado || 0),
                 status_cto: row.status_cto || '',
                 cidade: row.cid_rede || '',
                 pop: row.pop || ''
@@ -1253,19 +1067,13 @@ app.get('/api/ctos/nearby', async (req, res) => {
           
           // Se chegou aqui, é CTO de rua (não está na base de prédios)
           const dataCadastro = row.data_cadastro || row.data_criacao || row.created_at || '';
-          const portFields = normalizeCtoPortFields(row.portas, row.ocupado, row.livre);
-          const pctFromPorts =
-            portFields.vagas_total > 0
-              ? (portFields.clientes_conectados / portFields.vagas_total) * 100
-              : 100; // sem capacidade → trata como saturado (vermelho no mapa)
-          const pctRaw = parseFloat(row.pct_ocup);
           nearbyCTOs.push({
             nome: row.cto || row.id_cto || '',
             latitude: rowLat, // Já validado acima
             longitude: rowLng, // Já validado acima
-            ...portFields,
-            pct_ocup:
-              portFields.vagas_total > 0 && Number.isFinite(pctRaw) ? pctRaw : pctFromPorts,
+            vagas_total: row.portas || 0,
+            clientes_conectados: row.ocupado || 0,
+            pct_ocup: row.pct_ocup || 0,
             cidade: row.cid_rede || '',
             pop: row.pop || '',
             id: row.id_cto || row.id?.toString() || '',
@@ -1336,18 +1144,10 @@ app.post('/api/coverage/calculate', async (req, res) => {
         error: 'Supabase não disponível' 
       });
     }
-
-    // Staging + swap: se há staging com CTOs, calcula nele e publica no fim
-    const coverageTarget = await resolveCoverageTargetDataset(supabase);
-    const coverageDatasetId = coverageTarget.datasetId || null;
-    const shouldSwapAfterCoverage = !!coverageTarget.shouldSwap;
-    console.log(
-      `🗺️ [API] Target mancha: mode=${coverageTarget.mode} dataset=${coverageDatasetId || 'legacy'} swap=${shouldSwapAfterCoverage}`
-    );
     
-    // Deletar polígonos antigos do dataset alvo (não apaga a mancha active se estamos em staging)
-    console.log('🗑️ [API] Deletando polígonos de cobertura do dataset alvo...');
-    const polygonDeleteResult = await deleteAllCoveragePolygons(coverageDatasetId);
+    // Deletar polígonos antigos primeiro
+    console.log('🗑️ [API] Deletando polígonos de cobertura antigos...');
+    const polygonDeleteResult = await deleteAllCoveragePolygons();
     if (polygonDeleteResult.success) {
       console.log(`✅ [API] Polígonos deletados: ${polygonDeleteResult.deletedCount || 0} polígono(s)`);
     }
@@ -1371,7 +1171,7 @@ app.post('/api/coverage/calculate', async (req, res) => {
     
     // Contar total de CTOs válidas (com latitude/longitude válidas)
     // IMPORTANTE: Usar os mesmos filtros da busca para garantir contagem precisa
-    let countQuery = supabase
+    const { count: totalCTOs, error: countError } = await supabase
       .from('ctos')
       .select('id', { count: 'exact', head: true })
       .not('latitude', 'is', null)
@@ -1380,15 +1180,13 @@ app.post('/api/coverage/calculate', async (req, res) => {
       .lte('latitude', 90)
       .gte('longitude', -180)
       .lte('longitude', 180);
-    countQuery = applyDatasetFilter(countQuery, coverageDatasetId);
-    const { count: totalCTOs, error: countError } = await countQuery;
     
     if (countError) {
       console.error('❌ [API] Erro ao contar CTOs válidas:', countError);
       // Tentar contar sem filtros como fallback
-      let fallbackCount = supabase.from('ctos').select('id', { count: 'exact', head: true });
-      fallbackCount = applyDatasetFilter(fallbackCount, coverageDatasetId);
-      const { count: totalAll } = await fallbackCount;
+      const { count: totalAll } = await supabase
+        .from('ctos')
+        .select('id', { count: 'exact', head: true });
       console.warn(`⚠️ [API] Usando contagem total sem filtros: ${totalAll || 0}`);
     }
     
@@ -1406,17 +1204,13 @@ app.post('/api/coverage/calculate', async (req, res) => {
       stage: 'calculating',
       uploadPercent: 100, // Upload já está completo
       calculationPercent: 0,
-      message: shouldSwapAfterCoverage
-        ? 'Calculando mancha no staging (ferramenta continua na base anterior)...'
-        : 'Iniciando cálculo da mancha de cobertura...',
+      message: 'Iniciando cálculo da mancha de cobertura...',
       totalRows: 0,
       processedRows: 0,
       importedRows: 0,
       calculationId: calculationId,
       totalCTOs: totalCTOs || 0,
-      processedCTOs: 0,
-      stagingDatasetId: shouldSwapAfterCoverage ? coverageDatasetId : null,
-      pendingSwap: shouldSwapAfterCoverage
+      processedCTOs: 0
     };
     
     // Retornar resposta imediata e processar em background
@@ -1592,8 +1386,6 @@ app.post('/api/coverage/calculate', async (req, res) => {
             .lte('longitude', 180)
             .order('id', { ascending: true })
             .limit(batchSize);
-
-          query = applyDatasetFilter(query, coverageDatasetId);
           
           // Se não é o primeiro lote, buscar apenas IDs maiores que o último processado
           if (lastId > 0) {
@@ -1803,23 +1595,19 @@ app.post('/api/coverage/calculate', async (req, res) => {
         }
         
         // Obter próxima versão
-        let versionQuery = supabase
+        const { data: maxVersionData } = await supabase
           .from('coverage_polygons')
           .select('version')
           .order('version', { ascending: false })
           .limit(1);
-        versionQuery = applyDatasetFilter(versionQuery, coverageDatasetId);
-        const { data: maxVersionData } = await versionQuery;
         
         const nextVersion = (maxVersionData && maxVersionData[0]?.version) ? maxVersionData[0].version + 1 : 1;
         
-        // Desativar versões antigas APENAS no dataset alvo (staging não mexe na mancha active)
-        let deactivateQuery = supabase
+        // Desativar versões antigas
+        await supabase
           .from('coverage_polygons')
           .update({ is_active: false })
           .eq('is_active', true);
-        deactivateQuery = applyDatasetFilter(deactivateQuery, coverageDatasetId);
-        await deactivateQuery;
         
         // Salvar polígono final no Supabase usando função RPC que converte GeoJSON para PostGIS
         console.log(`💾 [API] Salvando polígono no Supabase...`);
@@ -1827,7 +1615,6 @@ app.post('/api/coverage/calculate', async (req, res) => {
         console.log(`   - Total CTOs: ${processedCTOs}`);
         console.log(`   - Área: ${areaKm2.toFixed(2)} km²`);
         console.log(`   - Versão: ${nextVersion}`);
-        if (coverageDatasetId) console.log(`   - dataset_id: ${coverageDatasetId}`);
         
         let insertData = null;
         let polygonId = null;
@@ -1892,8 +1679,7 @@ app.post('/api/coverage/calculate', async (req, res) => {
                   area_km2: areaKm2,
                   simplification_tolerance: simplificationTolerance,
                   is_active: true,
-                  version: nextVersion,
-                  ...(coverageDatasetId ? { dataset_id: coverageDatasetId } : {})
+                  version: nextVersion
                 })
                 .select();
               
@@ -1990,40 +1776,9 @@ app.post('/api/coverage/calculate', async (req, res) => {
         }
         
         const processingTime = ((Date.now() - startTime) / 1000).toFixed(2);
-
-        // Garantir dataset_id no polígono (RPC legada pode não gravar a coluna)
-        if (coverageDatasetId && polygonId) {
-          const { error: dsPatchErr } = await supabase
-            .from('coverage_polygons')
-            .update({ dataset_id: coverageDatasetId, is_active: true })
-            .eq('id', polygonId);
-          if (dsPatchErr) {
-            console.warn('⚠️ [API] Falha ao setar dataset_id no polígono:', dsPatchErr.message);
-          }
-        }
-
-        // Publicar staging → active (CTOs + mancha juntas)
-        if (shouldSwapAfterCoverage && coverageDatasetId) {
-          uploadProgress.message = 'Publicando nova base (swap staging → active)...';
-          try {
-            await swapActiveDataset(supabase, coverageDatasetId);
-            uploadProgress.pendingSwap = false;
-            uploadProgress.message = 'Área de cobertura publicada! Nova base ativa para todos.';
-            console.log(`🔀 [API] Swap concluído: ${coverageDatasetId}`);
-          } catch (swapErr) {
-            console.error('❌ [API] Swap falhou após mancha:', swapErr.message);
-            uploadProgress.stage = 'error';
-            uploadProgress.message =
-              'Mancha calculada no staging, mas publicação falhou: ' + swapErr.message;
-            throw swapErr;
-          }
-        }
-
         uploadProgress.stage = 'completed';
         uploadProgress.calculationPercent = 100;
-        if (!shouldSwapAfterCoverage) {
-          uploadProgress.message = 'Área de cobertura criada com sucesso!';
-        }
+        uploadProgress.message = 'Área de cobertura criada com sucesso!';
         
         console.log(`✅ [API] ===== POLÍGONOS CALCULADOS COM SUCESSO (POSTGIS)! =====`);
         console.log(`   - Polygon ID: ${polygonId || 'N/A'}`);
@@ -2508,16 +2263,11 @@ app.get('/api/ctos/search', async (req, res) => {
         // Usar nomeEscapado para garantir que caracteres especiais como \ funcionem corretamente
         
         // ETAPA 1: Busca exata (case-insensitive)
-        const activeDatasetId = (await isDatasetStagingEnabled(supabase))
-          ? await getActiveDatasetId(supabase)
-          : null;
-        let exactQuery = supabase
+        let { data, error } = await supabase
           .from('ctos')
           .select('*')
           .ilike('cto', nomeEscapado) // Busca exata (sem % no início e fim)
           .limit(100);
-        exactQuery = applyDatasetFilter(exactQuery, activeDatasetId);
-        let { data, error } = await exactQuery;
         
         if (error) {
           console.error('❌ [API] Erro ao buscar CTOs (exata):', error);
@@ -2535,13 +2285,11 @@ app.get('/api/ctos/search', async (req, res) => {
           const nomeEscapadoComBoundaries = `${nomeEscapado}(\\s|$|\\\\)`;
           
           // Tentar busca parcial, mas filtrar resultados para garantir que não pegue substrings indesejadas
-          let partialQuery = supabase
+          const { data: partialData, error: partialError } = await supabase
             .from('ctos')
             .select('*')
             .ilike('cto', `%${nomeEscapado}%`)
             .limit(200); // Buscar mais para filtrar depois
-          partialQuery = applyDatasetFilter(partialQuery, activeDatasetId);
-          const { data: partialData, error: partialError } = await partialQuery;
           
           if (partialError) {
             console.error('❌ [API] Erro ao buscar CTOs (parcial):', partialError);
@@ -2610,17 +2358,9 @@ app.get('/api/ctos/search', async (req, res) => {
             nome: row.cto || row.id_cto || '',
             latitude: parseFloat(row.latitude),
             longitude: parseFloat(row.longitude),
-            ...(() => {
-              const ports = normalizeCtoPortFields(row.portas, row.ocupado, row.livre);
-              const pctRaw = parseFloat(row.pct_ocup);
-              const pct_ocup =
-                ports.vagas_total <= 0
-                  ? 100
-                  : Number.isFinite(pctRaw)
-                    ? pctRaw
-                    : (ports.clientes_conectados / ports.vagas_total) * 100;
-              return { ...ports, pct_ocup };
-            })(),
+            vagas_total: row.portas || 0,
+            clientes_conectados: row.ocupado || 0,
+            pct_ocup: row.pct_ocup || 0,
             cidade: row.cid_rede || '',
             pop: row.pop || '',
             id: row.id_cto || row.id?.toString() || '',
@@ -2862,7 +2602,7 @@ app.post('/api/ctos/caminhos-rede-batch', async (req, res) => {
   }
 });
 
-// Rota OTIMIZADA: Buscar condomínios cadastrados (base MDU) dentro do raio
+// Rota OTIMIZADA: Buscar apenas prédios/condomínios dentro de 250m
 app.get('/api/condominios/nearby', async (req, res) => {
   try {
     const __clusterRead = resolveReadDbForRequest(req, res);
@@ -2884,96 +2624,62 @@ app.get('/api/condominios/nearby', async (req, res) => {
       return res.status(400).json({ error: 'Latitude e longitude são obrigatórios' });
     }
     
-    console.log(`🏢 [API] Buscando condomínios MDU próximos de (${lat}, ${lng}) em raio de ${radiusMeters}m`);
+    console.log(`🏢 [API] Buscando prédios próximos de (${lat}, ${lng}) em raio de ${radiusMeters}m`);
     
     if (!supabase || !isSupabaseAvailable()) {
       return res.json({
         success: true,
         condominios: [],
         count: 0,
-        source: 'condominios_mdu',
         message: 'Supabase não disponível'
       });
     }
     
     try {
-      // Preferência: tabela nova condominios_mdu (opção B)
+      // Verificar se a tabela condominios existe
       const { error: tableError } = await supabase
-        .from('condominios_mdu')
+        .from('condominios')
         .select('id')
         .limit(1);
       
-      if (tableError && (tableError.code === 'PGRST116' || String(tableError.message || '').includes('does not exist'))) {
-        console.log('⚠️ [API] Tabela condominios_mdu não existe ainda — rode a migration 2026-09-15_condominios_mdu.sql');
+      if (tableError && (tableError.code === 'PGRST116' || tableError.message.includes('does not exist'))) {
+        console.log('⚠️ [API] Tabela condominios não existe ainda');
         return res.json({
           success: true,
           condominios: [],
           count: 0,
-          source: 'condominios_mdu',
-          message: 'Tabela condominios_mdu não existe ainda'
+          message: 'Tabela condominios não existe ainda'
         });
       }
       
-      // Bounding box (lng corrigido por latitude)
-      const latDelta = radiusMeters / 111320;
-      const cosLat = Math.cos((lat * Math.PI) / 180);
-      const lngDelta = radiusMeters / (111320 * Math.max(0.2, Math.abs(cosLat)));
-      const latMin = lat - latDelta;
-      const latMax = lat + latDelta;
-      const lngMin = lng - lngDelta;
-      const lngMax = lng + lngDelta;
-
-      const coerceCoord = (value) => {
-        if (value === null || value === undefined || value === '') return NaN;
-        if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
-        let s = String(value).trim().replace(/\u00a0/g, '').replace(/\s+/g, '');
-        if (!s) return NaN;
-        if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
-        else if (s.includes(',')) s = s.replace(',', '.');
-        const n = Number(s);
-        return Number.isFinite(n) ? n : NaN;
-      };
+      // Calcular bounding box
+      const radiusDegrees = radiusMeters / 111000;
+      const latMin = lat - radiusDegrees;
+      const latMax = lat + radiusDegrees;
+      const lngMin = lng - radiusDegrees;
+      const lngMax = lng + radiusDegrees;
       
-      const { data: rows, error: queryError } = await supabase
-        .from('condominios_mdu')
+      // Buscar TODOS os condomínios dentro da bounding box
+      const { data: condominiosData, error: condominiosError } = await supabase
+        .from('condominios')
         .select('*')
-        .not('latitude', 'is', null)
-        .not('longitude', 'is', null)
         .gte('latitude', latMin)
         .lte('latitude', latMax)
         .gte('longitude', lngMin)
-        .lte('longitude', lngMax)
-        .limit(5000);
+        .lte('longitude', lngMax);
       
-      if (queryError) {
-        console.error('❌ [API] Erro ao buscar condominios_mdu:', queryError);
+      if (condominiosError) {
+        console.error('❌ [API] Erro ao buscar condomínios:', condominiosError);
         return res.status(500).json({ 
           success: false,
           error: 'Erro ao buscar condomínios',
-          details: queryError.message 
+          details: condominiosError.message 
         });
       }
-
-      // Fallback: se o filtro numérico falhar (ex.: coluna TEXT), busca ampla e filtra em JS
-      let candidateRows = rows || [];
-      if (candidateRows.length === 0) {
-        console.warn('⚠️ [API] Bbox MDU vazio — tentando fallback por amostra regional...');
-        const pad = Math.max(latDelta, lngDelta) * 3;
-        const { data: fallbackRows, error: fbErr } = await supabase
-          .from('condominios_mdu')
-          .select('*')
-          .not('latitude', 'is', null)
-          .not('longitude', 'is', null)
-          .gte('latitude', lat - pad)
-          .lte('latitude', lat + pad)
-          .limit(5000);
-        if (!fbErr && fallbackRows?.length) {
-          candidateRows = fallbackRows;
-        }
-      }
       
+      // Função de cálculo de distância geodésica (Haversine)
       const calculateDistance = (lat1, lng1, lat2, lng2) => {
-        const R = 6371000;
+        const R = 6371000; // Raio da Terra em metros
         const dLat = (lat2 - lat1) * Math.PI / 180;
         const dLng = (lng2 - lng1) * Math.PI / 180;
         const a = 
@@ -2983,137 +2689,178 @@ app.get('/api/condominios/nearby', async (req, res) => {
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         return R * c;
       };
-
-      const buildEndereco = (row) => {
-        const tipoLog = String(row.tipo_logradouro || '').trim();
-        const nomeLog = String(row.nome_logradouro || '').trim();
-        const numero = String(row.numero || '').trim();
-        const complemento = String(row.complemento || '').trim();
-        const bairro = String(row.bairro || '').trim();
-        const cidade = String(row.nome_cidade || '').trim();
-        const estado = String(row.estado || '').trim();
-        const cep = String(row.cep || '').trim();
-        const linha2 = [bairro, cidade && estado ? `${cidade}/${estado}` : (cidade || estado), cep ? `CEP ${cep}` : '']
-          .filter(Boolean)
-          .join(' — ');
-        // Planilha nova: coluna Endereço já vem completa (sem tipo/número separados)
-        if (nomeLog && !tipoLog && !numero) {
-          return [nomeLog, linha2].filter(Boolean).join(' · ');
-        }
-        const logradouro = [tipoLog, nomeLog].filter(Boolean).join(' ').trim();
-        const linha1 = [logradouro, numero ? `Nº ${numero}` : '', complemento]
-          .filter(Boolean)
-          .join(', ');
-        return [linha1, linha2].filter(Boolean).join(' · ');
-      };
-
-      const mapMduRow = (row, cLat, cLng, distancia, coordsSwapped = false) => {
-        const nome = String(row.descricao || '').trim() || 'Condomínio';
-        const situacao = String(row.situacao_cto || '').trim() || null;
-        const tipo = String(row.tipo || '').trim() || null;
-        return {
-          // Compatível com o front atual (ViabilidadeAlares)
-          nome_predio: nome,
-          latitude: cLat,
-          longitude: cLng,
-          status_cto: situacao || tipo || null,
-          distancia_metros: Math.round(distancia * 100) / 100,
-          ctos_internas: [],
-          fonte: 'mdu',
-          // Campos ricos da planilha MDU
-          id_endereco: row.id_endereco ?? null,
-          id_logradouro: row.id_logradouro ?? null,
-          id_mdu: row.id_mdu ?? null,
-          controle_mdu: row.controle_mdu ?? null,
-          descricao: nome,
-          tipo,
-          numero: row.numero ?? null,
-          complemento: row.complemento ?? null,
-          bairro: row.bairro ?? null,
-          nome_logradouro: row.nome_logradouro ?? null,
-          tipo_logradouro: row.tipo_logradouro ?? null,
-          cep: row.cep ?? null,
-          nome_cidade: row.nome_cidade ?? null,
-          estado: row.estado ?? null,
-          endereco_completo: buildEndereco(row),
-          nomes_cto: row.nomes_cto ?? null,
-          situacao_cto: situacao,
-          data_ativacao_cto: row.data_ativacao_cto ?? null,
-          ...(coordsSwapped ? { coords_swapped: true } : {})
-        };
-      };
       
-      const nearbyCondominios = (candidateRows || [])
-        .map((row) => {
-          const cLat = coerceCoord(row.latitude);
-          const cLng = coerceCoord(row.longitude);
-          if (isNaN(cLat) || isNaN(cLng)) return null;
-          // Sanity: Brasil (aprox.) — evita lat/lng trocados
-          if (cLat < -35 || cLat > 6 || cLng < -75 || cLng > -30) {
-            // Tentar invertido se parecer trocado
-            if (cLng >= -35 && cLng <= 6 && cLat >= -75 && cLat <= -30) {
-              const distanciaSwap = calculateDistance(lat, lng, cLng, cLat);
-              if (distanciaSwap <= radiusMeters) {
-                return mapMduRow(row, cLng, cLat, distanciaSwap, true);
+      // IMPORTANTE: Na base `condominios`, cada linha é uma CTO interna de um prédio
+      // Agrupar por nome_predio + coordenadas para formar os prédios com suas CTOs
+      
+      // PASSO 1: Filtrar por distância e calcular distâncias
+      const condominiosFiltrados = (condominiosData || [])
+        .map(cond => {
+          const distance = calculateDistance(lat, lng, parseFloat(cond.latitude), parseFloat(cond.longitude));
+          return {
+            ...cond,
+            distancia_metros: Math.round(distance * 100) / 100
+          };
+        })
+        .filter(cond => cond.distancia_metros <= radiusMeters);
+      
+      // PASSO 2: Agrupar CTOs por nome_predio + coordenadas (cada grupo = um prédio)
+      const prédiosAgrupados = new Map(); // Map<"nome_predio|lat|lng", { prédio, ctos }>
+      
+      condominiosFiltrados.forEach(ctoInterna => {
+        const nomePredio = String(ctoInterna.nome_predio || '').trim();
+        const ctoLat = parseFloat(ctoInterna.latitude);
+        const ctoLng = parseFloat(ctoInterna.longitude);
+        
+        if (!nomePredio || isNaN(ctoLat) || isNaN(ctoLng)) {
+          return;
+        }
+        
+        // Arredondar coordenadas para agrupar CTOs na mesma localização
+        const latRounded = Math.round(ctoLat * 1000000) / 1000000;
+        const lngRounded = Math.round(ctoLng * 1000000) / 1000000;
+        const grupoKey = `${nomePredio}|${latRounded}|${lngRounded}`;
+        
+        if (!prédiosAgrupados.has(grupoKey)) {
+          // Criar entrada do prédio (usar primeira CTO como referência)
+          prédiosAgrupados.set(grupoKey, {
+            prédio: {
+              nome_predio: nomePredio,
+              latitude: ctoLat,
+              longitude: ctoLng,
+              status_cto: ctoInterna.status_cto || null,
+              distancia_metros: ctoInterna.distancia_metros
+            },
+            ctos: []
+          });
+        }
+        
+        // Adicionar esta CTO interna ao prédio
+        prédiosAgrupados.get(grupoKey).ctos.push({
+          nome: ctoInterna.nome_equipamento || ctoInterna.nome_equipamento_ozmap || ctoInterna.nome_equipamento_imanager || '',
+          id: ctoInterna.id_equipamento ? String(ctoInterna.id_equipamento) : '',
+          // Buscar dados da CTO na base `cto` se disponível
+          vagas_total: 0, // Será preenchido se encontrar na base cto
+          clientes_conectados: 0,
+          portas_disponiveis: 0,
+          status_cto: ctoInterna.status_cto || '',
+          cidade: '',
+          pop: ''
+        });
+      });
+      
+      // PASSO 3: Buscar dados completos das CTOs na base `cto` (se disponível)
+      // Criar Set com IDs das CTOs internas para buscar na base `cto`
+      const ctosIdsParaBuscar = new Set();
+      prédiosAgrupados.forEach((grupo, key) => {
+        grupo.ctos.forEach(cto => {
+          if (cto.id && cto.id.trim() !== '') {
+            const idNum = parseInt(cto.id);
+            if (!isNaN(idNum)) {
+              ctosIdsParaBuscar.add(idNum);
+              ctosIdsParaBuscar.add(String(idNum));
+            }
+          }
+        });
+      });
+      
+      // PASSO 3: Buscar dados completos das CTOs na base `cto` (para preencher portas, etc.)
+      // Criar Map de CTOs da base `cto` por ID para lookup rápido
+      const ctosDaBaseCto = new Map(); // Map<id, cto>
+      
+      if (ctosIdsParaBuscar.size > 0) {
+        // Calcular bounding box maior para buscar CTOs
+        const radiusDegreesCTOs = 500 / 111000; // 500 metros
+        const latMinCTOs = lat - radiusDegreesCTOs;
+        const latMaxCTOs = lat + radiusDegreesCTOs;
+        const lngMinCTOs = lng - radiusDegreesCTOs;
+        const lngMaxCTOs = lng + radiusDegreesCTOs;
+        
+        const { data: ctosData, error: ctosError } = await supabase
+          .from('ctos')
+          .select('*')
+          .gte('latitude', latMinCTOs)
+          .lte('latitude', latMaxCTOs)
+          .gte('longitude', lngMinCTOs)
+          .lte('longitude', lngMaxCTOs);
+          // Removido filtro de status - agora retorna CTOs ativas e não ativas
+        
+        if (!ctosError && ctosData) {
+          // Criar Map de CTOs por ID para lookup rápido
+          ctosData.forEach(cto => {
+            const ctoId = cto.id_cto;
+            if (ctoId) {
+              const idNum = typeof ctoId === 'number' ? ctoId : parseInt(ctoId);
+              if (!isNaN(idNum)) {
+                ctosDaBaseCto.set(idNum, cto);
+                ctosDaBaseCto.set(String(idNum), cto);
               }
             }
-            return null;
-          }
-          const distancia = calculateDistance(lat, lng, cLat, cLng);
-          if (distancia > radiusMeters) return null;
-          return mapMduRow(row, cLat, cLng, distancia, false);
-        })
-        .filter(Boolean)
-        .sort((a, b) => a.distancia_metros - b.distancia_metros);
-
-      // Enriquecer ctos_internas: nomes da planilha + portas/status da base ctos (match por nome)
-      if (nearbyCondominios.length > 0) {
-        const ctoByName = new Map();
-        try {
-          const enrichMeters = Math.max(radiusMeters, 500);
-          const enrichLatDelta = enrichMeters / 111320;
-          const enrichLngDelta = enrichMeters / (111320 * Math.max(0.2, Math.abs(cosLat)));
-          const { data: ctoRows, error: ctoEnrichErr } = await supabase
-            .from('ctos')
-            .select('*')
-            .gte('latitude', lat - enrichLatDelta)
-            .lte('latitude', lat + enrichLatDelta)
-            .gte('longitude', lng - enrichLngDelta)
-            .lte('longitude', lng + enrichLngDelta)
-            .limit(8000);
-
-          if (!ctoEnrichErr && ctoRows?.length) {
-            for (const ctoRow of ctoRows) {
-              const key = normalizeCtoNameKey(ctoRow.cto);
-              if (key && !ctoByName.has(key)) ctoByName.set(key, ctoRow);
-              const compact = compactCtoNameKey(ctoRow.cto);
-              if (compact && !ctoByName.has(compact)) ctoByName.set(compact, ctoRow);
-            }
-          }
-        } catch (enrichErr) {
-          console.warn('⚠️ [API] Falha ao enriquecer CTOs internas MDU:', enrichErr?.message || enrichErr);
+          });
         }
-
-        for (const condo of nearbyCondominios) {
-          condo.ctos_internas = buildCtosInternasFromNomes(
-            condo.nomes_cto,
-            condo.situacao_cto,
-            ctoByName
-          );
-        }
-        const withInternas = nearbyCondominios.filter((c) => c.ctos_internas.length > 0).length;
-        console.log(
-          `✅ [API] ${nearbyCondominios.length} condomínios MDU dentro de ${radiusMeters}m (${withInternas} com CTOs internas listadas)`
-        );
-      } else {
-        console.log(`✅ [API] ${nearbyCondominios.length} condomínios MDU dentro de ${radiusMeters}m`);
       }
+      
+      // PASSO 4: Preencher dados completos das CTOs internas (portas, etc.) e criar array final
+      const nearbyCondominios = [];
+      
+      prédiosAgrupados.forEach((grupo, grupoKey) => {
+        const prédio = grupo.prédio;
+        const ctosCompletas = grupo.ctos.map(ctoInterna => {
+          // Buscar dados completos na base `cto` se disponível
+          const ctoId = ctoInterna.id ? parseInt(ctoInterna.id) : null;
+          const ctoDaBase = ctoId && !isNaN(ctoId) ? (ctosDaBaseCto.get(ctoId) || ctosDaBaseCto.get(String(ctoId))) : null;
+          
+          if (ctoDaBase) {
+            // Preencher com dados da base `cto`
+            return {
+              nome: ctoDaBase.cto || ctoInterna.nome || '',
+              id: ctoInterna.id,
+              vagas_total: ctoDaBase.portas || 0,
+              clientes_conectados: ctoDaBase.ocupado || 0,
+              portas_disponiveis: (ctoDaBase.portas || 0) - (ctoDaBase.ocupado || 0),
+              status_cto: ctoDaBase.status_cto || ctoInterna.status_cto || '',
+              cidade: ctoDaBase.cid_rede || '',
+              pop: ctoDaBase.pop || ''
+            };
+          } else {
+            // Usar dados da base `condominios` (sem portas)
+            return {
+              nome: ctoInterna.nome,
+              id: ctoInterna.id,
+              vagas_total: 0,
+              clientes_conectados: 0,
+              portas_disponiveis: 0,
+              status_cto: ctoInterna.status_cto,
+              cidade: '',
+              pop: ''
+            };
+          }
+        });
+        
+        nearbyCondominios.push({
+          nome_predio: prédio.nome_predio,
+          latitude: prédio.latitude,
+          longitude: prédio.longitude,
+          status_cto: prédio.status_cto,
+          distancia_metros: prédio.distancia_metros,
+          ctos_internas: ctosCompletas
+        });
+        
+        console.log(`🏢 [API] Prédio "${prédio.nome_predio}" agrupado com ${ctosCompletas.length} CTOs internas`);
+      });
+      
+      // Ordenar por distância
+      nearbyCondominios.sort((a, b) => a.distancia_metros - b.distancia_metros);
+      
+      const totalCTOsInternas = nearbyCondominios.reduce((sum, prédio) => sum + (prédio.ctos_internas?.length || 0), 0);
+      console.log(`🏢 [API] ${totalCTOsInternas} CTOs internas encontradas em ${nearbyCondominios.length} prédios`);
+      
+      console.log(`✅ [API] ${nearbyCondominios.length} prédios encontrados dentro de ${radiusMeters}m`);
       
       return res.json({
         success: true,
         condominios: nearbyCondominios,
-        count: nearbyCondominios.length,
-        source: 'condominios_mdu'
+        count: nearbyCondominios.length
       });
       
     } catch (supabaseErr) {
@@ -3131,169 +2878,6 @@ app.get('/api/condominios/nearby', async (req, res) => {
       error: 'Erro interno', 
       details: err.message 
     });
-  }
-});
-
-// Progresso do upload da base MDU
-app.get('/api/condominios-mdu/upload-progress', (req, res) => {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  else res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  return res.json({
-    success: true,
-    inProgress: mduUploadInProgress,
-    ...mduUploadProgress
-  });
-});
-
-// Upload Excel → substitui condominios_mdu → geocodifica faltantes
-app.post('/api/condominios-mdu/upload', (req, res, next) => {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  else res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-
-  req.setTimeout(2 * 60 * 1000);
-  res.setTimeout(2 * 60 * 1000);
-
-  upload.single('file')(req, res, (err) => {
-    if (err) {
-      console.error('❌ [MDU Upload] Erro no multer:', err);
-      let errorMessage = err.message;
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        errorMessage = 'Arquivo muito grande. O tamanho máximo permitido é 100MB.';
-      }
-      return res.status(400).json({ success: false, error: errorMessage, errorCode: err.code });
-    }
-    next();
-  });
-}, async (req, res) => {
-  const origin = req.headers.origin;
-  if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
-  else res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-
-  try {
-    if (mduUploadInProgress) {
-      return res.status(409).json({
-        success: false,
-        error: 'Já existe um upload da base MDU em andamento. Aguarde a conclusão.'
-      });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'Nenhum arquivo foi enviado' });
-    }
-
-    const allowedMimes = [
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'application/vnd.ms-excel',
-      'application/octet-stream'
-    ];
-    if (!allowedMimes.includes(req.file.mimetype) && !req.file.originalname.match(/\.(xlsx|xls)$/i)) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(400).json({
-        success: false,
-        error: 'Formato inválido. Envie um Excel puro (.xlsx ou .xls).'
-      });
-    }
-
-    if (!isDbAvailable() && !isSupabaseAvailable()) {
-      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-      return res.status(503).json({
-        success: false,
-        error: 'Supabase indisponível. Não é possível atualizar condominios_mdu.'
-      });
-    }
-
-    const tempFilePath = req.file.path;
-    const fileName = req.file.originalname;
-    const fileSize = req.file.size;
-
-    mduUploadInProgress = true;
-    mduUploadProgress = {
-      stage: 'parsing',
-      percent: 1,
-      message: 'Arquivo recebido. Processando em background...',
-      imported: 0,
-      totalRows: 0,
-      processedRows: 0,
-      missingBeforeGeocode: 0,
-      geocodedOk: 0,
-      geocodedFail: 0,
-      error: null
-    };
-
-    // Responder imediatamente (evita timeout do Railway)
-    res.json({
-      success: true,
-      processing: true,
-      message: 'Upload MDU recebido. Substituindo base e geocodificando em background...',
-      fileName,
-      fileSize
-    });
-
-    (async () => {
-      try {
-        console.log(`📤 [MDU Upload] Iniciando: ${fileName} (${fileSize} bytes)`);
-        const fileBuffer = await fsPromises.readFile(tempFilePath);
-        try {
-          await fsPromises.unlink(tempFilePath);
-        } catch (_) {
-          /* ignore */
-        }
-
-        const summary = await replaceMduBaseFromExcel(fileBuffer, {
-          onProgress: (patch) => {
-            mduUploadProgress = {
-              ...mduUploadProgress,
-              ...patch,
-              error: patch.stage === 'error' ? patch.error || patch.message : null
-            };
-          }
-        });
-
-        mduUploadProgress = {
-          ...mduUploadProgress,
-          stage: 'completed',
-          percent: 100,
-          imported: summary.imported,
-          missingBeforeGeocode: summary.missingBeforeGeocode,
-          geocodedOk: summary.geocodedOk,
-          geocodedFail: summary.geocodedFail,
-          error: null
-        };
-        console.log('✅ [MDU Upload] Concluído:', summary);
-      } catch (err) {
-        console.error('❌ [MDU Upload] Falha:', err);
-        mduUploadProgress = {
-          ...mduUploadProgress,
-          stage: 'error',
-          percent: mduUploadProgress.percent || 0,
-          message: err?.message || 'Erro ao atualizar base MDU',
-          error: err?.message || String(err)
-        };
-        try {
-          if (fs.existsSync(tempFilePath)) await fsPromises.unlink(tempFilePath);
-        } catch (_) {
-          /* ignore */
-        }
-      } finally {
-        mduUploadInProgress = false;
-      }
-    })();
-  } catch (err) {
-    mduUploadInProgress = false;
-    console.error('❌ [MDU Upload] Erro na rota:', err);
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        error: err?.message || 'Erro ao processar upload MDU'
-      });
-    }
   }
 });
 
@@ -3776,19 +3360,11 @@ app.get('/api/base-last-modified', async (req, res) => {
     let hasData = false;
     let totalCTOs = 0; // Declarar fora do bloco para estar disponível em todo o escopo
 
-    // Sempre primary — mesma data da ferramenta oficial (evita Excel/réplica antigos)
-    const dbClient = getPrimaryClient() || supabasePrimary || (isSupabaseAvailable() ? supabase : null);
-
-    if (dbClient) {
-      const activeDatasetId = (await isDatasetStagingEnabled(dbClient))
-        ? await getActiveDatasetId(dbClient)
-        : null;
+    if (supabase && isSupabaseAvailable()) {
       // Primeiro verificar se existe dados na tabela ctos
-      let countQuery = dbClient
+      const { count, error: countError } = await supabase
         .from('ctos')
         .select('*', { count: 'exact', head: true });
-      countQuery = applyDatasetFilter(countQuery, activeDatasetId);
-      const { count, error: countError } = await countQuery;
 
       if (countError) {
         console.warn('⚠️ [API] Erro ao contar CTOs do Supabase:', countError.message);
@@ -3800,7 +3376,7 @@ app.get('/api/base-last-modified', async (req, res) => {
 
       // Se houver dados, tentar obter a data da última modificação
       if (hasData) {
-        const { data, error } = await dbClient
+        const { data, error } = await supabase
           .from('upload_history')
           .select('uploaded_at')
           .order('uploaded_at', { ascending: false })
@@ -3817,13 +3393,11 @@ app.get('/api/base-last-modified', async (req, res) => {
         // Se ainda não tem lastModified mas tem dados, usar data atual como fallback
         if (!lastModified && hasData) {
           // Buscar última CTO inserida para usar sua data de criação
-          let lastCtoQuery = dbClient
+          const { data: lastCto, error: ctoError } = await supabase
             .from('ctos')
             .select('created_at')
             .order('created_at', { ascending: false })
             .limit(1);
-          lastCtoQuery = applyDatasetFilter(lastCtoQuery, activeDatasetId);
-          const { data: lastCto, error: ctoError } = await lastCtoQuery;
           
           if (!ctoError && lastCto && lastCto.length > 0 && lastCto[0].created_at) {
             lastModified = lastCto[0].created_at;
@@ -3838,7 +3412,7 @@ app.get('/api/base-last-modified', async (req, res) => {
     }
 
     // Se Supabase não está disponível, verificar arquivo local
-    if (!dbClient) {
+    if (!supabase || !isSupabaseAvailable()) {
       const currentBasePath = await findCurrentBaseFile();
       if (currentBasePath && fs.existsSync(currentBasePath)) {
         const stats = await fsPromises.stat(currentBasePath);
@@ -4270,79 +3844,35 @@ async function saveProjetistas(projetistas) {
 }
 
 // Função para ler tabulações do Supabase (nova versão)
-// Lê primary (+ réplica se cluster) e une — evita lista incompleta na extensão
-// quando novas tabulações existem só num dos lados do cluster.
 async function readTabulacoesFromSupabase() {
   try {
-    if (!isDbAvailable() && !isSupabaseAvailable()) {
-      return null;
+    if (!supabase || !isSupabaseAvailable()) {
+      return null; // Retorna null para indicar que deve usar fallback
     }
-
-    const clients = [];
-    const primary = getPrimaryClient() || supabasePrimary;
-    if (primary) clients.push({ client: primary, label: 'primary' });
-
-    if (isClusterEnabled()) {
-      const replica = getReplicaClient();
-      if (replica && replica !== primary) {
-        clients.push({ client: replica, label: 'replica' });
-      }
+    
+    console.log('📂 [Supabase] Carregando tabulações do Supabase...');
+    
+    const { data, error } = await supabase
+      .from('tabulacoes')
+      .select('nome')
+      .order('nome', { ascending: true });
+    
+    if (error) {
+      console.error('❌ [Supabase] Erro ao ler tabulações:', error);
+      return null; // Fallback para Excel
     }
-
-    // Fallback: cliente cluster-aware (modo admin)
-    if (!clients.length && supabase) {
-      clients.push({ client: supabase, label: 'active' });
-    }
-
-    if (!clients.length) {
-      return null;
-    }
-
-    console.log('📂 [Supabase] Carregando tabulações (primary + réplica se houver)…');
-
-    const nomes = new Set();
-    let anyOk = false;
-
-    for (const { client, label } of clients) {
-      try {
-        const { data, error } = await client
-          .from('tabulacoes')
-          .select('nome')
-          .order('nome', { ascending: true });
-
-        if (error) {
-          console.error(`❌ [Supabase] Erro ao ler tabulações (${label}):`, error);
-          continue;
-        }
-
-        anyOk = true;
-        for (const row of data || []) {
-          const nome = (row?.nome || '').trim();
-          if (nome) nomes.add(nome);
-        }
-        console.log(`📋 [Supabase] ${label}: ${(data || []).length} tabulação(ões)`);
-      } catch (err) {
-        console.error(`❌ [Supabase] Erro ao ler tabulações (${label}):`, err);
-      }
-    }
-
-    if (!anyOk) {
-      return null;
-    }
-
-    const tabulacoes = Array.from(nomes).sort((a, b) =>
-      a.localeCompare(b, 'pt-BR', { sensitivity: 'base' })
-    );
-
-    console.log(`✅ [Supabase] ${tabulacoes.length} tabulações unificadas`);
+    
+    const tabulacoes = (data || []).map(t => (t.nome || '').trim()).filter(nome => nome);
+    
+    console.log(`✅ [Supabase] ${tabulacoes.length} tabulações carregadas do Supabase`);
     if (tabulacoes.length > 0) {
       console.log(`📋 [Supabase] Tabulações: ${tabulacoes.join(', ')}`);
     }
-
+    
     return tabulacoes;
   } catch (err) {
     console.error('❌ [Supabase] Erro ao ler tabulações:', err);
-    return null;
+    return null; // Fallback para Excel
   }
 }
 
@@ -4354,7 +3884,6 @@ async function readTabulacoesFromExcel() {
       const defaultTabulacoes = [
         'Aprovado Com Portas',
         'Aprovado Com Alívio de Rede/Cleanup',
-        'Aprovado / Sem Estrutura Atendimento Externo',
         'Aprovado Prédio Não Cabeado',
         'Aprovado - Endereço não Localizado',
         'Fora da Área de Cobertura'
@@ -4391,7 +3920,6 @@ async function readTabulacoesFromExcel() {
     return [
       'Aprovado Com Portas',
       'Aprovado Com Alívio de Rede/Cleanup',
-      'Aprovado / Sem Estrutura Atendimento Externo',
       'Aprovado Prédio Não Cabeado',
       'Aprovado - Endereço não Localizado',
       'Fora da Área de Cobertura'
@@ -4756,96 +4284,60 @@ function parseVIALANumber(viAla) {
   return Number.isFinite(number) ? number : 0;
 }
 
-/** Maior número VI ALA já usado em um cliente Supabase (primary/réplica). */
-async function getMaxVIALANumberFromClient(client, label = 'supabase') {
-  if (!client) return 0;
-
-  // NÃO chamar RPC get_next_vi_ala_number aqui — ela aloca/incrementa sequência
-  // e gerava buracos + duplicatas quando usada só para "ler o max".
-
-  // 1) Maior vi_ala textual (zero-padded ordena corretamente)
-  try {
-    const { data, error } = await client
-      .from('vi_ala')
-      .select('vi_ala')
-      .order('vi_ala', { ascending: false })
-      .limit(50);
-
-    if (!error && data?.length) {
-      let maxNumber = 0;
-      for (const row of data) {
-        maxNumber = Math.max(maxNumber, parseVIALANumber(row.vi_ala || ''));
-      }
-      if (maxNumber > 0) {
-        console.log(`✅ [Supabase/${label}] Max por vi_ala desc: ${maxNumber}`);
-        return maxNumber;
-      }
-    }
-  } catch (err) {
-    console.warn(`⚠️ [Supabase/${label}] Falha ao ordenar por vi_ala:`, err?.message || err);
-  }
-
-  // 2) Amostra recente por id
-  try {
-    const { data, error } = await client
-      .from('vi_ala')
-      .select('vi_ala')
-      .order('id', { ascending: false })
-      .limit(500);
-
-    if (!error && data?.length) {
-      let maxNumber = 0;
-      for (const row of data) {
-        maxNumber = Math.max(maxNumber, parseVIALANumber(row.vi_ala || ''));
-      }
-      console.log(`✅ [Supabase/${label}] Max por id recente: ${maxNumber} (amostra ${data.length})`);
-      return maxNumber;
-    }
-  } catch (err) {
-    console.warn(`⚠️ [Supabase/${label}] Falha ao buscar por id:`, err?.message || err);
-  }
-
-  return 0;
-}
-
 // Função para obter o próximo VI ALA do Supabase (nova versão)
 async function getNextVIALAFromSupabase() {
   try {
-    if (!isDbAvailable()) {
-      return null;
+    if (!supabase || !isSupabaseAvailable()) {
+      return null; // Retorna null para indicar que deve usar fallback
     }
-
-    console.log('🔍 [Supabase] Obtendo próximo VI ALA (primary + réplica se houver)…');
-
-    const clients = [];
-    const primary = getPrimaryClient() || supabasePrimary;
-    if (primary) clients.push({ client: primary, label: 'primary' });
-
-    if (isClusterEnabled()) {
-      const replica = getReplicaClient();
-      if (replica && replica !== primary) {
-        clients.push({ client: replica, label: 'replica' });
+    
+    console.log('🔍 [Supabase] Obtendo próximo VI ALA do Supabase...');
+    
+    // Tentar usar a função SQL primeiro (mais eficiente)
+    try {
+      const { data, error } = await supabase.rpc('get_next_vi_ala_number');
+      
+      if (error) {
+        // Se a função não existir, buscar manualmente
+        throw error;
       }
-    }
+      
+      // data pode ser 0 (primeiro número), então verificar explicitamente
+      const nextNumber = (data !== null && data !== undefined) ? data : 1;
+      const nextVIALA = `VI ALA-${String(nextNumber).padStart(7, '0')}`;
+      
+      console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (número: ${nextNumber})`);
+      return nextVIALA;
+    } catch (rpcError) {
+      // Fallback rápido: últimos registros por id (não varrer a tabela inteira)
+      console.log('⚠️ [Supabase] Função SQL não disponível, buscando maior número nos registros recentes...');
 
-    if (!clients.length) {
-      return null;
-    }
+      const { data, error } = await supabase
+        .from('vi_ala')
+        .select('vi_ala')
+        .order('id', { ascending: false })
+        .limit(200);
 
-    // Usa o MAIOR número entre backends — mesma sequência da ferramenta oficial
-    let maxNumber = 0;
-    for (const { client, label } of clients) {
-      const n = await getMaxVIALANumberFromClient(client, label);
-      if (n > maxNumber) maxNumber = n;
-    }
+      if (error) {
+        console.error('❌ [Supabase] Erro ao buscar VI ALAs recentes:', error);
+        return null;
+      }
 
-    const nextNumber = maxNumber + 1;
-    const nextVIALA = `VI ALA-${String(nextNumber).padStart(7, '0')}`;
-    console.log(`✅ [Supabase] Próximo VI ALA unificado: ${nextVIALA} (max visto: ${maxNumber})`);
-    return nextVIALA;
+      let maxNumber = 0;
+      for (const row of data || []) {
+        const number = parseVIALANumber(row.vi_ala || '');
+        if (number > maxNumber) maxNumber = number;
+      }
+
+      const nextNumber = maxNumber + 1;
+      const nextVIALA = `VI ALA-${String(nextNumber).padStart(7, '0')}`;
+
+      console.log(`✅ [Supabase] Próximo VI ALA gerado: ${nextVIALA} (max recente: ${maxNumber}, amostra: ${(data || []).length})`);
+      return nextVIALA;
+    }
   } catch (err) {
     console.error('❌ [Supabase] Erro ao obter próximo VI ALA:', err);
-    return null;
+    return null; // Fallback para Excel
   }
 }
 
@@ -4913,14 +4405,13 @@ async function getNextVIALAFromExcel() {
 
 // Função para obter o próximo VI ALA (tenta Supabase primeiro, fallback para Excel)
 async function getNextVIALA() {
-  // Sempre prioriza Supabase (mesma sequência da Viabilidade oficial).
-  // Excel só entra se o banco estiver indisponível — evita números “antigos”.
+  // Tentar Supabase primeiro
   const supabaseResult = await getNextVIALAFromSupabase();
   if (supabaseResult !== null) {
     return supabaseResult;
   }
-
-  console.warn('⚠️ [VI ALA] Supabase indisponível — fallback Excel (pode estar desatualizado)');
+  
+  // Fallback para Excel
   return await getNextVIALAFromExcel();
 }
 
@@ -4969,101 +4460,16 @@ function getMissingSupabaseColumn(errorMessage) {
   return match ? match[1] : null;
 }
 
-/**
- * Clientes onde VI ALA deve ser gravado/lido para ficar visível na ferramenta e na extensão.
- * Diferente do dualWrite genérico (só o backend ativo): aqui sempre tenta primary + réplica.
- */
-function getVIALASyncClients() {
-  const clients = [];
-  const primary = getPrimaryClient() || supabasePrimary;
-  if (primary) {
-    clients.push({ label: 'primary', client: primary });
-  }
-  if (isClusterEnabled()) {
-    const replica = getReplicaClient();
-    if (replica && replica !== primary) {
-      clients.push({ label: 'replica', client: replica });
-    }
-  }
-  if (!clients.length) {
-    const active = getActiveSupabaseClient() || (isSupabaseAvailable() ? supabase : null);
-    if (active) clients.push({ label: 'active', client: active });
-  }
-  return clients;
-}
-
-async function writeVIALAToAllClients(fn) {
-  const clients = getVIALASyncClients();
-  if (!clients.length) {
-    throw new Error('Nenhum cliente Supabase disponível para VI ALA');
-  }
-
-  const settled = await Promise.allSettled(
-    clients.map(({ client, label }) => Promise.resolve(fn(client, label)))
-  );
-
-  const values = [];
-  const failures = [];
-  settled.forEach((result, i) => {
-    const label = clients[i].label;
-    if (result.status === 'fulfilled') {
-      values.push({ label, value: result.value });
-    } else {
-      failures.push({ label, error: result.reason });
-      console.error(
-        `❌ [VI ALA] write ${label}:`,
-        result.reason?.message || result.reason
-      );
-    }
-  });
-
-  // Exige pelo menos um backend gravado com sucesso
-  if (values.length === 0) {
-    const first = failures[0]?.error;
-    throw first instanceof Error ? first : new Error(first?.message || 'Falha ao gravar VI ALA');
-  }
-  if (failures.length) {
-    console.warn(
-      `⚠️ [VI ALA] Gravado parcialmente (${values.map((v) => v.label).join(', ')}); falhas: ${failures
-        .map((f) => f.label)
-        .join(', ')}`
-    );
-  }
-  return values;
-}
-
 async function insertVIALAIntoSupabase(dataToSave) {
   const payload = { ...dataToSave };
   const maxAttempts = 12;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      // Sempre primary + réplica — extensão e ferramenta veem a mesma sequência/lista
-      const writeResults = await writeVIALAToAllClients(async (client) => {
+      await clusterAwareWrite(async (client) => {
         const { error } = await client.from('vi_ala').insert([payload]);
-        if (error) {
-          const msg = `${error.message || ''} ${error.code || ''}`;
-          if (/duplicate key|unique constraint|23505/i.test(msg)) {
-            return { duplicate: true };
-          }
-          throw error;
-        }
-        return { duplicate: false };
+        if (error) throw error;
       });
-
-      const outcomes = writeResults.map((r) => r.value).filter(Boolean);
-      const allDuplicate =
-        outcomes.length > 0 && outcomes.every((o) => o && o.duplicate === true);
-
-      // Todos os backends já tinham esse VI ALA → registrar deve tentar o próximo
-      if (allDuplicate) {
-        return {
-          success: false,
-          error: `duplicate key value violates unique constraint (vi_ala=${payload.vi_ala})`,
-          code: '23505'
-        };
-      }
-
       return { success: true, payload };
     } catch (error) {
       const missingColumn = getMissingSupabaseColumn(error?.message);
@@ -5097,14 +4503,9 @@ async function insertVIALABatchIntoSupabase(records) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await writeVIALAToAllClients(async (client) => {
+      await clusterAwareWrite(async (client) => {
         const { error } = await client.from('vi_ala').insert(payload);
-        if (error) {
-          if (/duplicate key|unique constraint|23505/i.test(`${error.message || ''} ${error.code || ''}`)) {
-            return;
-          }
-          throw error;
-        }
+        if (error) throw error;
       });
       return { success: true, count: payload.length };
     } catch (error) {
@@ -5243,8 +4644,8 @@ async function _readVIALAExcelFileOnly() {
 }
 
 // Função para salvar registro na base_VI_ALA.xlsx (fallback / espelho local)
-async function saveVIALARecordToExcel(record, options = {}) {
-  const run = async () => {
+async function saveVIALARecordToExcel(record) {
+  return await withLock('vi_ala', async () => {
     try {
       await _ensureVIALABaseInternal();
       // Importante: NÃO usar _readVIALABaseInternal() aqui — ela carrega todo o Supabase e estoura timeout.
@@ -5259,24 +4660,20 @@ async function saveVIALARecordToExcel(record, options = {}) {
       const worksheet = XLSX.utils.json_to_sheet(data);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'VI ALA');
+
       XLSX.writeFile(workbook, BASE_VI_ALA_FILE);
-      return { success: true, storage: 'excel' };
+      console.log('✅ [Excel] Registro VI ALA salvo:', record['VI ALA']);
+
+      return true;
     } catch (err) {
-      console.error('❌ [Excel] Erro ao salvar VI ALA:', err);
+      console.error('❌ [Excel] Erro ao salvar registro VI ALA:', err);
       throw err;
     }
-  };
-
-  // Evita deadlock quando já estamos dentro de withLock('vi_ala') no register
-  if (options.alreadyLocked) {
-    return run();
-  }
-  return await withLock('vi_ala', run);
+  });
 }
 
 // Função para salvar registro VI ALA (tenta Supabase primeiro, fallback para Excel)
-async function saveVIALARecord(record, options = {}) {
-  const alreadyLocked = !!options.alreadyLocked;
+async function saveVIALARecord(record) {
   const supabaseResult = await saveVIALARecordToSupabase(record);
 
   if (supabaseResult.success) {
@@ -5296,52 +4693,45 @@ async function saveVIALARecord(record, options = {}) {
   }
 
   console.log('⚠️ [Save] Supabase indisponível, usando fallback Excel para salvar VI ALA');
-  await saveVIALARecordToExcel(record, { alreadyLocked });
+  await saveVIALARecordToExcel(record);
   return { success: true, storage: 'excel' };
 }
 
 // Gera o próximo VI ALA e salva o registro em uma única operação no backend
 async function registerVIALARecord(body) {
-  // Lock serializa getNext+insert neste processo (evita 18856/18857 no mesmo segundo)
-  return await withLock(
-    'vi_ala',
-    async () => {
-      const maxAttempts = 5;
-      let lastError = 'Não foi possível registrar VI ALA';
+  const maxAttempts = 3;
+  let lastError = 'Não foi possível registrar VI ALA';
 
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const nextVIALA = await getNextVIALA();
-        if (!nextVIALA) {
-          throw new Error('Não foi possível gerar próximo VI ALA');
-        }
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const nextVIALA = await getNextVIALA();
+    if (!nextVIALA) {
+      throw new Error('Não foi possível gerar próximo VI ALA');
+    }
 
-        const record = buildVIALARecordFromRequest(body, nextVIALA);
-        console.log(`📝 [Register] Tentativa ${attempt}/${maxAttempts} para registrar ${nextVIALA}`);
+    const record = buildVIALARecordFromRequest(body, nextVIALA);
+    console.log(`📝 [Register] Tentativa ${attempt}/${maxAttempts} para registrar ${nextVIALA}`);
 
-        try {
-          const saveResult = await saveVIALARecord(record, { alreadyLocked: true });
-          return {
-            success: true,
-            viAla: nextVIALA,
-            storage: saveResult.storage || 'supabase'
-          };
-        } catch (err) {
-          lastError = err.message || lastError;
-          const isDuplicate = /duplicate key|unique constraint|23505/i.test(lastError);
+    try {
+      const saveResult = await saveVIALARecord(record);
+      return {
+        success: true,
+        viAla: nextVIALA,
+        storage: saveResult.storage || 'supabase'
+      };
+    } catch (err) {
+      lastError = err.message || lastError;
+      const isDuplicate = /duplicate key|unique constraint|23505/i.test(lastError);
 
-          if (isDuplicate && attempt < maxAttempts) {
-            console.warn(`⚠️ [Register] VI ALA ${nextVIALA} já existe, tentando próximo número...`);
-            continue;
-          }
-
-          throw new Error(lastError);
-        }
+      if (isDuplicate && attempt < maxAttempts) {
+        console.warn(`⚠️ [Register] VI ALA ${nextVIALA} já existe, tentando próximo número...`);
+        continue;
       }
 
       throw new Error(lastError);
-    },
-    { maxWaitMs: 60000 }
-  );
+    }
+  }
+
+  throw new Error(lastError);
 }
 
 // Rota para listar projetistas
@@ -5787,13 +5177,10 @@ app.post('/api/cluster/switch', requireAdmin, async (req, res) => {
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('X-Accel-Buffering', 'no');
-    res.setHeader('Connection', 'keep-alive');
     if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
     const ac = new AbortController();
     const onClose = () => {
-      // Não cancelar quando a resposta já terminou (close dispara também no sucesso)
-      if (res.writableEnded || res.writableFinished) return;
       if (!ac.signal.aborted) {
         console.warn('⚠️ [Cluster] Cliente encerrou conexão — cancelando switch');
         ac.abort();
@@ -5811,48 +5198,21 @@ app.post('/api/cluster/switch', requireAdmin, async (req, res) => {
       message: `Preparando cópia ${sourceLabel} → ${targetLabel}…`
     });
 
-    let lastPercent = 0;
-    let lastMessage = `Copiando ${sourceLabel} → ${targetLabel}…`;
-    const heartbeat = setInterval(() => {
-      if (res.writableEnded || ac.signal.aborted) return;
-      sendEvent({
-        type: 'progress',
-        percent: Math.max(0, Math.min(99, lastPercent)),
-        message: lastMessage || 'Sincronizando… (conexão ativa)'
-      });
-      try {
-        if (typeof res.flush === 'function') res.flush();
-      } catch {
-        // ignore
+    const result = await mirrorClusterTables({
+      direction,
+      signal: ac.signal,
+      onProgress: (p) => {
+        sendEvent({
+          type: 'progress',
+          percent: Math.max(0, Math.min(99, Number(p.percent) || 0)),
+          message: p.message || '',
+          table: p.table || '',
+          tableIndex: p.tableIndex || 0,
+          tableTotal: p.tableTotal || 0,
+          phase: p.phase || ''
+        });
       }
-    }, 8000);
-
-    let result;
-    try {
-      result = await mirrorClusterTables({
-        direction,
-        signal: ac.signal,
-        onProgress: (p) => {
-          lastPercent = Math.max(0, Math.min(99, Number(p.percent) || 0));
-          lastMessage = p.message || lastMessage;
-          sendEvent({
-            type: 'progress',
-            percent: lastPercent,
-            message: lastMessage,
-            table: p.table || '',
-            tableIndex: p.tableIndex || 0,
-            tableTotal: p.tableTotal || 0,
-            phase: p.phase || ''
-          });
-        }
-      });
-    } finally {
-      clearInterval(heartbeat);
-      req.off?.('close', onClose);
-      req.off?.('aborted', onClose);
-      req.removeListener('close', onClose);
-      req.removeListener('aborted', onClose);
-    }
+    });
 
     if (result.cancelled || ac.signal.aborted) {
       sendEvent({
@@ -6856,7 +6216,7 @@ function generateChaveUnica(cto) {
  * @returns {Promise<Map<string, string|null>>} - Map<id_cto, chave_unica>
  * @throws {Error} - Se houver erro ao carregar do Supabase
  */
-async function loadExistingCTOs(supabaseClient, progressCallback = null, datasetId = null) {
+async function loadExistingCTOs(supabaseClient, progressCallback = null) {
   const existingCTOs = new Map(); // Map<id_cto, chave_unica>
   let lastId = null;
   let hasMore = true;
@@ -6864,7 +6224,6 @@ async function loadExistingCTOs(supabaseClient, progressCallback = null, dataset
   const startTime = Date.now();
   
   console.log('📥 [Upload] Carregando CTOs existentes do Supabase...');
-  if (datasetId) console.log(`📥 [Upload] Filtro dataset_id=${datasetId}`);
   console.log('📥 [Upload] Usando paginação baseada em cursor (id_cto) para evitar timeout...');
   
   try {
@@ -6872,17 +6231,15 @@ async function loadExistingCTOs(supabaseClient, progressCallback = null, dataset
       batchNumber++;
       
       // Buscar lote de 1000 CTOs (limite do Supabase)
-      let query = supabaseClient
+      const query = supabaseClient
         .from('ctos')
         .select('id_cto, chave_unica')
         .order('id_cto', { ascending: true })
         .limit(1000);
-
-      query = applyDatasetFilter(query, datasetId);
       
       // Se já temos um lastId, buscar apenas IDs maiores
       if (lastId) {
-        query = query.gt('id_cto', lastId);
+        query.gt('id_cto', lastId);
       }
       
       const { data, error } = await query;
@@ -7012,7 +6369,7 @@ async function dualWriteUpload(fallbackClient, fn) {
   return values;
 }
 
-async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback = null, datasetId = null) {
+async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback = null) {
   if (!idsToDelete || idsToDelete.length === 0) {
     console.log('ℹ️ [Upload] Nenhuma CTO para deletar (Cenário 1)');
     return { deleted: 0 };
@@ -7020,7 +6377,6 @@ async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback
   
   console.log(`🗑️ [Upload] ===== DELETANDO CTOs QUE SAÍRAM DA BASE (Cenário 1) =====`);
   console.log(`🗑️ [Upload] Total de CTOs para deletar: ${idsToDelete.length}`);
-  if (datasetId) console.log(`🗑️ [Upload] dataset_id=${datasetId}`);
   
   const DELETE_BATCH_SIZE = 1000; // Limite do Supabase para operações .in()
   let totalDeleted = 0;
@@ -7034,12 +6390,11 @@ async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback
       
       // Deletar lote em primary (+ replica se cluster on)
       await dualWriteUpload(supabaseClient, async (client, label) => {
-        let q = client
+        const { error, count } = await client
           .from('ctos')
           .delete()
-          .in('id_cto', batch);
-        q = applyDatasetFilter(q, datasetId);
-        const { error, count } = await q.select('id_cto', { count: 'exact', head: true });
+          .in('id_cto', batch)
+          .select('id_cto', { count: 'exact', head: true });
 
         if (error) {
           throw new Error(`[${label}] ${error.message}`);
@@ -7098,7 +6453,7 @@ async function deleteCTOsInBatches(supabaseClient, idsToDelete, progressCallback
  * @returns {Promise<Object>} - { updated: number, errors: number } - Quantidade de CTOs atualizadas e erros
  * @throws {Error} - Se houver erro ao atualizar
  */
-async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallback = null, datasetId = null) {
+async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallback = null) {
   if (!ctosToUpdate || ctosToUpdate.length === 0) {
     console.log('ℹ️ [Upload] Nenhuma CTO para atualizar (Cenário 3)');
     return { updated: 0, errors: 0 };
@@ -7106,7 +6461,6 @@ async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallbac
   
   console.log(`🔄 [Upload] ===== ATUALIZANDO CTOs QUE MUDARAM (Cenário 3) =====`);
   console.log(`🔄 [Upload] Total de CTOs para atualizar: ${ctosToUpdate.length}`);
-  if (datasetId) console.log(`🔄 [Upload] dataset_id=${datasetId}`);
   
   const UPDATE_BATCH_SIZE = 1000;
   const MAX_RETRIES = 3;
@@ -7139,12 +6493,10 @@ async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallbac
   const updateSingleCTO = async (cto, retryCount = 0) => {
     try {
       await dualWriteUpload(supabaseClient, async (client, label) => {
-        let q = client
+        const { error } = await client
           .from('ctos')
           .update(buildUpdateRecord(cto))
           .eq('id_cto', cto.id_cto);
-        q = applyDatasetFilter(q, datasetId);
-        const { error } = await q;
         if (error) throw new Error(`[${label}] ${error.message}`);
       });
       return { ok: true };
@@ -7268,7 +6620,7 @@ async function updateCTOsInBatches(supabaseClient, ctosToUpdate, progressCallbac
  * @returns {Promise<Object>} - { inserted: number } - Quantidade de CTOs inseridas
  * @throws {Error} - Se houver erro ao inserir
  */
-async function insertCTOsInBatches(supabaseClient, ctosToInsert, progressCallback = null, datasetId = null) {
+async function insertCTOsInBatches(supabaseClient, ctosToInsert, progressCallback = null) {
   if (!ctosToInsert || ctosToInsert.length === 0) {
     console.log('ℹ️ [Upload] Nenhuma CTO nova para inserir (Cenário 2)');
     return { inserted: 0 };
@@ -7276,7 +6628,6 @@ async function insertCTOsInBatches(supabaseClient, ctosToInsert, progressCallbac
   
   console.log(`➕ [Upload] ===== INSERINDO CTOs NOVAS (Cenário 2) =====`);
   console.log(`➕ [Upload] Total de CTOs novas para inserir: ${ctosToInsert.length}`);
-  if (datasetId) console.log(`➕ [Upload] dataset_id=${datasetId}`);
   
   // Reduzir tamanho do lote para evitar timeout do Supabase/Cloudflare
   // 1000 é mais seguro que 2500 para evitar erros 500
@@ -7295,7 +6646,6 @@ async function insertCTOsInBatches(supabaseClient, ctosToInsert, progressCallbac
           row.chave_unica = generateChaveUnica(row);
         }
         delete row.id;
-        if (datasetId) row.dataset_id = datasetId;
         return row;
       });
 
@@ -8160,94 +7510,67 @@ app.post('/api/upload-base', (req, res, next) => {
             console.log('📤 [Background] ===== INICIANDO IMPORTAÇÃO SUPABASE =====');
             console.log('📤 [Background] Usando processamento em STREAMING (exceljs) para arquivos grandes...');
             
-            // NOVO FLUXO: Staging / atualização inteligente
+            // NOVO FLUXO: Carregar CTOs existentes para comparação inteligente
             // POLÍGONOS NÃO SÃO TRATADOS AQUI - apenas no botão "Criar Nova Mancha de Cobertura"
-            uploadProgress.stage = 'processing';
-            uploadProgress.uploadPercent = 5;
+            uploadProgress.stage = 'idle'; // Manter como 'idle' durante carregamento
+            uploadProgress.uploadPercent = 5; // Já estamos em 5% (validação completa)
             uploadProgress.processedRows = 0;
             uploadProgress.totalRows = 0;
-            uploadProgress.message = 'Iniciando atualização (staging)...';
+            uploadProgress.message = 'Carregando CTOs existentes para comparação inteligente...';
             console.log('📥 [Background] ===== INICIANDO ATUALIZAÇÃO INTELIGENTE =====');
-
-            // Staging + swap: Excel no staging VAZIO (sem clonar 227k — travava em 5% no Railway).
-            let writeDatasetId = null;
-            let stagingMode = false;
-            if (await isDatasetStagingEnabled(supabase)) {
-              uploadProgress.uploadPercent = 6;
-              uploadProgress.message =
-                'Criando base staging (ferramenta continua liberada)...';
-              console.log('🆕 [Background] Staging habilitado — insert direto do Excel (sem clone)');
-              const activeId = await ensureActiveDataset(supabase);
-              console.log(`🆕 [Background] Active dataset: ${activeId}`);
-              const staging = await createStagingDataset(supabase, {
-                label: fileName || `upload-${Date.now()}`,
-                meta: { fileName, fileSize, strategy: 'excel-full-insert' }
-              });
-              writeDatasetId = staging.id;
-              stagingMode = true;
-              uploadProgress.stagingDatasetId = writeDatasetId;
-              uploadProgress.pendingSwap = true;
-              uploadProgress.uploadPercent = 8;
-              uploadProgress.message =
-                'Staging criado. Processando Excel (base active intacta)...';
-              console.log(`🆕 [Background] Staging pronto: ${writeDatasetId}`);
-            }
-
-            // Em staging: mapa vazio → todas as linhas viram INSERT. Legado: carrega existing.
-            let existingCTOsMap = new Map();
-            if (!stagingMode) {
-              const loadProgressCallback = (progress) => {
-                uploadProgress.uploadPercent = 5;
-                uploadProgress.message = `Carregando CTOs existentes... ${progress.loaded} CTO(s)`;
-              };
-
-              existingCTOsMap = await loadExistingCTOs(
-                supabase,
-                loadProgressCallback,
-                writeDatasetId
-              );
-              console.log(`✅ [Background] CTOs existentes carregadas: ${existingCTOsMap.size}`);
-
+            console.log('📥 [Background] Carregando CTOs existentes do Supabase para comparação...');
+            
+            // Carregar CTOs existentes (IDs e chaves_unicas)
+            // Callback para atualizar progresso durante carregamento (mantém em 5% - validação já completa)
+            const loadProgressCallback = (progress) => {
+              // Manter em 5% durante carregamento (validação já completou 5%)
               uploadProgress.uploadPercent = 5;
-              uploadProgress.message = 'CTOs existentes carregadas. Processando arquivo...';
-            } else {
-              console.log('ℹ️ [Background] Staging: pulando carga de existentes');
-            }
-
-            uploadProgress.message = stagingMode
-              ? 'Processando Excel para staging...'
-              : 'Processando arquivo e comparando com base existente...';
+              uploadProgress.message = `Carregando CTOs existentes... ${progress.loaded} CTO(s)`;
+            };
+            
+            const existingCTOsMap = await loadExistingCTOs(supabase, loadProgressCallback);
+            console.log(`✅ [Background] CTOs existentes carregadas: ${existingCTOsMap.size}`);
+            
+            // Atualizar progresso após carregamento completo (ainda em 5%, próximo passo é processar Excel)
+            uploadProgress.uploadPercent = 5;
+            uploadProgress.message = 'CTOs existentes carregadas. Processando arquivo...';
+            
+            // Processar Excel com comparação inteligente
+            uploadProgress.message = 'Processando arquivo e comparando com base existente...';
             uploadProgress.stage = 'processing';
-            uploadProgress.uploadPercent = Math.max(uploadProgress.uploadPercent || 5, 8);
-
+            
+            // Callback para atualizar progresso
+            // NÃO usar uploadPercent do processExcelStreaming (está em escala 0-100% do Excel, não do total)
+            // O frontend calculará o percentual total baseado em processedRows/totalRows
             const progressCallback = (progress) => {
               uploadProgress.processedRows = progress.processedRows;
               uploadProgress.totalRows = progress.totalRows;
               uploadProgress.importedRows = progress.importedRows;
-              if (progress.totalRows > 0) {
-                uploadProgress.uploadPercent =
-                  8 + Math.round((progress.processedRows / progress.totalRows) * 72);
-              }
+              // NÃO definir uploadPercent aqui - deixar o frontend calcular baseado em processedRows/totalRows
+              // uploadProgress.uploadPercent será calculado pelo frontend: 5% + (processedRows/totalRows * 75%)
               uploadProgress.message = progress.message || `Processando arquivo... ${progress.processedRows}/${progress.totalRows} linhas`;
             };
-
+            
+            // Processar Excel com comparação (passar existingCTOsMap)
             const result = await processExcelStreaming(tempFilePath, supabase, existingCTOsMap, progressCallback);
             totalRows = result.totalRows;
-
+            
+            // Garantir que ao final do processamento, o percentual seja 80%
             uploadProgress.processedRows = totalRows;
             uploadProgress.totalRows = totalRows;
-            uploadProgress.uploadPercent = 80;
-
+            uploadProgress.uploadPercent = 80; // Fim do estágio de processamento (5-80%)
+            
+            // NOVO: Identificar CTOs deletadas (Cenário 1)
+            // CTOs que existem no Supabase mas não existem no Excel
             uploadProgress.message = 'Identificando CTOs que saíram da base...';
             const idsToDelete = [];
-            if (!stagingMode) {
-              for (const [idCto] of existingCTOsMap) {
-                if (!result.idsInExcel.has(idCto)) {
-                  idsToDelete.push(idCto);
-                }
+            for (const [idCto, chaveUnica] of existingCTOsMap) {
+              if (!result.idsInExcel.has(idCto)) {
+                // ID existe no Supabase mas não no Excel → deletar
+                idsToDelete.push(idCto);
               }
             }
-
+            
             console.log('📊 [Background] ===== ANÁLISE DE MUDANÇAS CONCLUÍDA =====');
             console.log(`📊 [Background] Total de linhas no Excel: ${result.totalRows}`);
             console.log(`📊 [Background] CTOs válidas: ${result.validRows}`);
@@ -8256,10 +7579,7 @@ app.post('/api/upload-base', (req, res, next) => {
             console.log(`📊 [Background] CTOs atualizadas (Cenário 3): ${result.ctosToUpdate.length}`);
             console.log(`📊 [Background] CTOs deletadas (Cenário 1): ${idsToDelete.length}`);
             console.log(`📊 [Background] CTOs não alteradas: ${result.ctosUnchanged}`);
-            if (stagingMode) {
-              console.log(`📊 [Background] Modo staging: insert completo em ${writeDatasetId} (active intacto)`);
-            }
-
+            
             // POLÍGONOS NÃO SÃO TRATADOS AQUI
             // Polígonos são tratados apenas no botão "Criar Nova Mancha de Cobertura"
             // O usuário deve recalcular os polígonos manualmente após atualizar a base
@@ -8286,12 +7606,7 @@ app.post('/api/upload-base', (req, res, next) => {
                 uploadProgress.message = `Deletando ${idsToDelete.length} CTO(s) que saíram da base...`;
               };
               
-              deleteResult = await deleteCTOsInBatches(
-                supabase,
-                idsToDelete,
-                deleteProgressCallback,
-                writeDatasetId
-              );
+              deleteResult = await deleteCTOsInBatches(supabase, idsToDelete, deleteProgressCallback);
               uploadProgress.uploadPercent = 85; // Fim do estágio de deleção
               uploadProgress.processedRows = idsToDelete.length; // Garantir que está completo
             }
@@ -8313,12 +7628,7 @@ app.post('/api/upload-base', (req, res, next) => {
                 uploadProgress.message = `Inserindo ${result.ctosToInsert.length} CTO(s) nova(s)...`;
               };
               
-              insertResult = await insertCTOsInBatches(
-                supabase,
-                result.ctosToInsert,
-                insertProgressCallback,
-                writeDatasetId
-              );
+              insertResult = await insertCTOsInBatches(supabase, result.ctosToInsert, insertProgressCallback);
               uploadProgress.uploadPercent = 90; // Fim do estágio de inserção
               uploadProgress.processedRows = result.ctosToInsert.length; // Garantir que está completo
             }
@@ -8340,12 +7650,7 @@ app.post('/api/upload-base', (req, res, next) => {
                 uploadProgress.message = `Atualizando ${result.ctosToUpdate.length} CTO(s) que mudaram...`;
               };
               
-              updateResult = await updateCTOsInBatches(
-                supabase,
-                result.ctosToUpdate,
-                updateProgressCallback,
-                writeDatasetId
-              );
+              updateResult = await updateCTOsInBatches(supabase, result.ctosToUpdate, updateProgressCallback);
               uploadProgress.uploadPercent = 95; // Fim do estágio de atualização
               uploadProgress.processedRows = result.ctosToUpdate.length; // Garantir que está completo
             }
@@ -8372,13 +7677,7 @@ app.post('/api/upload-base', (req, res, next) => {
             uploadProgress.totalRows = totalRows;
             uploadProgress.importedRows = importedRows;
             uploadProgress.totalCTOs = importedRows;
-            uploadProgress.message = stagingMode
-              ? 'Base staging atualizada! Crie a mancha de cobertura para publicar (usuários ainda usam a base anterior).'
-              : 'Base de dados atualizada com sucesso!';
-            if (stagingMode) {
-              uploadProgress.pendingSwap = true;
-              uploadProgress.stagingDatasetId = writeDatasetId;
-            }
+            uploadProgress.message = 'Base de dados atualizada com sucesso!';
 
             if (isClusterEnabled()) {
               try {
@@ -8672,29 +7971,39 @@ app.post('/api/tabulacoes', async (req, res) => {
     
     const nomeLimpo = nome.trim();
     
-    // Tentar adicionar no Supabase primeiro (dual-write no cluster)
-    if (isDbAvailable() || isSupabaseAvailable()) {
+    // Tentar adicionar no Supabase primeiro
+    if (supabase && isSupabaseAvailable()) {
       try {
-        const existentes = await readTabulacoesFromSupabase();
-        if (existentes && existentes.some((n) => n.toLowerCase() === nomeLimpo.toLowerCase())) {
-          return res.json({
-            success: true,
-            tabulacoes: existentes,
-            message: 'Tabulação já existe'
-          });
+        // Verificar se já existe
+        const { data: existing } = await supabase
+          .from('tabulacoes')
+          .select('nome')
+          .ilike('nome', nomeLimpo)
+          .limit(1);
+        
+        if (existing && existing.length > 0) {
+          const tabulacoes = await readTabulacoes();
+          return res.json({ success: true, tabulacoes, message: 'Tabulação já existe' });
         }
-
-        await clusterAwareWrite(async (client) => {
-          const { error } = await client.from('tabulacoes').insert([{ nome: nomeLimpo }]);
-          if (error) throw error;
-        });
-
+        
+        // Inserir no Supabase
+        const { error } = await supabase
+          .from('tabulacoes')
+          .insert([{ nome: nomeLimpo }]);
+        
+        if (error) {
+          throw error;
+        }
+        
         console.log(`✅ [Supabase] Tabulação '${nomeLimpo}' adicionada no Supabase`);
-
+        
+        // Buscar todas para retornar
         const tabulacoes = await readTabulacoes();
+        
         return res.json({ success: true, tabulacoes, message: 'Tabulação adicionada com sucesso' });
       } catch (supabaseErr) {
         console.error('❌ [Supabase] Erro ao adicionar tabulação, usando fallback Excel:', supabaseErr);
+        // Continuar com fallback Excel
       }
     }
     
@@ -8730,29 +8039,39 @@ app.delete('/api/tabulacoes/:nome', async (req, res) => {
     
     const nomeLimpo = nome.trim();
     
-    // Tentar deletar no Supabase primeiro (dual-write no cluster)
-    if (isDbAvailable() || isSupabaseAvailable()) {
+    // Tentar deletar no Supabase primeiro
+    if (supabase && isSupabaseAvailable()) {
       try {
-        const existentes = await readTabulacoesFromSupabase();
-        const found = existentes && existentes.some((n) => n.toLowerCase() === nomeLimpo.toLowerCase());
-        if (!found) {
+        // Buscar tabulação para verificar se existe
+        const { data: existing } = await supabase
+          .from('tabulacoes')
+          .select('nome')
+          .ilike('nome', nomeLimpo)
+          .limit(1);
+        
+        if (!existing || existing.length === 0) {
           return res.status(404).json({ success: false, error: 'Tabulação não encontrada' });
         }
-
-        await clusterAwareWrite(async (client) => {
-          const { error } = await client
-            .from('tabulacoes')
-            .delete()
-            .ilike('nome', nomeLimpo);
-          if (error) throw error;
-        });
-
+        
+        // Deletar do Supabase
+        const { error } = await supabase
+          .from('tabulacoes')
+          .delete()
+          .ilike('nome', nomeLimpo);
+        
+        if (error) {
+          throw error;
+        }
+        
         console.log(`✅ [Supabase] Tabulação '${nomeLimpo}' deletada do Supabase`);
-
+        
+        // Buscar todas para retornar
         const tabulacoes = await readTabulacoes();
+        
         return res.json({ success: true, tabulacoes, message: 'Tabulação deletada com sucesso' });
       } catch (supabaseErr) {
         console.error('❌ [Supabase] Erro ao deletar tabulação, usando fallback Excel:', supabaseErr);
+        // Continuar com fallback Excel
       }
     }
     
@@ -8896,10 +8215,30 @@ app.get('/api/users/online', async (req, res) => {
     }
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     
-    // Staging + swap: upload não bloqueia mais leituras nem /users/online
-    // (mantém apenas log se ainda houver upload longo em andamento)
-    if (uploadInProgress) {
-      console.log('ℹ️ [Users/Online] Upload/staging em andamento — respondendo sem aguardar');
+    // Se upload estiver em andamento, aguardar até terminar (com timeout)
+    if (uploadInProgress && uploadPromise) {
+      console.log('⏸️ [Users/Online] Upload em andamento, aguardando conclusão...');
+      const MAX_WAIT_TIME = 5 * 60 * 1000; // 5 minutos máximo de espera
+      const startWait = Date.now();
+      
+      try {
+        // Aguardar upload terminar (com timeout)
+        await Promise.race([
+          uploadPromise,
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Timeout aguardando upload')), MAX_WAIT_TIME)
+          )
+        ]);
+        console.log(`✅ [Users/Online] Upload concluído, processando requisição (aguardou ${Date.now() - startWait}ms)`);
+      } catch (waitErr) {
+        if (waitErr.message === 'Timeout aguardando upload') {
+          console.warn(`⚠️ [Users/Online] Timeout aguardando upload (${MAX_WAIT_TIME}ms), retornando dados atuais`);
+          // Continuar mesmo se timeout (retornar dados atuais)
+        } else {
+          console.warn(`⚠️ [Users/Online] Erro ao aguardar upload: ${waitErr.message}, retornando dados atuais`);
+          // Continuar mesmo se erro (retornar dados atuais)
+        }
+      }
     }
     
     const now = Date.now();
@@ -9365,12 +8704,49 @@ app.post('/api/vi-ala/save', async (req, res) => {
 app.get('/api/vi-ala/list', async (req, res) => {
   try {
     console.log('📥 [API] Requisição recebida para listar VI ALAs');
-
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 10, 1), 50);
-    const recentViAlas = await listRecentVIALAsForUi(limit);
-
-    console.log(`✅ [API] Retornando ${recentViAlas.length} VI ALAs recentes (primary + réplica)`);
-
+    
+    // Garantir que a base existe
+    await _ensureVIALABaseInternal();
+    
+    // Ler dados da base
+    const data = await _readVIALABaseInternal();
+    console.log(`📊 [API] Total de registros na base: ${data.length}`);
+    
+    // Converter para formato esperado pelo frontend
+    const viAlas = data.map((row, index) => {
+      const viAla = row['VI ALA'] || '';
+      // Extrair número do VI ALA
+      let numero = 0;
+      if (viAla && typeof viAla === 'string') {
+        const match = viAla.match(/VI\s*ALA[-\s]*(\d+)/i);
+        if (match) {
+          numero = parseInt(match[1], 10);
+        }
+      }
+      
+      return {
+        id: viAla,
+        numero: numero,
+        numero_ala: row['ALA'] || '',
+        projetista: row['PROJETISTA'] || '',
+        cidade: row['CIDADE'] || '',
+        endereco: row['ENDEREÇO'] || '',
+        data_geracao: row['DATA'] || '',
+        latitude: row['LATITUDE'] || '',
+        longitude: row['LONGITUDE'] || '',
+        tabulacao_final: row['TABULAÇÃO FINAL'] || '',
+        hora: row['HORA'] || ''
+      };
+    });
+    
+    // Ordenar por número (mais recente primeiro)
+    viAlas.sort((a, b) => b.numero - a.numero);
+    
+    // Limitar aos 10 mais recentes
+    const recentViAlas = viAlas.slice(0, 10);
+    
+    console.log(`✅ [API] Retornando ${recentViAlas.length} VI ALAs (de ${viAlas.length} total)`);
+    
     res.json({ success: true, viAlas: recentViAlas });
   } catch (err) {
     console.error('❌ [API] Erro ao listar VI ALAs:', err);
@@ -9379,149 +8755,6 @@ app.get('/api/vi-ala/list', async (req, res) => {
   }
 });
 
-/**
- * Lista os N VI ALAs mais recentes unindo primary + réplica.
- * Assim registros gerados na extensão (ou na ferramenta) aparecem na mesma sequência.
- */
-async function listRecentVIALAsForUi(limit = 10) {
-  const fetchLimit = Math.max(limit * 3, 30);
-  const byKey = new Map();
-
-  const clients = getVIALASyncClients();
-  if (clients.length) {
-    for (const { client, label } of clients) {
-      try {
-        let data = null;
-        let error = null;
-
-        // Preferir ordem por vi_ala (zero-padded); fallback created_at
-        ({ data, error } = await client
-          .from('vi_ala')
-          .select('*')
-          .order('vi_ala', { ascending: false })
-          .limit(fetchLimit));
-
-        if (error) {
-          console.warn(`⚠️ [VI ALA list/${label}] ordem vi_ala falhou:`, error.message);
-          ({ data, error } = await client
-            .from('vi_ala')
-            .select('*')
-            .order('created_at', { ascending: false })
-            .limit(fetchLimit));
-        }
-
-        if (error) {
-          console.error(`❌ [VI ALA list/${label}]:`, error.message || error);
-          continue;
-        }
-
-        for (const row of data || []) {
-          const key = String(row.vi_ala || '').trim();
-          if (!key) continue;
-          const existing = byKey.get(key);
-          const numero = parseVIALANumber(key);
-          if (!existing || numero >= (existing.numero || 0)) {
-            byKey.set(key, mapSupabaseVIALARowToUi(row, numero));
-          }
-        }
-        console.log(`📋 [VI ALA list/${label}] ${(data || []).length} linha(s)`);
-      } catch (err) {
-        console.error(`❌ [VI ALA list/${label}]:`, err?.message || err);
-      }
-    }
-  }
-
-  let viAlas = Array.from(byKey.values());
-
-  // Fallback Excel se Supabase não retornou nada
-  if (!viAlas.length) {
-    try {
-      await _ensureVIALABaseInternal();
-      const data = await _readVIALAExcelFileOnly();
-      viAlas = (data || []).map((row) => {
-        const viAla = row['VI ALA'] || '';
-        return {
-          id: viAla,
-          numero: parseVIALANumber(viAla),
-          numero_ala: row['ALA'] || '',
-          projetista: row['PROJETISTA'] || '',
-          cidade: row['CIDADE'] || '',
-          endereco: row['ENDEREÇO'] || '',
-          data_geracao: row['DATA'] || '',
-          latitude: row['LATITUDE'] || '',
-          longitude: row['LONGITUDE'] || '',
-          tabulacao_final: row['TABULAÇÃO FINAL'] || '',
-          hora: row['HORA'] || ''
-        };
-      });
-    } catch (excelErr) {
-      console.warn('⚠️ [VI ALA list] Fallback Excel falhou:', excelErr?.message || excelErr);
-    }
-  }
-
-  viAlas.sort((a, b) => (b.numero || 0) - (a.numero || 0));
-  return viAlas.slice(0, limit);
-}
-
-function mapSupabaseVIALARowToUi(row, numeroOverride) {
-  const viAla = String(row.vi_ala || '').trim();
-  const numero =
-    typeof numeroOverride === 'number' ? numeroOverride : parseVIALANumber(viAla);
-
-  let dataGeracao = '';
-  if (row.created_at) {
-    try {
-      const dateObj = new Date(row.created_at);
-      const dateBr = new Intl.DateTimeFormat('pt-BR', {
-        timeZone: 'America/Sao_Paulo',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false
-      }).formatToParts(dateObj);
-      const day = dateBr.find((p) => p.type === 'day')?.value;
-      const month = dateBr.find((p) => p.type === 'month')?.value;
-      const year = dateBr.find((p) => p.type === 'year')?.value;
-      const hour = dateBr.find((p) => p.type === 'hour')?.value;
-      const minute = dateBr.find((p) => p.type === 'minute')?.value;
-      if (day && month && year) {
-        dataGeracao = `${day}/${month}/${year}${hour && minute ? ` ${hour}:${minute}` : ''}`;
-      }
-    } catch {
-      // ignore
-    }
-  }
-  if (!dataGeracao && row.data) {
-    const dataStr = String(row.data);
-    if (dataStr.match(/^\d{4}-\d{2}-\d{2}/)) {
-      const partes = dataStr.split(' ')[0].split('-');
-      if (partes.length === 3) {
-        const horaFmt = row.hora ? String(row.hora).replace(/h$/, '') : '';
-        dataGeracao = horaFmt
-          ? `${partes[2]}/${partes[1]}/${partes[0]} ${horaFmt}`
-          : `${partes[2]}/${partes[1]}/${partes[0]}`;
-      }
-    } else {
-      dataGeracao = dataStr;
-    }
-  }
-
-  return {
-    id: viAla,
-    numero,
-    numero_ala: row.ala || '',
-    projetista: row.projetista || '',
-    cidade: row.cidade || '',
-    endereco: row.endereco || '',
-    data_geracao: dataGeracao,
-    latitude: row.latitude || '',
-    longitude: row.longitude || '',
-    tabulacao_final: row.tabulacao_final || '',
-    hora: row.hora || ''
-  };
-}
 // Função auxiliar para parsear data do formato "DD/MM/YYYY HH:MM" ou "DD/MM/YYYY" ou "YYYY-MM-DD"
 function parseDateFromString(dateStr) {
   if (!dateStr || typeof dateStr !== 'string') {
