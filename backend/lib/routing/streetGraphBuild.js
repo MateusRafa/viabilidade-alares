@@ -5,9 +5,14 @@
  */
 import fs from 'fs';
 import path from 'path';
+import http from 'http';
+import https from 'https';
+import dns from 'dns';
 import { createRequire } from 'module';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
+
+dns.setDefaultResultOrder('ipv4first');
 import supabase, { isSupabaseAvailable } from '../../supabase.js';
 import { getActiveDatasetId } from '../ctoCoverageDatasets.js';
 import { RADIUS_METERS, graphFromWays, haversineMeters, prepareGraph } from './streetGraph.js';
@@ -21,9 +26,31 @@ const HIGHWAY =
 const DEFAULT_PBF_URL =
   'https://download.geofabrik.de/south-america/brazil-latest.osm.pbf';
 
+const MAP_HEADERS = {
+  'User-Agent': 'viabilidade-alares/1.0 (montagem do mapa de ruas)',
+  Accept: '*/*'
+};
+
 let dataDir = '';
 let prepared = null;
 let running = false;
+let networkTries = 0;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function causeText(err) {
+  const code = err?.cause?.code || err?.code;
+  const msg = err?.cause?.message || err?.message || 'falha de rede';
+  return code && !String(msg).includes(code) ? `${code}: ${msg}` : msg;
+}
+
+function isNetworkFailure(err) {
+  const text = `${err?.code || ''} ${err?.message || ''} ${err?.cause?.code || ''}`.toUpperCase();
+  if (text.includes('MAPA DA REGIÃO RESPONDEU')) return false;
+  return /FETCH|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNRESET|EHOSTUNREACH|UND_ERR|SEM RESPOSTA|INCOMPLETO|NETWORK|SOCKET/.test(text);
+}
 
 function ruasDir() {
   return path.join(dataDir || process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'ruas');
@@ -214,14 +241,61 @@ async function fetchCtos() {
   return points;
 }
 
+function requestMap(url, { method = 'GET', headers = {}, redirects = 5 } = {}) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('http:') ? http : https;
+    const req = lib.request(url, {
+      method,
+      family: 4,
+      headers: { ...MAP_HEADERS, ...headers },
+      timeout: 120000
+    }, (res) => {
+      const code = res.statusCode || 0;
+      if ([301, 302, 303, 307, 308].includes(code) && res.headers.location) {
+        res.resume();
+        if (redirects <= 0) {
+          reject(new Error('Mapa da região redirecionou demais'));
+          return;
+        }
+        const next = new URL(res.headers.location, url).href;
+        resolve(requestMap(next, { method: code === 303 ? 'GET' : method, headers, redirects: redirects - 1 }));
+        return;
+      }
+      resolve(res);
+    });
+    req.on('timeout', () => req.destroy(new Error('Mapa da região ficou sem resposta')));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function withMapRetry(label, fn) {
+  let last;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      last = err;
+      console.warn(`⚠️ [Ruas] ${label} tentativa ${attempt}/4: ${causeText(err)}`);
+      if (!isNetworkFailure(err) || attempt === 4) break;
+      await sleep(5000 * attempt);
+    }
+  }
+  throw new Error(causeText(last));
+}
+
 async function remoteStamp(url) {
-  const res = await fetch(url, { method: 'HEAD' });
-  if (!res.ok) throw new Error(`Mapa da região respondeu ${res.status}`);
-  return {
-    etag: res.headers.get('etag') || '',
-    lastModified: res.headers.get('last-modified') || '',
-    bytes: Number(res.headers.get('content-length') || 0)
-  };
+  return withMapRetry('Consulta da data do mapa', async () => {
+    const res = await requestMap(url, { method: 'HEAD' });
+    const code = res.statusCode || 0;
+    res.resume();
+    if (code !== 200) throw new Error(`Mapa da região respondeu ${code}`);
+    return {
+      etag: res.headers.etag || '',
+      lastModified: res.headers['last-modified'] || '',
+      bytes: Number(res.headers['content-length'] || 0)
+    };
+  });
 }
 
 function sameStamp(a, b) {
@@ -233,41 +307,65 @@ function sameStamp(a, b) {
 
 async function downloadPbf(url, dest) {
   const part = `${dest}.part`;
-  const res = await fetch(url);
-  if (!res.ok || !res.body) throw new Error(`Mapa da região respondeu ${res.status}`);
-  const total = Number(res.headers.get('content-length') || 0);
   await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-  const file = fs.createWriteStream(part);
-  const reader = res.body.getReader();
   let got = 0;
-  let lastLog = 0;
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      got += value.byteLength;
-      if (!file.write(Buffer.from(value))) {
-        await new Promise((resolve, reject) => {
-          file.once('drain', resolve);
-          file.once('error', reject);
-        });
-      }
-      if (got - lastLog >= 20 * 1024 * 1024) {
-        lastLog = got;
-        const mb = Math.round(got / (1024 * 1024));
-        const tot = total ? Math.round(total / (1024 * 1024)) : 0;
-        console.log(`🛣️ [Ruas] Baixando mapa ${mb}${tot ? `/${tot}` : ''} MB`);
-      }
-    }
-  } catch (err) {
-    file.destroy();
-    await fs.promises.rm(part, { force: true }).catch(() => {});
-    throw err;
+    const stat = await fs.promises.stat(part);
+    if (stat.size > 0) got = stat.size;
+  } catch {
+    got = 0;
   }
-  await new Promise((resolve, reject) => {
-    file.once('error', reject);
-    file.end(() => resolve());
+
+  await withMapRetry('Download do mapa', async () => {
+    const headers = got > 0 ? { Range: `bytes=${got}-` } : {};
+    const res = await requestMap(url, { headers });
+    const code = res.statusCode || 0;
+    if (got > 0 && code === 200) got = 0;
+    if (code !== 200 && code !== 206) {
+      res.resume();
+      throw new Error(`Mapa da região respondeu ${code}`);
+    }
+    const rangeTotal = Number(String(res.headers['content-range'] || '').split('/')[1] || 0);
+    const total = code === 206 ? rangeTotal : Number(res.headers['content-length'] || 0);
+    const file = fs.createWriteStream(part, { flags: got > 0 && code === 206 ? 'a' : 'w' });
+    if (!(got > 0 && code === 206)) got = 0;
+    let lastLog = got;
+    try {
+      await new Promise((resolve, reject) => {
+        res.on('data', (chunk) => {
+          got += chunk.length;
+          if (!file.write(chunk)) res.pause();
+          if (got - lastLog >= 20 * 1024 * 1024) {
+            lastLog = got;
+            const mb = Math.round(got / (1024 * 1024));
+            const tot = total ? Math.round(total / (1024 * 1024)) : 0;
+            console.log(`🛣️ [Ruas] Baixando mapa ${mb}${tot ? `/${tot}` : ''} MB`);
+          }
+        });
+        file.on('drain', () => res.resume());
+        res.on('end', resolve);
+        res.on('error', reject);
+        file.on('error', reject);
+      });
+    } catch (err) {
+      file.destroy();
+      try {
+        const stat = await fs.promises.stat(part);
+        got = stat.size;
+      } catch {
+        got = 0;
+      }
+      throw err;
+    }
+    await new Promise((resolve, reject) => {
+      file.once('error', reject);
+      file.end(() => resolve());
+    });
+    if (total && got + 1024 < total) {
+      throw new Error(`Download incompleto (${Math.round(got / (1024 * 1024))} de ${Math.round(total / (1024 * 1024))} MB)`);
+    }
   });
+
   await fs.promises.rename(part, dest);
   console.log(`🛣️ [Ruas] Mapa da região salvo (${Math.round(got / (1024 * 1024))} MB).`);
 }
@@ -442,6 +540,7 @@ async function refreshStreetGraph(reason) {
   };
   await writeGraph(payload);
   prepared = prepareGraph(payload);
+  networkTries = 0;
   console.log(
     `🛣️ [Ruas] Arquivo novo no ar. Anterior apagado. ${prepared.coords.length} pontos, ${prepared.edges.length} trechos.`
   );
@@ -458,7 +557,12 @@ export function scheduleStreetGraphRefresh(reason = 'base-publicada') {
   setTimeout(() => {
     refreshStreetGraph(reason)
       .catch((err) => {
-        console.warn(`⚠️ [Ruas] Falha na montagem. Arquivo anterior permanece. ${err.message}`);
+        console.warn(`⚠️ [Ruas] Falha na montagem. Arquivo anterior permanece. ${causeText(err)}`);
+        if (!isNetworkFailure(err) || networkTries >= 6) return;
+        networkTries += 1;
+        const minutes = networkTries * 2;
+        console.log(`🛣️ [Ruas] Nova tentativa do mapa em ${minutes} min.`);
+        setTimeout(() => scheduleStreetGraphRefresh('nova-tentativa'), minutes * 60 * 1000);
       })
       .finally(() => {
         running = false;
