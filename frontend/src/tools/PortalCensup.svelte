@@ -14,36 +14,58 @@
   import { theme } from '../themeStore.js';
   import {
     fetchPortalCensupChamados,
-    fetchPortalCensupChamadoById,
-    sendPortalCensupFeedback,
-    fetchTabulacoesList,
-    analisarPortalCensupChamado
+    fetchPortalCensupChamadoById
   } from './portalCensupApi.js';
 
-  // Import dinâmico — evita ciclo PortalCensup ↔ ViabilidadeAlares no bundle
-  let ViabilidadeAlares = null;
-
-  async function ensureViabilidadeAlares() {
-    if (ViabilidadeAlares) return;
-    const mod = await import('./ViabilidadeAlares.svelte');
-    ViabilidadeAlares = mod.default;
-  }
-
   export let currentUser = '';
-  export let userTipo = 'user';
+  export let userTipo = 'user'; // mantido para compatibilidade com o shell de ferramentas
   export let onBackToDashboard = () => {};
   export let onBackRequest = null;
 
   const VIABILIDADE_ALARES_TOOL_ID = 'viabilidade-alares';
 
   const REFRESH_INTERVAL_MS = 30000;
-  const pageSize = 50;
+  const PAGE_SIZE_OPTIONS = [25, 50, 100];
+  const COLUMNS_STORAGE_KEY = 'portalCensup.visibleColumns.v2';
 
-  let listView = 'pendentes';
+  const TABLE_COLUMNS = [
+    { id: 'uf', label: 'UF' },
+    { id: 'cidade', label: 'Cidade' },
+    { id: 'sistema', label: 'Sistema' },
+    { id: 'pedido', label: 'Pedido' },
+    { id: 'dataSituacao', label: 'Data Situação' },
+    { id: 'horaAbertura', label: 'Hora da Abertura' },
+    { id: 'horaAnalise', label: 'Tempo da Análise' },
+    { id: 'horaFechamento', label: 'Hora do Fechamento' },
+    { id: 'pdv', label: 'PDV' },
+    { id: 'motivo', label: 'Motivo' },
+    { id: 'situacao', label: 'Situação' }
+  ];
+
+  const DEFAULT_VISIBLE_COLUMN_IDS = TABLE_COLUMNS.map((c) => c.id);
+
+  function loadVisibleColumnIds() {
+    try {
+      const raw = localStorage.getItem(COLUMNS_STORAGE_KEY);
+      if (!raw) return [...DEFAULT_VISIBLE_COLUMN_IDS];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [...DEFAULT_VISIBLE_COLUMN_IDS];
+      const allowed = new Set(DEFAULT_VISIBLE_COLUMN_IDS);
+      const cleaned = parsed.map(String).filter((id) => allowed.has(id));
+      return cleaned.length ? cleaned : [...DEFAULT_VISIBLE_COLUMN_IDS];
+    } catch {
+      return [...DEFAULT_VISIBLE_COLUMN_IDS];
+    }
+  }
+
+  // Portal = arquivo de chamados finalizados (Salvar Relatório / Gerar PDF)
+  let listView = 'resolvidos';
   let chamados = [];
   let total = 0;
   let totalPages = 1;
   let page = 1;
+  let pageSize = 50;
+  let pageInput = '1';
   let searchQuery = '';
   let searchTimer = null;
   let loadingList = false;
@@ -56,16 +78,27 @@
   let selectedChamado = null;
   let loadingDetail = false;
   let detailError = '';
-  let tabulacoesList = [];
-  let tabulacaoCorrigida = '';
-  let showCorrectionForm = false;
-  let submittingFeedback = false;
   let feedbackMessage = '';
-  let analyzing = false;
-  let analyzeError = '';
+
+  let visibleColumnIds = loadVisibleColumnIds();
+  let openColumnMenuId = null;
+  let columnMenuStyle = '';
 
   $: showingDetail = !!selectedChamado;
   $: isDark = $theme === 'dark';
+  $: visibleColumns = TABLE_COLUMNS.filter((c) => visibleColumnIds.includes(c.id));
+  $: hiddenColumns = TABLE_COLUMNS.filter((c) => !visibleColumnIds.includes(c.id));
+  $: tableColSpan = visibleColumns.length + 1;
+  $: openMenuColumn = TABLE_COLUMNS.find((c) => c.id === openColumnMenuId) || null;
+
+  function portalToBody(node) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        if (node.parentNode) node.parentNode.removeChild(node);
+      }
+    };
+  }
 
   function syncHeaderRefresh() {
     toolShellHeaderAction.set({
@@ -91,6 +124,7 @@
         if (searchTimer) clearTimeout(searchTimer);
         searchTimer = setTimeout(() => {
           page = 1;
+          pageInput = '1';
           carregarChamados();
         }, 280);
       }
@@ -98,21 +132,10 @@
   }
 
   $: isRefreshing, syncHeaderRefresh();
-  $: listView, syncHeaderViewToggle();
 
-  function syncHeaderViewToggle({ enabled = true } = {}) {
-    if (!enabled) {
-      toolShellViewToggle.set(null);
-      return;
-    }
-
-    const showingResolved = listView === 'resolvidos';
-    toolShellViewToggle.set({
-      label: showingResolved ? 'Pendentes' : 'Resolvidos',
-      title: showingResolved ? 'Voltar para a fila de pendentes' : 'Ver ALAs resolvidos',
-      active: showingResolved,
-      onClick: toggleListView
-    });
+  function syncHeaderViewToggle() {
+    // Portal agora é só arquivo de finalizados — sem toggle pendentes/resolvidos
+    toolShellViewToggle.set(null);
   }
 
   function syncHeaderViabilidadeShortcut({ enabled = true } = {}) {
@@ -127,12 +150,6 @@
       title: 'Viabilidade Alares — busca avulsa',
       onClick: abrirViabilidadeAvulsa
     });
-  }
-
-  function toggleListView() {
-    listView = listView === 'resolvidos' ? 'pendentes' : 'resolvidos';
-    page = 1;
-    carregarChamados();
   }
 
   function abrirViabilidadeAvulsa() {
@@ -160,7 +177,14 @@
       });
       chamados = data.chamados || [];
       total = data.total || 0;
-      totalPages = data.totalPages || 1;
+      totalPages = Math.max(1, data.totalPages || 1);
+      if (page > totalPages) {
+        page = totalPages;
+        pageInput = String(page);
+        await carregarChamados({ silent });
+        return;
+      }
+      pageInput = String(page);
 
       if (data.source === 'supabase') {
         persistOk = true;
@@ -196,9 +220,6 @@
     loadingDetail = true;
     detailError = '';
     feedbackMessage = '';
-    analyzeError = '';
-    showCorrectionForm = false;
-    tabulacaoCorrigida = '';
     selectedChamado = {
       id: item.id,
       pedido: item.pedido,
@@ -208,20 +229,9 @@
     syncShellChrome();
 
     try {
-      await ensureViabilidadeAlares();
       selectedChamado = await fetchPortalCensupChamadoById(currentUser, item.id);
       syncShellChrome();
       await carregarChamados({ silent: true });
-      const precisaAnalise =
-        !selectedChamado?.tabulacaoFinal ||
-        selectedChamado?.analiseStatus === 'aguardando_analise' ||
-        selectedChamado?.analiseStatus === 'processando' ||
-        selectedChamado?.analiseStatus === 'falhou' ||
-        selectedChamado?.tabulacaoStatus === 'aguardando_analise';
-
-      if (precisaAnalise) {
-        await executarAnalise({ silent: true });
-      }
     } catch (err) {
       detailError = err?.message || 'Não foi possível abrir o chamado.';
       selectedChamado = null;
@@ -231,33 +241,10 @@
     }
   }
 
-  async function executarAnalise({ silent = false, force = false } = {}) {
-    if (!selectedChamado?.id || analyzing) return;
-    analyzing = true;
-    analyzeError = '';
-    try {
-      const result = await analisarPortalCensupChamado(currentUser, selectedChamado.id, { force });
-      selectedChamado = result.chamado;
-      syncShellChrome();
-      if (!silent && result.skipped) {
-        feedbackMessage = result.reason || 'Análise não refeita.';
-      }
-      await carregarChamados({ silent: true });
-    } catch (err) {
-      analyzeError = err?.message || 'Falha ao analisar localização.';
-      if (!silent) feedbackMessage = analyzeError;
-    } finally {
-      analyzing = false;
-    }
-  }
-
   function fecharDetalhe() {
     selectedChamado = null;
     detailError = '';
     feedbackMessage = '';
-    analyzeError = '';
-    showCorrectionForm = false;
-    tabulacaoCorrigida = '';
     syncShellChrome();
   }
 
@@ -270,7 +257,7 @@
       toolShellBackHandler.set(() => fecharDetalhe());
       syncHeaderSearch({ enabled: false });
       syncHeaderViabilidadeShortcut({ enabled: false });
-      syncHeaderViewToggle({ enabled: false });
+      syncHeaderViewToggle();
       if (typeof document !== 'undefined') {
         document.title = `ALA-${pedido}`;
       }
@@ -279,93 +266,156 @@
       toolShellBackHandler.set(null);
       syncHeaderSearch({ enabled: true });
       syncHeaderViabilidadeShortcut({ enabled: true });
-      syncHeaderViewToggle({ enabled: true });
+      syncHeaderViewToggle();
       if (typeof document !== 'undefined') {
         document.title = 'Portal CENSUP';
       }
     }
 
-    // Mantém compatibilidade com ferramentas que usam onBackRequest
     if (typeof onBackRequest === 'function') {
       onBackRequest(inDetail ? () => fecharDetalhe() : null);
     }
   }
 
-  async function confirmarTabulacaoCorreta() {
-    if (!selectedChamado || submittingFeedback) return;
-    submittingFeedback = true;
-    feedbackMessage = '';
-    try {
-      const result = await sendPortalCensupFeedback(currentUser, selectedChamado.id, {
-        correto: true
-      });
-      selectedChamado = result.chamado;
-      feedbackMessage = 'Tabulação confirmada como correta.';
-      await carregarChamados({ silent: true });
-    } catch (err) {
-      feedbackMessage = err?.message || 'Erro ao registrar confirmação.';
-    } finally {
-      submittingFeedback = false;
-    }
-  }
-
-  function iniciarCorrecao() {
-    showCorrectionForm = true;
-    tabulacaoCorrigida = selectedChamado?.tabulacaoFinal || '';
-    feedbackMessage = '';
-  }
-
-  async function enviarCorrecao() {
-    if (!selectedChamado || submittingFeedback) return;
-    if (!(tabulacaoCorrigida || '').trim()) {
-      feedbackMessage = 'Selecione a tabulação correta.';
+  function goToPage(nextPage) {
+    const target = Math.max(1, Math.min(totalPages, Math.trunc(Number(nextPage)) || 1));
+    if (target === page) {
+      pageInput = String(page);
       return;
     }
+    page = target;
+    pageInput = String(page);
+    carregarChamados();
+  }
 
-    submittingFeedback = true;
-    feedbackMessage = '';
-    try {
-      const result = await sendPortalCensupFeedback(currentUser, selectedChamado.id, {
-        correto: false,
-        tabulacaoCorrigida: tabulacaoCorrigida.trim()
-      });
-      selectedChamado = result.chamado;
-      showCorrectionForm = false;
-      feedbackMessage = 'Correção registrada. A IA usará este exemplo nas próximas análises.';
-      await carregarChamados({ silent: true });
-    } catch (err) {
-      feedbackMessage = err?.message || 'Erro ao registrar correção.';
-    } finally {
-      submittingFeedback = false;
+  function commitPageInput() {
+    goToPage(pageInput);
+  }
+
+  function onPageInputKeydown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      commitPageInput();
+    } else if (event.key === 'Escape') {
+      pageInput = String(page);
+      event.currentTarget?.blur?.();
     }
   }
 
-  function goToPage(nextPage) {
-    if (nextPage < 1 || nextPage > totalPages) return;
-    page = nextPage;
+  function changePageSize(nextSize) {
+    const size = Number(nextSize);
+    if (!PAGE_SIZE_OPTIONS.includes(size) || size === pageSize) return;
+    pageSize = size;
+    page = 1;
+    pageInput = '1';
     carregarChamados();
+  }
+
+  function formatCount(n) {
+    return Number(n || 0).toLocaleString('pt-BR');
   }
 
   function statusLabel(status) {
     if (status === 'aprovada') return 'Aprovada';
     if (status === 'corrigida') return 'Corrigida';
     if (status === 'aguardando_analise') return 'Aguardando análise';
-    return 'Pendente revisão';
+    return 'Finalizado';
   }
 
-  function metodoLocalizacaoLabel(loc) {
-    if (!loc?.metodo) return '—';
-    if (loc.metodo === 'referencia_mapa') return `Referência: ${loc.referencia || 'mapa'}`;
-    if (loc.metodo === 'coords_agenda') return 'Coordenadas da Agenda';
-    if (loc.metodo === 'endereco' || loc.metodo === 'endereco_baixa_precisao') return 'Endereço geocodificado';
-    return loc.metodo;
+  function persistVisibleColumns() {
+    try {
+      localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(visibleColumnIds));
+    } catch {
+      /* ignore */
+    }
   }
 
-  function formatDistanciaCobertura(metros) {
-    if (metros == null || Number.isNaN(Number(metros))) return '—';
-    const n = Number(metros);
-    if (n >= 1000) return `${(n / 1000).toFixed(2)} km`;
-    return `${Math.round(n)} m`;
+  function isColumnVisible(id) {
+    return visibleColumnIds.includes(id);
+  }
+
+  function hideColumn(id) {
+    if (!isColumnVisible(id)) return;
+    if (visibleColumnIds.length <= 1) return;
+    visibleColumnIds = visibleColumnIds.filter((c) => c !== id);
+    openColumnMenuId = null;
+    persistVisibleColumns();
+  }
+
+  function showColumn(id) {
+    if (isColumnVisible(id)) return;
+    const order = DEFAULT_VISIBLE_COLUMN_IDS;
+    const next = [...visibleColumnIds, id].sort(
+      (a, b) => order.indexOf(a) - order.indexOf(b)
+    );
+    visibleColumnIds = next;
+    openColumnMenuId = null;
+    persistVisibleColumns();
+  }
+
+  function toggleColumnMenu(id, event) {
+    event?.stopPropagation?.();
+    if (openColumnMenuId === id) {
+      closeColumnMenus();
+      return;
+    }
+    const btn = event?.currentTarget;
+    if (btn && typeof btn.getBoundingClientRect === 'function') {
+      const rect = btn.getBoundingClientRect();
+      const menuWidth = 188;
+      const pad = 8;
+      const spaceRight = window.innerWidth - rect.left;
+      const openToRight = spaceRight >= menuWidth + pad || rect.left < menuWidth;
+      let left = openToRight ? rect.left : rect.right - menuWidth;
+      left = Math.max(pad, Math.min(left, window.innerWidth - menuWidth - pad));
+      const top = Math.min(rect.bottom + 4, window.innerHeight - pad);
+      columnMenuStyle = `top:${Math.round(top)}px;left:${Math.round(left)}px;`;
+    } else {
+      columnMenuStyle = '';
+    }
+    openColumnMenuId = id;
+  }
+
+  function closeColumnMenus() {
+    openColumnMenuId = null;
+    columnMenuStyle = '';
+  }
+
+  function columnCellValue(item, columnId) {
+    switch (columnId) {
+      case 'uf':
+        return item.uf;
+      case 'cidade':
+        return item.cidade;
+      case 'sistema':
+        return item.sistema;
+      case 'pedido':
+        return item.pedido;
+      case 'dataSituacao':
+        return item.dataSituacaoLabel || item.dataSituacao;
+      case 'horaAbertura':
+        return item.horaAberturaLabel;
+      case 'horaAnalise':
+        // Só o valor persistido pela extensão (Supabase) — sem estimar por horários
+        return item.horaAnaliseLabel || item.analiseDuracaoLabel;
+      case 'horaFechamento':
+        return item.horaFechamentoLabel;
+      case 'pdv':
+        return item.pdv;
+      case 'motivo':
+        return item.motivo;
+      case 'situacao':
+        return item.situacaoLabel || item.situacao || 'Finalizado';
+      default:
+        return null;
+    }
+  }
+
+  function cellText(value) {
+    if (value == null) return '—';
+    const s = String(value).trim();
+    if (!s || /^null$/i.test(s) || /^undefined$/i.test(s)) return '—';
+    return s;
   }
 
   function imprimirRelatorioSalvo() {
@@ -392,13 +442,23 @@
     }, 400);
   }
 
+  function onDocumentClick() {
+    closeColumnMenus();
+  }
+
+  function onDocumentScrollOrResize() {
+    if (openColumnMenuId) closeColumnMenus();
+  }
+
   onMount(async () => {
     syncHeaderRefresh();
     syncHeaderSearch({ enabled: true });
     syncHeaderViabilidadeShortcut({ enabled: true });
-    syncHeaderViewToggle({ enabled: true });
+    syncHeaderViewToggle();
     toolShellThemeToggle.set(true);
-    tabulacoesList = await fetchTabulacoesList();
+    document.addEventListener('click', onDocumentClick);
+    document.addEventListener('scroll', onDocumentScrollOrResize, true);
+    window.addEventListener('resize', onDocumentScrollOrResize);
     await carregarChamados();
 
     refreshInterval = setInterval(() => {
@@ -409,6 +469,13 @@
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
     if (searchTimer) clearTimeout(searchTimer);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('click', onDocumentClick);
+      document.removeEventListener('scroll', onDocumentScrollOrResize, true);
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('resize', onDocumentScrollOrResize);
+    }
     clearToolShell();
     if (typeof onBackRequest === 'function') onBackRequest(null);
   });
@@ -418,158 +485,92 @@
   {#if showingDetail}
     <div class="detail-view">
       {#if loadingDetail}
-        <div class="detail-loading"><Loading currentMessage="Abrindo tabulação…" /></div>
+        <div class="detail-loading"><Loading currentMessage="Abrindo relatório…" /></div>
       {:else if detailError}
         <p class="load-error" role="alert">{detailError}</p>
       {:else if selectedChamado}
-        {@const viabLat = selectedChamado.localizacao?.lat ?? selectedChamado.mapaCoords?.lat ?? null}
-        {@const viabLng = selectedChamado.localizacao?.lng ?? selectedChamado.mapaCoords?.lng ?? null}
-        <div class="detail-viabilidade">
-          {#key `${selectedChamado.id}:${viabLat ?? ''}:${viabLng ?? ''}`}
-            {#if ViabilidadeAlares}
-            <svelte:component
-              this={ViabilidadeAlares}
-              embedded={true}
-              mapDomId="portal-censup-viab-map"
-              currentUser={currentUser}
-              userTipo={userTipo}
-              initialAddress={selectedChamado.endereco?.completo || ''}
-              initialLat={viabLat}
-              initialLng={viabLng}
-            >
-              <div slot="tabulacao" class="censup-tabulacao">
-                <div class="info-grid">
-                  <div class="info-item">
-                    <span class="label">Pedido</span>
-                    <span class="value">{selectedChamado.pedido}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="label">Cidade</span>
-                    <span class="value">{selectedChamado.endereco?.cidade || selectedChamado.cidade}</span>
-                  </div>
-                  <div class="info-item full">
-                    <span class="label">Endereço</span>
-                    <span class="value">{selectedChamado.endereco?.completo || '—'}</span>
-                  </div>
-                  {#if selectedChamado.endereco?.bairro || selectedChamado.endereco?.cep}
-                    <div class="info-item">
-                      <span class="label">Bairro</span>
-                      <span class="value">{selectedChamado.endereco?.bairro || '—'}</span>
-                    </div>
-                    <div class="info-item">
-                      <span class="label">CEP</span>
-                      <span class="value">{selectedChamado.endereco?.cep || '—'}</span>
-                    </div>
-                  {/if}
-                  {#if selectedChamado.mapaReferencias?.length}
-                    <div class="info-item full">
-                      <span class="label">Referências no mapa</span>
-                      <span class="value">{selectedChamado.mapaReferencias.join(' · ')}</span>
-                    </div>
-                  {/if}
-                  <div class="info-item">
-                    <span class="label">Local resolvido por</span>
-                    <span class="value">{metodoLocalizacaoLabel(selectedChamado.localizacao)}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="label">Cobertura</span>
-                    <span class="value">
-                      {#if selectedChamado.viabilidadeResumo?.dentroCobertura === true}
-                        Dentro da área
-                      {:else if selectedChamado.viabilidadeResumo?.dentroCobertura === false}
-                        Fora da área ({formatDistanciaCobertura(selectedChamado.viabilidadeResumo?.distanciaCoberturaMetros)})
-                      {:else}
-                        —
-                      {/if}
-                    </span>
-                  </div>
-                  {#if selectedChamado.localizacao?.lat != null}
-                    <div class="info-item full">
-                      <span class="label">Coordenadas</span>
-                      <span class="value mono">
-                        {selectedChamado.localizacao.lat}, {selectedChamado.localizacao.lng}
-                      </span>
-                    </div>
-                  {/if}
-                  <div class="info-item">
-                    <span class="label">Tabulação sugerida</span>
-                    <span class="value highlight">{selectedChamado.tabulacaoFinal || '—'}</span>
-                  </div>
-                  <div class="info-item">
-                    <span class="label">Status</span>
-                    <span class="value status-badge status-badge--{selectedChamado.tabulacaoStatus || 'pendente'}">
-                      {statusLabel(selectedChamado.tabulacaoStatus)}
-                    </span>
-                  </div>
-                </div>
-
-                {#if selectedChamado.analiseIa?.motivoSugestao}
-                  <div class="ia-box">
-                    <strong>Análise automática</strong>
-                    <p>{selectedChamado.analiseIa.motivoSugestao}</p>
-                  </div>
-                {/if}
-
-                {#if analyzeError}
-                  <p class="load-error" role="alert">{analyzeError}</p>
-                {/if}
-
-                <div class="feedback-actions">
-                  <button
-                    type="button"
-                    class="btn-primary"
-                    on:click={() => executarAnalise({ force: true })}
-                    disabled={analyzing || loadingDetail}
-                  >
-                    {analyzing ? 'Analisando…' : 'Analisar localização'}
-                  </button>
-                  <button
-                    type="button"
-                    class="btn-success"
-                    on:click={confirmarTabulacaoCorreta}
-                    disabled={submittingFeedback || analyzing || selectedChamado.tabulacaoStatus === 'aprovada'}
-                  >
-                    Tabulação correta
-                  </button>
-                  <button
-                    type="button"
-                    class="btn-warning"
-                    on:click={iniciarCorrecao}
-                    disabled={submittingFeedback || analyzing}
-                  >
-                    Tabulação errada
-                  </button>
-                  {#if selectedChamado.pdfHtml || selectedChamado.relatorioSalvo}
-                    <button type="button" class="btn-secondary" on:click={imprimirRelatorioSalvo}>
-                      Imprimir relatório salvo
-                    </button>
-                  {/if}
-                </div>
-
-                {#if showCorrectionForm}
-                  <div class="correction-form">
-                    <label for="tabulacao-corrigida">Tabulação correta</label>
-                    <select id="tabulacao-corrigida" bind:value={tabulacaoCorrigida} disabled={submittingFeedback}>
-                      <option value="">Selecione…</option>
-                      {#each tabulacoesList as tabulacao}
-                        <option value={tabulacao}>{tabulacao}</option>
-                      {/each}
-                    </select>
-                    <button type="button" class="btn-primary" on:click={enviarCorrecao} disabled={submittingFeedback}>
-                      Salvar correção
-                    </button>
-                  </div>
-                {/if}
-
-                {#if feedbackMessage}
-                  <p class="feedback-message" role="status">{feedbackMessage}</p>
-                {/if}
+        <div class="detail-arquivo">
+          <aside class="detail-side">
+            <div class="info-grid">
+              <div class="info-item">
+                <span class="label">Pedido</span>
+                <span class="value">{selectedChamado.pedido}</span>
               </div>
-            </svelte:component>
-            {:else}
-              <div class="detail-loading"><Loading currentMessage="Carregando mapa…" /></div>
+              <div class="info-item">
+                <span class="label">Cidade</span>
+                <span class="value">{selectedChamado.endereco?.cidade || selectedChamado.cidade}</span>
+              </div>
+              <div class="info-item full">
+                <span class="label">Endereço</span>
+                <span class="value">{selectedChamado.endereco?.completo || '—'}</span>
+              </div>
+              {#if selectedChamado.endereco?.bairro || selectedChamado.endereco?.cep}
+                <div class="info-item">
+                  <span class="label">Bairro</span>
+                  <span class="value">{selectedChamado.endereco?.bairro || '—'}</span>
+                </div>
+                <div class="info-item">
+                  <span class="label">CEP</span>
+                  <span class="value">{selectedChamado.endereco?.cep || '—'}</span>
+                </div>
+              {/if}
+              <div class="info-item">
+                <span class="label">Tabulação</span>
+                <span class="value highlight">{selectedChamado.tabulacaoFinal || selectedChamado.relatorio?.tabulacaoFinal || '—'}</span>
+              </div>
+              <div class="info-item">
+                <span class="label">Projetista</span>
+                <span class="value">{selectedChamado.relatorio?.projetista || selectedChamado.viabilidadeResumo?.projetista || '—'}</span>
+              </div>
+              <div class="info-item">
+                <span class="label">Status</span>
+                <span class="value status-badge status-badge--{selectedChamado.tabulacaoStatus || 'aprovada'}">
+                  {statusLabel(selectedChamado.tabulacaoStatus)}
+                </span>
+              </div>
+              {#if selectedChamado.relatorioSalvoAt || selectedChamado.relatorio?.savedAt}
+                <div class="info-item full">
+                  <span class="label">Salvo em</span>
+                  <span class="value">
+                    {new Date(selectedChamado.relatorioSalvoAt || selectedChamado.relatorio.savedAt).toLocaleString('pt-BR')}
+                  </span>
+                </div>
+              {/if}
+            </div>
+
+            <div class="feedback-actions">
+              {#if selectedChamado.pdfHtml || selectedChamado.relatorioSalvo}
+                <button type="button" class="btn-primary" on:click={imprimirRelatorioSalvo}>
+                  Imprimir relatório
+                </button>
+              {/if}
+            </div>
+
+            {#if feedbackMessage}
+              <p class="feedback-message" role="status">{feedbackMessage}</p>
             {/if}
-          {/key}
+          </aside>
+
+          <div class="detail-preview">
+            {#if selectedChamado.pdfHtml}
+              <iframe
+                class="report-preview-frame"
+                title="Prévia do relatório ALA-{selectedChamado.pedido}"
+                srcdoc={selectedChamado.pdfHtml}
+              ></iframe>
+            {:else if selectedChamado.mapPreviewImage || selectedChamado.relatorio?.mapPreviewImage}
+              <div class="preview-map-only">
+                <img
+                  src={selectedChamado.mapPreviewImage || selectedChamado.relatorio.mapPreviewImage}
+                  alt="Prévia do mapa do relatório"
+                />
+              </div>
+            {:else}
+              <div class="detail-loading">
+                <p>Este chamado finalizado ainda não tem prévia de relatório salva.</p>
+              </div>
+            {/if}
+          </div>
         </div>
       {/if}
     </div>
@@ -586,50 +587,58 @@
         <table class="chamados-table">
           <thead>
             <tr>
-              <th>UF</th>
-              <th>Cidade</th>
-              <th>Sistema</th>
-              <th>Pedido</th>
-              <th>Data Situação</th>
-              <th>PDV</th>
-              <th>Motivo</th>
-              <th>Situação</th>
+              {#each visibleColumns as col (col.id)}
+                <th>
+                  <div class="th-inner">
+                    <span>{col.label}</span>
+                    <div class="col-menu-wrap">
+                      <button
+                        type="button"
+                        class="btn-col-menu"
+                        on:click={(e) => toggleColumnMenu(col.id, e)}
+                        aria-label="Opções da coluna {col.label}"
+                        aria-expanded={openColumnMenuId === col.id}
+                        aria-haspopup="menu"
+                        title="Opções da coluna"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <circle cx="12" cy="5" r="2" />
+                          <circle cx="12" cy="12" r="2" />
+                          <circle cx="12" cy="19" r="2" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                </th>
+              {/each}
               <th class="col-action" aria-label="Ações"></th>
             </tr>
           </thead>
           <tbody>
             {#if loadingList && chamados.length === 0}
               <tr>
-                <td colspan="9" class="empty-cell">Carregando chamados…</td>
+                <td colspan={tableColSpan} class="empty-cell">Carregando chamados…</td>
               </tr>
             {:else if chamados.length === 0}
               <tr>
-                <td colspan="9" class="empty-cell">
-                  {listView === 'resolvidos' ? 'Nenhum ALA resolvido' : 'Sem dados na tabela'}
+                <td colspan={tableColSpan} class="empty-cell">
+                  Nenhum relatório finalizado ainda
                 </td>
               </tr>
             {:else}
               {#each chamados as item (item.id)}
                 <tr>
-                  <td>{item.uf}</td>
-                  <td>{item.cidade}</td>
-                  <td>{item.sistema}</td>
-                  <td>{item.pedido}</td>
-                  <td>{item.dataSituacaoLabel || '—'}</td>
-                  <td>{item.pdv}</td>
-                  <td>{item.motivo}</td>
-                  <td>{item.situacaoLabel || item.situacao || 'Pendente Analise'}</td>
+                  {#each visibleColumns as col (col.id)}
+                    <td>{cellText(columnCellValue(item, col.id))}</td>
+                  {/each}
                   <td class="col-action">
                     <div class="col-action-buttons">
-                      {#if item.relatorioSalvo || item.pdfHtml}
-                        <span class="report-badge" title="Relatório salvo">PDF</span>
-                      {/if}
                       <button
                         type="button"
                         class="btn-lupa"
                         on:click={() => abrirChamado(item)}
-                        aria-label="Abrir tabulação do pedido {item.pedido}"
-                        title="Abrir tabulação"
+                        aria-label="Abrir relatório do pedido {item.pedido}"
+                        title="Abrir relatório"
                       >
                         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                           <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2.5" />
@@ -645,22 +654,91 @@
         </table>
       </div>
 
-      <footer class="table-footer">
+      <footer class="table-footer" aria-label="Paginação da lista">
         <div class="pagination">
-          <button type="button" class="btn-page" on:click={() => goToPage(page - 1)} disabled={page <= 1}>
-            Anterior
-          </button>
-          <span class="page-indicator">{page}</span>
+          {#each hiddenColumns as col (col.id)}
+            <button
+              type="button"
+              class="btn-hidden-columns"
+              on:click={() => showColumn(col.id)}
+              title="Mostrar coluna {col.label}"
+              aria-label="Mostrar coluna {col.label}"
+            >
+              {col.label}
+            </button>
+          {/each}
           <button
             type="button"
-            class="btn-page"
-            on:click={() => goToPage(page + 1)}
-            disabled={page >= totalPages}
+            class="btn-page btn-page-icon"
+            on:click={() => goToPage(page - 1)}
+            disabled={page <= 1 || loadingList}
+            aria-label="Página anterior"
+            title="Página anterior"
           >
-            Próximo
+            ‹
           </button>
+          <label class="page-jump">
+            <span>Página</span>
+            <input
+              type="number"
+              class="page-input"
+              min="1"
+              max={totalPages}
+              inputmode="numeric"
+              bind:value={pageInput}
+              on:keydown={onPageInputKeydown}
+              on:blur={commitPageInput}
+              disabled={loadingList}
+              aria-label="Ir para página"
+            />
+            <span>de {formatCount(totalPages)}</span>
+          </label>
+          <button
+            type="button"
+            class="btn-page btn-page-icon"
+            on:click={() => goToPage(page + 1)}
+            disabled={page >= totalPages || loadingList}
+            aria-label="Próxima página"
+            title="Próxima página"
+          >
+            ›
+          </button>
+          <label class="page-size">
+            <select
+              value={pageSize}
+              on:change={(e) => changePageSize(e.currentTarget.value)}
+              disabled={loadingList}
+              aria-label="Linhas por página"
+            >
+              {#each PAGE_SIZE_OPTIONS as size}
+                <option value={size}>{size} linhas</option>
+              {/each}
+            </select>
+          </label>
+          <span class="page-total">{formatCount(total)} registros</span>
         </div>
       </footer>
+    </div>
+  {/if}
+
+  {#if openMenuColumn}
+    <div
+      class="col-menu col-menu-fixed"
+      class:theme-dark={isDark}
+      role="menu"
+      style={columnMenuStyle}
+      use:portalToBody
+      on:click|stopPropagation
+    >
+      <button
+        type="button"
+        class="col-menu-item"
+        role="menuitem"
+        disabled={visibleColumns.length <= 1}
+        on:click={() => hideColumn(openMenuColumn.id)}
+      >
+        Ocultar coluna
+      </button>
     </div>
   {/if}
 </div>
@@ -702,6 +780,58 @@
     height: 100%;
     position: relative;
     overflow: hidden;
+  }
+
+  .detail-arquivo {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    display: grid;
+    grid-template-columns: minmax(260px, 320px) 1fr;
+    gap: 0;
+    overflow: hidden;
+    background: #fff;
+  }
+
+  .detail-side {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1.25rem;
+    border-right: 1px solid #e5e7eb;
+    overflow: auto;
+    background: #f8fafc;
+  }
+
+  .detail-preview {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: #eef1f8;
+  }
+
+  .report-preview-frame {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #fff;
+  }
+
+  .preview-map-only {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    box-sizing: border-box;
+  }
+
+  .preview-map-only img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 8px;
+    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.12);
   }
 
   .censup-tabulacao {
@@ -926,6 +1056,104 @@
     white-space: nowrap;
   }
 
+  .th-inner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+  }
+
+  .col-menu-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .btn-col-menu {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.85);
+    cursor: pointer;
+    opacity: 0.75;
+    transition: opacity 0.15s ease, background 0.15s ease;
+  }
+
+  .btn-col-menu:hover,
+  .btn-col-menu[aria-expanded='true'] {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .btn-hidden-columns {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid #c4b5fd;
+    border-radius: 8px;
+    background: #f5f3ff;
+    color: #5b21b6;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .btn-hidden-columns:hover {
+    background: #ede9fe;
+  }
+
+  .col-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 20;
+    min-width: 170px;
+    padding: 0.35rem;
+    border-radius: 8px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+  }
+
+  .col-menu-fixed {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: auto;
+    z-index: 10050;
+  }
+
+  .col-menu-item {
+    display: block;
+    width: 100%;
+    padding: 0.45rem 0.65rem;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: #1f2937;
+    font-family: inherit;
+    font-size: 0.82rem;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .col-menu-item:hover:not(:disabled) {
+    background: #f3f4f6;
+  }
+
+  .col-menu-item:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
   .chamados-table tbody tr:hover {
     background: #f8f7ff;
   }
@@ -995,7 +1223,9 @@
   .pagination {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.55rem;
   }
 
   .btn-page {
@@ -1003,13 +1233,86 @@
     background: white;
     color: #374151;
     border: 1px solid #d1d5db;
+    border-radius: 8px;
+    cursor: pointer;
   }
 
-  .page-indicator {
-    min-width: 2rem;
+  .btn-page:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-page-icon {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.35rem;
+    line-height: 1;
+    font-weight: 600;
+  }
+
+  .page-jump,
+  .page-size {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: inherit;
+    white-space: nowrap;
+  }
+
+  .page-input {
+    width: 3.4rem;
+    height: 34px;
+    padding: 0 0.4rem;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
     text-align: center;
+    font: inherit;
     font-weight: 600;
     color: #7b68ee;
+    background: white;
+    outline: none;
+  }
+
+  .page-input:focus {
+    border-color: #7b68ee;
+    box-shadow: 0 0 0 2px rgba(123, 104, 238, 0.2);
+  }
+
+  .page-input::-webkit-outer-spin-button,
+  .page-input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  .page-input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  .page-size select {
+    height: 34px;
+    padding: 0 0.55rem;
+    border: 1px solid #d1d5db;
+    border-radius: 999px;
+    background: white;
+    color: #374151;
+    font: inherit;
+    cursor: pointer;
+    outline: none;
+  }
+
+  .page-size select:focus {
+    border-color: #7b68ee;
+    box-shadow: 0 0 0 2px rgba(123, 104, 238, 0.2);
+  }
+
+  .page-total {
+    font-weight: 600;
+    color: #4b5563;
   }
 
   .detail-layout {
@@ -1364,41 +1667,74 @@
     }
   }
 
+  /* Dark alinhado à extensão (panel.css .censup-theme-dark) */
+  .theme-dark .detail-arquivo {
+    background: #0b1220;
+  }
+
+  .theme-dark .detail-side {
+    background: #111827;
+    border-right-color: #334155;
+  }
+
+  .theme-dark .detail-preview {
+    background: #0b1220;
+  }
+
   .portal-censup.theme-dark {
-    background: #0f1220;
-    color: #e5e7eb;
+    --pc-bg: #0b1220;
+    --pc-bg-panel: #111827;
+    --pc-bg-elevated: #0f172a;
+    --pc-bg-card: #1e293b;
+    --pc-border: #334155;
+    --pc-text: #e2e8f0;
+    --pc-text-muted: #94a3b8;
+    --pc-text-strong: #f8fafc;
+    --pc-accent: #a78bfa;
+    --pc-accent-soft: #c4b5fd;
+    --pc-brand: #7b68ee;
+    --pc-header: linear-gradient(135deg, #3b2f8a 0%, #3647a0 55%, #3a5bb8 100%);
+    --pc-header-border: #5b4cdb;
+    background: var(--pc-bg);
+    color: var(--pc-text);
   }
 
   .theme-dark .table-wrap,
   .theme-dark .search-panel,
   .theme-dark .tabulacao-box,
   .theme-dark .extension-panel {
-    background: #1a1f33;
-    border-color: #2d3550;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.35);
+    background: var(--pc-bg-elevated);
+    border-color: var(--pc-border);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  }
+
+  .theme-dark .chamados-table thead {
+    background: var(--pc-header);
+    border-bottom: 2px solid var(--pc-header-border);
+    color: #ffffff;
   }
 
   .theme-dark .panel-header,
   .theme-dark .tabulacao-box .box-header {
-    background: #232a42;
-    border-bottom-color: #2d3550;
+    background: var(--pc-bg-card);
+    border-bottom-color: var(--pc-border);
   }
 
   .theme-dark .panel-header h2,
   .theme-dark .tabulacao-box .box-header h3 {
-    color: #c4b5fd;
+    color: var(--pc-accent);
   }
 
   .theme-dark .panel-header p,
   .theme-dark .form-group {
-    color: #9ca3af;
+    color: var(--pc-text-muted);
   }
 
   .theme-dark .form-group input,
   .theme-dark .mode-button {
-    background: #232a42;
-    color: #e5e7eb;
-    border-color: #3b4566;
+    background: var(--pc-bg-card);
+    color: var(--pc-text);
+    border-color: var(--pc-border);
   }
 
   .theme-dark .mode-button.active {
@@ -1420,50 +1756,88 @@
   }
 
   .theme-dark .chamados-table tbody tr:hover {
-    background: #232a42;
+    background: var(--pc-bg-card);
+  }
+
+  .theme-dark .btn-hidden-columns {
+    border-color: rgba(123, 104, 238, 0.45);
+    background: rgba(123, 104, 238, 0.18);
+    color: #e9e5ff;
+  }
+
+  .theme-dark .btn-hidden-columns:hover {
+    background: rgba(123, 104, 238, 0.28);
+  }
+
+  .theme-dark .col-menu,
+  .col-menu.theme-dark {
+    background: #1a1f2e;
+    border-color: rgba(123, 104, 238, 0.35);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  }
+
+  .theme-dark .col-menu-item,
+  .col-menu.theme-dark .col-menu-item {
+    color: #e5e7eb;
+  }
+
+  .theme-dark .col-menu-item:hover:not(:disabled),
+  .col-menu.theme-dark .col-menu-item:hover:not(:disabled) {
+    background: rgba(123, 104, 238, 0.2);
   }
 
   .theme-dark .chamados-table th,
   .theme-dark .chamados-table td {
-    border-bottom-color: #2d3550;
-    color: #e5e7eb;
+    border-bottom-color: var(--pc-border);
+    color: var(--pc-text);
   }
 
   .theme-dark .empty-cell,
   .theme-dark .table-footer,
   .theme-dark .last-update,
   .theme-dark .extension-panel-main p,
-  .theme-dark .ia-box p {
-    color: #9ca3af;
+  .theme-dark .ia-box p,
+  .theme-dark .label {
+    color: var(--pc-text-muted);
   }
 
   .theme-dark .queue-header h2,
   .theme-dark .extension-panel-main strong,
   .theme-dark .value,
   .theme-dark .correction-form label {
-    color: #f3f4f6;
+    color: var(--pc-text-strong);
+  }
+
+  .theme-dark .value.highlight {
+    color: var(--pc-accent-soft);
   }
 
   .theme-dark .btn-secondary,
   .theme-dark .btn-page {
-    background: #232a42;
-    color: #c4b5fd;
-    border-color: #4c3d99;
+    background: var(--pc-border);
+    color: var(--pc-text);
+    border-color: var(--pc-border);
+  }
+
+  .theme-dark .btn-secondary:hover,
+  .theme-dark .btn-page:hover:not(:disabled) {
+    background: #475569;
+    color: #ffffff;
   }
 
   .theme-dark .correction-form select {
-    background: #232a42;
-    color: #e5e7eb;
-    border-color: #3b4566;
+    background: var(--pc-bg-card);
+    color: var(--pc-text);
+    border-color: var(--pc-border);
   }
 
   .theme-dark .ia-box {
-    background: #221d3d;
-    border-color: #4c3d99;
+    background: #1e1b4b;
+    border-color: var(--pc-brand);
   }
 
   .theme-dark .ia-box strong {
-    color: #c4b5fd;
+    color: var(--pc-accent-soft);
   }
 
   .theme-dark .status-badge--pendente_revisao,
@@ -1503,11 +1877,45 @@
     color: #34d399;
   }
 
-  .theme-dark .page-indicator {
-    color: #a78bfa;
+  .theme-dark .page-input {
+    background: var(--pc-bg-card);
+    border-color: var(--pc-border);
+    color: var(--pc-accent);
+  }
+
+  .theme-dark .page-size select {
+    background: var(--pc-bg-card);
+    border-color: var(--pc-border);
+    color: var(--pc-text);
+  }
+
+  .theme-dark .page-total {
+    color: var(--pc-text);
   }
 
   .theme-dark .extension-help code {
-    background: #232a42;
+    background: var(--pc-bg-card);
+    color: var(--pc-accent-soft);
+  }
+
+  .theme-dark .btn-lupa {
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    box-shadow: 0 0 0 2px rgba(123, 104, 238, 0.2);
+  }
+
+  .theme-dark .queue-view {
+    background: var(--pc-bg);
+  }
+
+  .theme-dark .info-grid .info-item {
+    border-color: var(--pc-border);
+  }
+
+  .theme-dark .report-preview-frame {
+    background: #ffffff;
+  }
+
+  .theme-dark .preview-map-only {
+    background: var(--pc-bg);
   }
 </style>

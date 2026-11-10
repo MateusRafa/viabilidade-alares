@@ -102,3 +102,4 @@ export function getApiUrl(path) {
   }
   return fallbackPath;
 }
+

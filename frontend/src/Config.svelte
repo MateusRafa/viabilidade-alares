@@ -34,8 +34,9 @@
     return projetista.toLowerCase().trim() !== currentUser.toLowerCase().trim();
   });
   let tabulacoesList = [
-    'Aprovado Com Portas',
+    'Aprovado - Portas Disponíveis',
     'Aprovado Com Alívio de Rede/Cleanup',
+    'Aprovado / Sem Estrutura Atendimento Externo',
     'Aprovado Prédio Não Cabeado',
     'Aprovado - Endereço não Localizado',
     'Fora da Área de Cobertura'
@@ -57,6 +58,30 @@
   let uploadingBase = false;
   let uploadMessage = '';
   let uploadSuccess = false;
+  /** Lock global: outro usuário (ou esta sessão) atualizando a base CTOs */
+  let baseUploadRemoteBusy = false;
+  let baseUploadLockMessage = '';
+  let baseUploadGlobalPollInterval = null;
+  let showBaseReadyReloadModal = false;
+  /** undefined = ainda não capturou baseline da sessão */
+  let sessionBaseReadyAt = undefined;
+  let uploadingMduBase = false;
+  let mduUploadMessage = '';
+  let mduUploadSuccess = false;
+  let mduUploadPercent = 0;
+  let mduUploadPollInterval = null;
+  let showMduUploadModal = false;
+  let mduUploadStep = 'idle'; // idle | running | done | error
+  let mduUploadFileName = '';
+  // Modal de progresso (mesmo padrão do MDU) para base CTOs / delete / mancha
+  let showBaseOpModal = false;
+  let baseOpStep = 'idle'; // idle | running | done | error
+  let baseOpKind = ''; // upload | delete | coverage
+  let baseOpTitle = '';
+  let baseOpMessage = '';
+  let baseOpPercent = 0;
+  let baseOpFileName = '';
+  let baseOpHint = '';
   let baseLastModified = null;
   let coverageLastModified = null; // Data da última atualização da mancha de cobertura
   let uploadPollInterval = null; // Intervalo de polling para verificar status
@@ -73,6 +98,161 @@
       uploadHardStopTimeoutId = null;
     }
   }
+
+  function applyRemoteBaseUploadProgress(data) {
+    if (!data || typeof data !== 'object') return;
+    const busy = data.inProgress === true;
+    baseUploadRemoteBusy = busy;
+    baseUploadLockMessage = busy
+      ? String(data.lockMessage || '').trim() ||
+        `Atualização em Andamento - ${data.startedBy || 'Usuário'}`
+      : '';
+
+    const coverageFailed = data.coverageFailed === true || data.stage === 'error';
+    const warningText = String(data.warning || (coverageFailed ? data.message : '') || '').trim();
+
+    if (sessionBaseReadyAt === undefined) {
+      sessionBaseReadyAt =
+        data.baseReadyAt != null ? String(data.baseReadyAt).trim() : '';
+    } else if (!busy) {
+      const readyAt = data.baseReadyAt != null ? String(data.baseReadyAt).trim() : '';
+      if (readyAt && readyAt !== sessionBaseReadyAt) {
+        sessionBaseReadyAt = readyAt;
+        showBaseReadyReloadModal = true;
+      }
+    }
+
+    // Espelhar progresso global (outro usuário ou próprio upload via extensão)
+    if (busy || coverageFailed || data.stage === 'completed') {
+      uploadProgress = {
+        ...uploadProgress,
+        stage: data.stage || uploadProgress.stage,
+        uploadPercent: data.uploadPercent ?? uploadProgress.uploadPercent,
+        calculationPercent: data.calculationPercent ?? uploadProgress.calculationPercent,
+        message: data.message || uploadProgress.message,
+        totalRows: data.totalRows ?? uploadProgress.totalRows,
+        processedRows: data.processedRows ?? uploadProgress.processedRows,
+        importedRows: data.importedRows ?? uploadProgress.importedRows,
+        totalCTOs: data.totalCTOs ?? uploadProgress.totalCTOs,
+        processedCTOs: data.processedCTOs ?? uploadProgress.processedCTOs,
+        startedBy: data.startedBy || '',
+        startedAt: data.startedAt || null,
+        fileName: data.fileName || uploadProgress.fileName || '',
+        coverageFailed: coverageFailed,
+        coverageAutoStarted: !!data.coverageAutoStarted
+      };
+      const pct = calculateTotalUploadPercent(uploadProgress);
+      const stage = String(uploadProgress.stage || '');
+
+      // Novo estágio (ex.: inserting → calculating): reinicia a barra (padrão extensão)
+      if (stage && stage !== progressStageTracked) {
+        progressStageTracked = stage;
+        lastUploadPercent = 0;
+        displayedPercent = pct;
+        targetPercent = pct;
+        baseOpPercent = pct;
+      } else {
+        // Dentro do mesmo estágio: só sobe
+        const capped = Math.max(pct, lastUploadPercent || 0);
+        lastUploadPercent = capped;
+        targetPercent = capped;
+        if (!uploadingBase) {
+          displayedPercent = capped;
+          if (showBaseOpModal && baseOpKind === 'upload' && baseOpStep === 'running') {
+            baseOpPercent = capped;
+          }
+        }
+      }
+
+      if (busy && !uploadingBase && !showBaseOpModal) {
+        openBaseOpModal({
+          kind: 'upload',
+          title: 'Atualização da base em andamento',
+          message: uploadProgress.message || baseUploadLockMessage,
+          fileName: data.fileName || '',
+          hint: baseUploadLockMessage,
+          percent: Math.max(0, pct)
+        });
+      } else if (showBaseOpModal && baseOpKind === 'upload' && baseOpStep === 'running') {
+        baseOpMessage = uploadProgress.message || baseOpMessage;
+        if (baseUploadLockMessage) baseOpHint = baseUploadLockMessage;
+        if (data.fileName) baseOpFileName = data.fileName;
+      }
+    }
+
+    if (!busy && coverageFailed && warningText) {
+      uploadMessage = warningText;
+      uploadSuccess = false;
+      if (showBaseOpModal && baseOpKind === 'upload') {
+        finishBaseOpModal({ success: false, message: warningText });
+      }
+    } else if (!busy && !uploadingBase && showBaseOpModal && baseOpKind === 'upload' && baseOpStep === 'running') {
+      // Remoto terminou com sucesso
+      const ok = data.stage === 'completed';
+      finishBaseOpModal({
+        success: ok,
+        message: data.message || (ok ? 'Base atualizada com sucesso.' : 'Atualização finalizada.'),
+        percent: ok ? 100 : baseOpPercent
+      });
+    }
+  }
+
+  async function pollGlobalBaseUploadProgress() {
+    try {
+      const progressRes = await fetch(getApiUrl('/api/upload-progress'));
+      if (!progressRes.ok) return;
+      const data = await progressRes.json();
+      if (!data?.success && data?.success !== undefined) return;
+      applyRemoteBaseUploadProgress(data);
+    } catch {
+      /* ignore poll errors */
+    }
+  }
+
+  function openBaseOpModal({ kind, title, message, fileName = '', hint = '', percent = 0 } = {}) {
+    baseOpKind = kind || '';
+    baseOpTitle = title || 'Processando…';
+    baseOpMessage = message || 'Aguarde…';
+    baseOpFileName = fileName || '';
+    baseOpHint = hint || '';
+    baseOpPercent = Math.max(0, Math.min(100, Number(percent) || 0));
+    baseOpStep = 'running';
+    showBaseOpModal = true;
+  }
+
+  function updateBaseOpProgress({ message, percent, step } = {}) {
+    if (!showBaseOpModal) return;
+    if (message != null) baseOpMessage = message;
+    if (percent != null) baseOpPercent = Math.max(0, Math.min(100, Number(percent) || 0));
+    if (step) baseOpStep = step;
+  }
+
+  function finishBaseOpModal({ success, message, percent = 100 } = {}) {
+    baseOpStep = success ? 'done' : 'error';
+    baseOpMessage = message || (success ? 'Concluído com sucesso.' : 'Ocorreu um erro.');
+    baseOpPercent = success ? Math.max(baseOpPercent, percent) : baseOpPercent;
+  }
+
+  function closeBaseOpModal() {
+    if (baseOpStep === 'running') return;
+    showBaseOpModal = false;
+    baseOpStep = 'idle';
+    baseOpKind = '';
+    baseOpTitle = '';
+    baseOpMessage = '';
+    baseOpPercent = 0;
+    baseOpFileName = '';
+    baseOpHint = '';
+  }
+
+  function forceReloadForNewBase() {
+    try {
+      window.location.reload();
+    } catch {
+      window.location.href = String(window.location.href || '');
+    }
+  }
+
   let showDeleteBaseModal = false; // Modal de confirmação para deletar base
   let deletingBase = false; // Flag para indicar que está deletando base
   let showChangeRoleModal = false; // Modal para alterar tipo de usuário
@@ -83,25 +263,6 @@
   let toolPermissions = {}; // Permissões de ferramentas: { 'tool-id': true/false }
   let loadingChangeRole = false; // Estado de carregamento do modal
   let totalCTOsLoaded = 0; // Total de CTOs carregadas (para exibir na mensagem)
-  
-  // Cluster Supabase (admin)
-  let clusterMode = 'primary';
-  let clusterEnabled = false;
-  let clusterAvailable = false;
-  let clusterLoading = false;
-  let clusterMessage = '';
-  let clusterError = '';
-  let showClusterInfo = false;
-  let showClusterSwitchModal = false;
-  let clusterSwitchTarget = ''; // 'primary' | 'replica'
-  let clusterSwitchStep = 'confirm'; // 'confirm' | 'running' | 'done' | 'error' | 'cancelled'
-  let clusterSwitchPercent = 0;
-  let clusterSwitchMessage = '';
-  let clusterSwitchAbort = null;
-  const clusterModeLabels = {
-    primary: 'Backend Principal (B1)',
-    replica: 'Backend Secundário (B2)'
-  };
   
   // Variáveis para cálculo de mancha (separado do upload)
   let calculatingCoverage = false;
@@ -122,8 +283,9 @@
     processedCTOs: 0
   };
   
-  // Variável para garantir que o progresso nunca diminua (sempre crescente)
+  // Variável para garantir que o progresso nunca diminua DENTRO do mesmo estágio
   let lastUploadPercent = 0;
+  let progressStageTracked = '';
   
   // Variável para animação suave do progresso (mostra todos os valores inteiros de 0% a 100%)
   let displayedPercent = 0;
@@ -189,32 +351,33 @@
   }
   
   // Reagir a mudanças no uploadProgress e atualizar targetPercent em tempo real
-  // Isso garante que a barra evolua durante o processo, não apenas no final
-  // IMPORTANTE: Reagir a TODAS as propriedades relevantes do uploadProgress
+  // Percentual = mesmo critério dos logs do backend (processados/total do estágio atual)
   $: if (uploadingBase && uploadProgress) {
-    // Forçar reatividade observando todas as propriedades relevantes
-    const stage = uploadProgress.stage;
-    const processedRows = uploadProgress.processedRows || 0;
-    const totalRows = uploadProgress.totalRows || 0;
-    const uploadPercent = uploadProgress.uploadPercent || 0;
-    
-    // Calcular percentual total baseado no progresso atual
+    const stage = String(uploadProgress.stage || '');
+    if (stage && stage !== progressStageTracked) {
+      progressStageTracked = stage;
+      lastUploadPercent = 0;
+      // Novo estágio: começa do valor atual do estágio (ex.: inserção em 0%)
+      displayedPercent = 0;
+    }
+
     const calculatedPercent = calculateTotalUploadPercent(uploadProgress);
     const newTargetPercent = Math.round(Math.max(calculatedPercent, lastUploadPercent || 0));
-    
-    // Atualizar lastUploadPercent se o novo valor for maior (nunca diminuir)
+
     if (newTargetPercent > (lastUploadPercent || 0)) {
       lastUploadPercent = newTargetPercent;
     }
-    
-    // Atualizar targetPercent (isso vai disparar a animação se necessário)
-    // Sempre atualizar, mesmo que seja o mesmo valor, para garantir reatividade
+
     targetPercent = newTargetPercent;
   }
   
   // Reagir a mudanças no targetPercent (quando o backend atualiza o progresso)
   // GARANTE que sempre anima, mesmo que o backend avance rapidamente
-  $: if (uploadingBase) {
+  // Inclui espelhamento remoto (extensão / outro usuário) no modal de upload
+  $: if (
+    uploadingBase ||
+    (showBaseOpModal && baseOpKind === 'upload' && baseOpStep === 'running')
+  ) {
     if (targetPercent > displayedPercent) {
       // Se o alvo aumentou (mesmo que muito), iniciar animação
       // A animação sempre passará por todos os valores: 80% → 81% → 82% → ... → 90%
@@ -224,172 +387,57 @@
       displayedPercent = Math.round(targetPercent);
     }
   }
+
+  // Espelhar progresso do upload no modal (local ou remoto via extensão)
+  $: if (showBaseOpModal && baseOpKind === 'upload' && baseOpStep === 'running') {
+    if (uploadingBase) {
+      baseOpPercent = Math.max(0, Math.min(100, Math.round(displayedPercent || 0)));
+    } else {
+      // Remoto: % do estágio atual (pode baixar ao entrar na mancha)
+      const remotePct = calculateTotalUploadPercent(uploadProgress);
+      baseOpPercent = Math.max(0, Math.min(100, Math.round(remotePct)));
+    }
+    if (uploadProgress?.message) baseOpMessage = uploadProgress.message;
+  }
   
-  // Função para calcular percentual total real do processo de upload
-  // Baseado nos estágios e progresso de cada um, de 0% a 100%
-  // Mais precisa e responsiva aos dados reais do backend
+  // Percentual exibido = mesma lógica dos logs do servidor
+  // Ex.: "Total: 167000/231060 (72%)" → UI mostra 72%
   function calculateTotalUploadPercent(progress) {
-    // Se não temos progresso, retornar 0%
-    if (!progress) {
-      return 0;
-    }
-    
-    // Se está completo, retornar 100%
-    if (progress.stage === 'completed') {
-      return 100;
-    }
-    
-    // Se há erro, retornar percentual atual (máximo 95%)
+    if (!progress) return 0;
+
+    if (progress.stage === 'completed') return 100;
+
     if (progress.stage === 'error') {
-      return Math.min(95, progress.uploadPercent || 0);
+      return Math.min(95, Math.round(Number(progress.uploadPercent) || 0));
     }
-    
-    // Distribuição do tempo por estágio (baseado em experiência real):
-    // 1. Carregando CTOs existentes: 0-5% (rápido, ~20-30s para 218k CTOs)
-    // 2. Processando Excel: 5-80% (maior parte do tempo, baseado em processedRows/totalRows)
-    // 3. Deletando CTOs: 80-85% (pode levar tempo se houver muitas)
-    // 4. Inserindo CTOs: 85-90% (pode variar)
-    // 5. Atualizando CTOs: 90-95% (pode ser lento)
-    // 6. Finalizando: 95-100%
-    
-    // Estágio: Carregando CTOs existentes (0% a 5%)
-    // Se stage é 'idle' ou não definido, estamos no início
-    if (!progress.stage || progress.stage === 'idle') {
-      // Se temos processedRows ou totalRows do processamento Excel, já passou do carregamento
-      if (progress.processedRows > 0 && progress.totalRows > 0 && progress.stage !== 'idle') {
-        // Já passou do carregamento inicial, está processando
-        return 5;
+
+    // Mancha de cobertura: processedCTOs/totalCTOs (igual aos logs)
+    if (progress.stage === 'calculating') {
+      const processed = Number(progress.processedCTOs) || 0;
+      const total = Number(progress.totalCTOs) || 0;
+      if (total > 0) {
+        return Math.min(100, Math.round((processed / total) * 100));
       }
-      // Ainda carregando CTOs existentes ou início do processo
-      // Se temos uploadPercent do backend (0-5%), usar diretamente
-      if (progress.uploadPercent !== undefined && progress.uploadPercent !== null && progress.uploadPercent > 0) {
-        return Math.min(5, Math.max(0, Math.round(progress.uploadPercent)));
-      }
-      // Se a mensagem indica carregamento de CTOs, mostrar progresso mínimo
-      const message = (progress.message || '').toLowerCase();
-      if (message.includes('carregando cto') || message.includes('iniciando')) {
-        // Se já começou mas ainda não temos percentual, mostrar 0% (início)
-        return 0;
-      }
-      // Fallback: início do processo - SEMPRE retornar 0%
-      return 0;
+      return Math.max(0, Math.min(99, Math.round(Number(progress.calculationPercent) || 0)));
     }
-    
-    // Estágio: Processando Excel (maior parte do tempo - 5% a 80%)
-    if (progress.stage === 'processing') {
-      const basePercent = 5;
-      const stageRange = 75; // 5% a 80% = 75% de range
-      
-      // ÚNICA FONTE: Usar processedRows/totalRows (não confiar em uploadPercent do backend)
-      if (progress.totalRows > 0 && progress.processedRows >= 0) {
-        // Se totalRows é uma estimativa (maior que processedRows), usar processedRows como base
-        // Caso contrário, calcular normalmente
-        const actualTotal = progress.totalRows >= progress.processedRows ? progress.totalRows : progress.processedRows;
-        // Calcular progresso do processamento (0-100%)
-        const processingProgressPercent = Math.min(100, Math.max(0, (progress.processedRows / actualTotal) * 100));
-        // Aplicar fórmula: 5% + (progresso_processamento / 100) * 75%
-        const calculatedPercent = basePercent + (processingProgressPercent / 100) * stageRange;
-        // Garantir que está no range 5-80% e arredondar com precisão
-        return Math.min(80, Math.max(basePercent, Math.round(calculatedPercent * 100) / 100));
+
+    // Estágios com contagem de linhas/CTOs: processedRows/totalRows (igual aos logs)
+    const stage = String(progress.stage || '');
+    if (['processing', 'deleting', 'inserting', 'updating', 'uploading'].includes(stage)) {
+      const processed = Number(progress.processedRows) || 0;
+      const total = Number(progress.totalRows) || 0;
+      if (total > 0) {
+        return Math.min(100, Math.round((processed / total) * 100));
       }
-      
-      // Se não temos dados ainda, retornar início do estágio
-      return basePercent;
+      return Math.max(0, Math.min(100, Math.round(Number(progress.uploadPercent) || 0)));
     }
-    
-    // Estágio: Deletando CTOs (80% a 85%)
-    // Fórmula: Progresso total = 80% + (progresso_deleção / 100) * 5%
-    if (progress.stage === 'deleting') {
-      const basePercent = 80;
-      const stageRange = 5; // 80% a 85% = 5% de range
-      
-      // PRIORIDADE 1: Usar processedRows/totalRows se disponível (mais preciso e responsivo)
-      if (progress.totalRows > 0 && progress.processedRows >= 0) {
-        // Calcular progresso da deleção (0-100%)
-        const deleteProgressPercent = Math.min(100, Math.max(0, (progress.processedRows / progress.totalRows) * 100));
-        // Aplicar fórmula: 80% + (progresso_deleção / 100) * 5%
-        const calculatedPercent = basePercent + (deleteProgressPercent / 100) * stageRange;
-        // Garantir que está no range 80-85% e arredondar
-        return Math.min(85, Math.max(basePercent, Math.round(calculatedPercent * 100) / 100));
-      }
-      
-      // PRIORIDADE 2: Usar uploadPercent do backend (já calculado corretamente: 80-85%)
-      if (progress.uploadPercent !== undefined && progress.uploadPercent !== null && progress.uploadPercent >= 80) {
-        // uploadPercent já está no range 80-85% do backend
-        return Math.min(85, Math.max(80, Math.round(progress.uploadPercent * 100) / 100));
-      }
-      
-      // Estimativa inicial (início do estágio)
-      return basePercent;
-    }
-    
-    // Estágio: Inserindo CTOs (85% a 90%)
-    // Fórmula: Progresso total = 85% + (progresso_inserção / 100) * 5%
-    if (progress.stage === 'inserting') {
-      const basePercent = 85;
-      const stageRange = 5; // 85% a 90% = 5% de range
-      
-      // PRIORIDADE 1: Usar processedRows/totalRows se disponível (mais preciso e responsivo)
-      if (progress.totalRows > 0 && progress.processedRows >= 0) {
-        // Calcular progresso da inserção (0-100%)
-        const insertProgressPercent = Math.min(100, Math.max(0, (progress.processedRows / progress.totalRows) * 100));
-        // Aplicar fórmula: 85% + (progresso_inserção / 100) * 5%
-        const calculatedPercent = basePercent + (insertProgressPercent / 100) * stageRange;
-        // Garantir que está no range 85-90% e arredondar
-        return Math.min(90, Math.max(basePercent, Math.round(calculatedPercent * 100) / 100));
-      }
-      
-      // PRIORIDADE 2: Usar uploadPercent do backend (já calculado corretamente: 85-90%)
-      if (progress.uploadPercent !== undefined && progress.uploadPercent !== null) {
-        // uploadPercent já está no range 85-90% do backend
-        return Math.min(90, Math.max(85, Math.round(progress.uploadPercent * 100) / 100));
-      }
-      
-      // Estimativa inicial (início do estágio)
-      return basePercent;
-    }
-    
-    // Estágio: Atualizando CTOs (90% a 95%)
-    // Fórmula: Progresso total = 90% + (progresso_atualização / 100) * 5%
-    if (progress.stage === 'updating') {
-      const basePercent = 90;
-      const stageRange = 5; // 90% a 95% = 5% de range
-      
-      // PRIORIDADE 1: Usar processedRows/totalRows se disponível (mais preciso e responsivo)
-      if (progress.totalRows > 0 && progress.processedRows >= 0) {
-        // Calcular progresso da atualização (0-100%)
-        const updateProgressPercent = Math.min(100, Math.max(0, (progress.processedRows / progress.totalRows) * 100));
-        // Aplicar fórmula: 90% + (progresso_atualização / 100) * 5%
-        const calculatedPercent = basePercent + (updateProgressPercent / 100) * stageRange;
-        // Garantir que está no range 90-95% e arredondar
-        return Math.min(95, Math.max(basePercent, Math.round(calculatedPercent * 100) / 100));
-      }
-      
-      // PRIORIDADE 2: Usar uploadPercent do backend (já calculado corretamente: 90-95%)
-      if (progress.uploadPercent !== undefined && progress.uploadPercent !== null) {
-        // uploadPercent já está no range 90-95% do backend
-        return Math.min(95, Math.max(90, Math.round(progress.uploadPercent * 100) / 100));
-      }
-      
-      // Estimativa inicial (início do estágio)
-      return basePercent;
-    }
-    
-    // Estágio: Uploading (modo legado - sem comparação inteligente)
-    if (progress.stage === 'uploading') {
-      const basePercent = 5;
-      const stageRange = 90; // 5% a 95% = 90% de range
-      const uploadProgressValue = Math.min(100, Math.max(0, progress.uploadPercent || 0));
-      return Math.min(95, Math.round(basePercent + (uploadProgressValue / 100) * stageRange));
-    }
-    
-    // Fallback: usar uploadPercent se disponível
+
+    // Preparação / idle: confiar no uploadPercent do backend
     if (progress.uploadPercent !== undefined && progress.uploadPercent !== null) {
-      return Math.min(95, Math.round(progress.uploadPercent));
+      return Math.min(100, Math.max(0, Math.round(Number(progress.uploadPercent) || 0)));
     }
-    
-    // Fallback final: retornar 5% (início do processo)
-    return 5;
+
+    return 0;
   }
 
   // Carregar dados do localStorage primeiro (instantâneo)
@@ -469,8 +517,7 @@
       loadTabulacoes(),
       loadBaseLastModified(),
       loadCoverageLastModified(),
-      loadViAlas(),
-      loadClusterStatus()
+      loadViAlas()
     ]).catch(err => {
       console.error('Erro ao carregar dados:', err);
     });
@@ -516,11 +563,22 @@
       });
     }
     
+    // Polling global do lock/progresso da base CTOs (extensão + Config)
+    pollGlobalBaseUploadProgress().catch(() => {});
+    baseUploadGlobalPollInterval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      pollGlobalBaseUploadProgress().catch(() => {});
+    }, 2500);
+
     // Limpar intervalos quando componente for destruído
     return () => {
       if (onlineUsersInterval) {
         clearInterval(onlineUsersInterval);
         onlineUsersInterval = null;
+      }
+      if (baseUploadGlobalPollInterval) {
+        clearInterval(baseUploadGlobalPollInterval);
+        baseUploadGlobalPollInterval = null;
       }
       if (uploadPollInterval) {
         clearInterval(uploadPollInterval);
@@ -529,6 +587,10 @@
       if (coveragePollInterval) {
         clearInterval(coveragePollInterval);
         coveragePollInterval = null;
+      }
+      if (mduUploadPollInterval) {
+        clearInterval(mduUploadPollInterval);
+        mduUploadPollInterval = null;
       }
     };
   });
@@ -572,12 +634,12 @@
   // Carregar tabulações
   async function loadTabulacoes() {
     try {
-      const response = await fetch(getApiUrl('/api/tabulacoes'));
+      const response = await fetch(getApiUrl('/api/tabulacoes'), { cache: 'no-store' });
       const text = await response.text();
       if (text && text.trim() !== '') {
         const data = JSON.parse(text);
-        if (data.success) {
-          tabulacoesList = data.tabulacoes || tabulacoesList;
+        if (data.success && Array.isArray(data.tabulacoes) && data.tabulacoes.length > 0) {
+          tabulacoesList = data.tabulacoes;
           try {
             localStorage.setItem('tabulacoesList', JSON.stringify(tabulacoesList));
           } catch (err) {
@@ -1081,7 +1143,7 @@
   async function loadViAlas() {
     try {
       console.log('📥 Carregando VI ALAs...');
-      const response = await fetch(getApiUrl('/api/vi-ala/list'));
+      const response = await fetch(getApiUrl('/api/vi-ala/list'), { cache: 'no-store' });
       
       if (!response.ok) {
         console.warn('⚠️ Erro ao carregar VI ALAs (status:', response.status, ')');
@@ -1113,188 +1175,6 @@
     } catch (err) {
       console.error('❌ Erro ao carregar VI ALAs:', err);
       viAlasList = [];
-    }
-  }
-
-  async function loadClusterStatus() {
-    if (userTipo !== 'admin') return;
-    clusterLoading = true;
-    clusterError = '';
-    try {
-      const response = await fetch(getApiUrl('/api/cluster/mode'), {
-        headers: { 'X-Usuario': currentUser || '' }
-      });
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Falha ao carregar status do cluster');
-      }
-      const mode = data.mode === 'alternate' ? 'primary' : (data.mode || 'primary');
-      clusterMode = mode === 'replica' ? 'replica' : 'primary';
-      clusterEnabled = Boolean(data.status?.enabled);
-      clusterAvailable = Boolean(data.status?.available);
-    } catch (err) {
-      clusterError = err.message || 'Erro ao carregar cluster';
-    } finally {
-      clusterLoading = false;
-    }
-  }
-
-  function requestClusterSwitch(mode) {
-    if (userTipo !== 'admin' || clusterLoading || clusterSwitchStep === 'running') return;
-    if (!clusterEnabled || !clusterAvailable) return;
-    if (mode === clusterMode) return;
-    clusterSwitchTarget = mode;
-    clusterSwitchStep = 'confirm';
-    clusterSwitchPercent = 0;
-    clusterSwitchMessage = '';
-    clusterError = '';
-    clusterMessage = '';
-    showClusterSwitchModal = true;
-  }
-
-  function closeClusterSwitchModal() {
-    // Em andamento: não fecha; cancela a sincronização e mantém o pop no estado cancelado
-    if (clusterSwitchStep === 'running') {
-      cancelClusterSwitch();
-      return;
-    }
-    showClusterSwitchModal = false;
-    clusterSwitchTarget = '';
-    clusterSwitchStep = 'confirm';
-    clusterSwitchPercent = 0;
-    clusterSwitchMessage = '';
-    clusterSwitchAbort = null;
-  }
-
-  function cancelClusterSwitch() {
-    if (clusterSwitchAbort) {
-      clusterSwitchAbort.abort();
-      clusterSwitchAbort = null;
-    }
-    if (clusterSwitchStep === 'running' || clusterSwitchStep === 'confirm') {
-      clusterSwitchStep = 'cancelled';
-      clusterSwitchMessage = 'Troca cancelada. O backend anterior foi mantido.';
-    }
-  }
-
-  async function confirmClusterSwitch() {
-    if (userTipo !== 'admin' || !clusterSwitchTarget) return;
-    if (clusterSwitchStep === 'running') return;
-
-    const targetMode = clusterSwitchTarget;
-    const targetLabel = clusterModeLabels[targetMode] || targetMode;
-    const sourceLabel = targetMode === 'replica' ? 'B1' : 'B2';
-    const destLabel = targetMode === 'replica' ? 'B2' : 'B1';
-
-    clusterSwitchStep = 'running';
-    clusterSwitchPercent = 0;
-    clusterSwitchMessage = `Iniciando cópia ${sourceLabel} → ${destLabel}…`;
-    clusterError = '';
-    clusterMessage = '';
-
-    const controller = new AbortController();
-    clusterSwitchAbort = controller;
-
-    try {
-      const response = await fetch(getApiUrl('/api/cluster/switch'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Usuario': currentUser || ''
-        },
-        body: JSON.stringify({ targetMode, usuario: currentUser || '' }),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        let errMsg = 'Falha ao trocar backend';
-        try {
-          const data = await response.json();
-          errMsg = data.error || errMsg;
-        } catch {
-          // ignore
-        }
-        throw new Error(errMsg);
-      }
-
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('application/json') && !contentType.includes('ndjson')) {
-        const data = await response.json();
-        if (data.skipped) {
-          clusterMode = data.mode || targetMode;
-          clusterSwitchStep = 'done';
-          clusterSwitchPercent = 100;
-          clusterSwitchMessage = data.message || 'Backend já estava ativo';
-          clusterMessage = clusterSwitchMessage;
-          return;
-        }
-        if (!data.success) throw new Error(data.error || 'Falha ao trocar backend');
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('Resposta sem stream de progresso');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let finalEvent = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          let event;
-          try {
-            event = JSON.parse(trimmed);
-          } catch {
-            continue;
-          }
-          if (event.type === 'progress' || event.type === 'start') {
-            clusterSwitchPercent = Math.max(clusterSwitchPercent, Number(event.percent) || 0);
-            clusterSwitchMessage = event.message || clusterSwitchMessage;
-          } else if (event.type === 'done') {
-            finalEvent = event;
-            clusterSwitchPercent = 100;
-            clusterSwitchMessage = event.message || `Backend ${targetLabel} ativo`;
-            clusterMode = event.mode || targetMode;
-            clusterSwitchStep = 'done';
-            clusterMessage = clusterSwitchMessage;
-          } else if (event.type === 'cancelled') {
-            finalEvent = event;
-            clusterSwitchStep = 'cancelled';
-            clusterSwitchMessage = event.message || 'Troca cancelada';
-          } else if (event.type === 'error') {
-            finalEvent = event;
-            throw new Error(event.error || 'Erro na sincronização');
-          }
-        }
-      }
-
-      if (clusterSwitchStep === 'running') {
-        if (finalEvent?.type === 'done') {
-          clusterSwitchStep = 'done';
-        } else if (controller.signal.aborted) {
-          clusterSwitchStep = 'cancelled';
-          clusterSwitchMessage = 'Troca cancelada. O backend anterior foi mantido.';
-        } else {
-          throw new Error('Sincronização encerrada sem confirmação');
-        }
-      }
-    } catch (err) {
-      if (err?.name === 'AbortError' || controller.signal.aborted) {
-        clusterSwitchStep = 'cancelled';
-        clusterSwitchMessage = 'Troca cancelada. O backend anterior foi mantido.';
-      } else {
-        clusterSwitchStep = 'error';
-        clusterSwitchMessage = err.message || 'Erro ao trocar backend';
-        clusterError = clusterSwitchMessage;
-      }
-    } finally {
-      clusterSwitchAbort = null;
     }
   }
 
@@ -1342,6 +1222,18 @@
     deletingBase = true;
     uploadMessage = '';
     uploadSuccess = false;
+    openBaseOpModal({
+      kind: 'delete',
+      title: 'Deletar base atual',
+      message: 'Iniciando exclusão…',
+      hint: 'Não feche esta janela até concluir.',
+      percent: 0
+    });
+
+    const authHeaders = {
+      'Content-Type': 'application/json',
+      'X-Usuario': currentUser || ''
+    };
 
     try {
       const apiUrl = getApiUrl('/api/base/delete');
@@ -1350,11 +1242,8 @@
 
       const response = await fetch(apiUrl, {
         method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Usuario': currentUser || '', // Enviar usuário no header para autorização
-        },
-        body: JSON.stringify({ usuario: currentUser || '' }), // Também no body para compatibilidade
+        headers: authHeaders,
+        body: JSON.stringify({ usuario: currentUser || '' })
       });
 
       console.log('📥 [Delete] Resposta recebida:', response.status, response.statusText);
@@ -1362,54 +1251,118 @@
       if (!response.ok) {
         const errorText = await response.text();
         console.error('❌ [Delete] Erro HTTP:', response.status, errorText);
-        
         try {
           const errorData = JSON.parse(errorText);
           throw new Error(errorData.error || `Erro ao deletar base (${response.status})`);
-        } catch {
+        } catch (parseErr) {
+          if (parseErr.message && parseErr.message.startsWith('Erro ao deletar')) throw parseErr;
           throw new Error(`Erro ao deletar base (${response.status}): ${errorText.substring(0, 200)}`);
         }
       }
 
-      const data = await response.json();
-      console.log('✅ [Delete] Dados recebidos:', data);
+      const startData = await response.json();
+      if (!startData?.success && !startData?.started) {
+        throw new Error(startData?.error || 'Não foi possível iniciar a exclusão');
+      }
 
-      if (data.success) {
-        uploadSuccess = true;
-        uploadMessage = data.message || 'Base de dados deletada com sucesso!';
-        baseLastModified = null;
-        baseDataExists = false;
-        
-        // Limpar localStorage
+      updateBaseOpProgress({
+        message: startData.message || 'Exclusão em andamento…',
+        percent: 0
+      });
+
+      // Poll até o job em background zerar a base (sem timeout do request longo)
+      const progressUrl = getApiUrl('/api/base/delete-progress');
+      let finished = false;
+      let lastMsg = '';
+      const pollStarted = Date.now();
+      const maxWaitMs = 45 * 60 * 1000; // 45 min — bases grandes em lotes
+
+      while (!finished) {
+        if (Date.now() - pollStarted > maxWaitMs) {
+          throw new Error('A exclusão demorou demais. Verifique o backend e tente novamente.');
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+
+        let progress = null;
         try {
-          localStorage.removeItem('baseLastModified');
-        } catch (err) {
-          console.error('Erro ao limpar localStorage:', err);
-        }
-        
-        // Recarregar os dados das CTOs (vai retornar vazio agora)
-        if (onReloadCTOs) {
-          try {
-            await onReloadCTOs();
-            console.log('✅ Base de dados recarregada após deleção');
-          } catch (err) {
-            console.error('Erro ao recarregar base de dados:', err);
+          const progressRes = await fetch(progressUrl, {
+            method: 'GET',
+            headers: authHeaders,
+            cache: 'no-store'
+          });
+          if (progressRes.ok) {
+            progress = await progressRes.json().catch(() => null);
           }
+        } catch {
+          // Mantém o modal; tenta de novo no próximo ciclo
+          continue;
         }
-      } else {
-        uploadSuccess = false;
-        uploadMessage = data.error || 'Erro ao deletar base de dados';
+
+        if (!progress) continue;
+
+        const pct = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+        const msg = String(progress.message || '').trim();
+        if (msg && msg !== lastMsg) lastMsg = msg;
+        updateBaseOpProgress({
+          message: msg || 'Removendo base…',
+          percent: pct
+        });
+
+        if (progress.inProgress === true) continue;
+
+        if (progress.stage === 'completed') {
+          finished = true;
+          uploadSuccess = true;
+          uploadMessage =
+            progress.message ||
+            startData.message ||
+            'Base de dados deletada com sucesso!';
+          baseLastModified = null;
+          baseDataExists = false;
+
+          try {
+            localStorage.removeItem('baseLastModified');
+          } catch (err) {
+            console.error('Erro ao limpar localStorage:', err);
+          }
+
+          if (onReloadCTOs) {
+            try {
+              await onReloadCTOs();
+              console.log('✅ Base de dados recarregada após deleção');
+            } catch (err) {
+              console.error('Erro ao recarregar base de dados:', err);
+            }
+          }
+
+          finishBaseOpModal({
+            success: true,
+            message: uploadMessage,
+            percent: 100
+          });
+          break;
+        }
+
+        if (progress.stage === 'error') {
+          throw new Error(progress.error || progress.message || 'Erro ao deletar base');
+        }
+
+        // idle sem inProgress logo após start: aguarda o job atualizar
+        if (progress.stage === 'idle' && Date.now() - pollStarted < 5000) {
+          continue;
+        }
       }
     } catch (err) {
       uploadSuccess = false;
-      
+
       if (err.name === 'TypeError' && err.message.includes('Failed to fetch')) {
         uploadMessage = 'Não foi possível conectar ao servidor. Verifique se o backend está online.';
       } else {
         uploadMessage = `Erro ao deletar base: ${err.message}`;
       }
-      
+
       console.error('❌ [Delete] Erro ao deletar base:', err);
+      finishBaseOpModal({ success: false, message: uploadMessage });
     } finally {
       deletingBase = false;
     }
@@ -1887,6 +1840,13 @@
     calculatingCoverage = true;
     coverageMessage = 'Iniciando cálculo da mancha de cobertura...';
     coverageSuccess = false;
+    openBaseOpModal({
+      kind: 'coverage',
+      title: 'Criar mancha de cobertura',
+      message: 'Iniciando cálculo da mancha…',
+      hint: 'A ferramenta continua na base anterior até a publicação (swap). Não feche esta janela.',
+      percent: 2
+    });
     
     // Limpar qualquer polling anterior
     if (coveragePollInterval) {
@@ -1925,6 +1885,7 @@
       
       if (data.success) {
         coverageMessage = 'Cálculo iniciado! Aguardando processamento...';
+        updateBaseOpProgress({ message: coverageMessage, percent: 5 });
         
         // Iniciar polling do progresso
         coveragePollInterval = setInterval(async () => {
@@ -1948,6 +1909,11 @@
                 };
                 
                 coverageMessage = uploadProgress.message || 'Calculando área de cobertura...';
+                const calcPct = Math.max(0, Math.min(100, Number(uploadProgress.calculationPercent) || 0));
+                updateBaseOpProgress({
+                  message: coverageMessage,
+                  percent: Math.max(5, calcPct)
+                });
                 
                 // Verificar se cálculo foi concluído
                 if (uploadProgress.stage === 'completed') {
@@ -1956,7 +1922,10 @@
                   coveragePollInterval = null;
                   calculatingCoverage = false;
                   coverageSuccess = true;
-                  coverageMessage = '✅ Área de cobertura criada com sucesso!';
+                  coverageMessage = (uploadProgress.message && String(uploadProgress.message).trim())
+                    ? uploadProgress.message
+                    : '✅ Área de cobertura criada com sucesso!';
+                  finishBaseOpModal({ success: true, message: coverageMessage, percent: 100 });
                   
                   // Forçar atualização do componente
                   forceUpdate++;
@@ -1979,12 +1948,17 @@
                   calculatingCoverage = false;
                   coverageSuccess = false;
                   coverageMessage = `❌ Erro: ${uploadProgress.message || 'Erro ao calcular área de cobertura'}`;
+                  finishBaseOpModal({ success: false, message: coverageMessage });
                   
                   // Forçar atualização do componente
                   forceUpdate++;
                 } else if (uploadProgress.stage === 'calculating') {
                   // Ainda calculando, atualizar mensagem
                   coverageMessage = uploadProgress.message || `Calculando área de cobertura... ${uploadProgress.calculationPercent || 0}%`;
+                  updateBaseOpProgress({
+                    message: coverageMessage,
+                    percent: Math.max(5, calcPct)
+                  });
                 }
               }
             }
@@ -2000,11 +1974,118 @@
       calculatingCoverage = false;
       coverageSuccess = false;
       coverageMessage = `❌ Erro ao criar mancha de cobertura: ${err.message}`;
+      finishBaseOpModal({ success: false, message: coverageMessage });
       
       if (coveragePollInterval) {
         clearInterval(coveragePollInterval);
         coveragePollInterval = null;
       }
+    }
+  }
+
+  function clearMduUploadPoll() {
+    if (mduUploadPollInterval) {
+      clearInterval(mduUploadPollInterval);
+      mduUploadPollInterval = null;
+    }
+  }
+
+  function closeMduUploadModal() {
+    if (mduUploadStep === 'running') return;
+    showMduUploadModal = false;
+    mduUploadStep = 'idle';
+    mduUploadFileName = '';
+  }
+
+  async function pollMduUploadProgress() {
+    try {
+      const progressRes = await fetch(getApiUrl('/api/condominios-mdu/upload-progress'));
+      if (!progressRes.ok) return;
+      const progress = await progressRes.json();
+      mduUploadPercent = Math.max(0, Math.min(100, Number(progress.percent) || 0));
+      if (progress.message) mduUploadMessage = progress.message;
+
+      if (progress.stage === 'completed') {
+        clearMduUploadPoll();
+        uploadingMduBase = false;
+        mduUploadSuccess = true;
+        mduUploadPercent = 100;
+        mduUploadStep = 'done';
+        mduUploadMessage = progress.message || 'Base MDU atualizada com sucesso.';
+      } else if (progress.stage === 'error') {
+        clearMduUploadPoll();
+        uploadingMduBase = false;
+        mduUploadSuccess = false;
+        mduUploadStep = 'error';
+        mduUploadMessage = progress.error || progress.message || 'Erro ao atualizar base MDU.';
+      }
+    } catch (err) {
+      console.warn('⚠️ [MDU Upload] Falha ao consultar progresso:', err);
+    }
+  }
+
+  async function handleMduBaseUpload(event) {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    const name = String(file.name || '').toLowerCase();
+    if (!name.endsWith('.xlsx') && !name.endsWith('.xls')) {
+      mduUploadSuccess = false;
+      mduUploadStep = 'error';
+      mduUploadMessage = 'Envie um arquivo Excel puro (.xlsx ou .xls). CSV não é aceito.';
+      mduUploadFileName = file.name || '';
+      showMduUploadModal = true;
+      return;
+    }
+
+    clearMduUploadPoll();
+    uploadingMduBase = true;
+    mduUploadSuccess = false;
+    mduUploadPercent = 0;
+    mduUploadStep = 'running';
+    mduUploadFileName = file.name || '';
+    mduUploadMessage = 'Enviando planilha MDU...';
+    showMduUploadModal = true;
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const apiUrl = getApiUrl('/api/condominios-mdu/upload');
+      const response = await fetch(apiUrl, { method: 'POST', body: formData });
+      const text = await response.text();
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(text?.substring(0, 200) || `Erro do servidor (${response.status})`);
+      }
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `Erro do servidor (${response.status})`);
+      }
+
+      mduUploadMessage = data.message || 'Processando base MDU...';
+
+      if (data.processing) {
+        uploadingMduBase = true;
+        mduUploadStep = 'running';
+        mduUploadPollInterval = setInterval(pollMduUploadProgress, 1500);
+        await pollMduUploadProgress();
+      } else {
+        uploadingMduBase = false;
+        mduUploadPercent = 100;
+        mduUploadStep = 'done';
+        mduUploadSuccess = true;
+        mduUploadMessage = data.message || 'Base MDU atualizada.';
+      }
+    } catch (err) {
+      clearMduUploadPoll();
+      uploadingMduBase = false;
+      mduUploadSuccess = false;
+      mduUploadStep = 'error';
+      mduUploadMessage = err?.message || 'Erro ao atualizar base MDU.';
+      console.error('❌ [MDU Upload]', err);
     }
   }
   
@@ -2013,12 +2094,30 @@
     const file = event.target.files[0];
     if (!file) return;
 
+    // Evitar segundo upload se já houver lock global
+    await pollGlobalBaseUploadProgress();
+    if (baseUploadRemoteBusy || uploadingBase) {
+      uploadMessage = baseUploadLockMessage || 'Já existe uma atualização de base em andamento.';
+      uploadSuccess = false;
+      event.target.value = '';
+      return;
+    }
+
     uploadMessage = '';
     uploadSuccess = false;
     uploadingBase = true;
     lastUploadPercent = 0; // Resetar progresso quando inicia novo upload
     displayedPercent = 0; // Resetar progresso animado
+    progressStageTracked = '';
     targetPercent = 0; // Resetar alvo
+    openBaseOpModal({
+      kind: 'upload',
+      title: 'Carregar nova base de dados',
+      message: 'Enviando arquivo…',
+      fileName: file.name || '',
+      hint: 'A ferramenta continua na base anterior durante o upload (staging). Não feche esta janela.',
+      percent: 1
+    });
     if (animationFrameId) {
       cancelAnimationFrame(animationFrameId);
       animationFrameId = null;
@@ -2083,7 +2182,11 @@
       try {
         const fetchOptions = {
           method: 'POST',
-          body: formData
+          body: formData,
+          headers: {
+            'X-Usuario': currentUser || '',
+            'X-Upload-Source': 'manual'
+          }
         };
         console.log('📤 [Upload] Opções do fetch:', { method: fetchOptions.method, hasBody: !!fetchOptions.body });
         response = await fetch(apiUrl, fetchOptions);
@@ -2108,7 +2211,17 @@
         const errorText = await response.text();
         console.error('❌ [Upload] Erro HTTP:', response.status, errorText.substring(0, 200));
         
-        if (response.status === 502) {
+        if (response.status === 409) {
+          try {
+            const errorData = JSON.parse(errorText);
+            baseUploadRemoteBusy = true;
+            baseUploadLockMessage = errorData.lockMessage || errorData.error || baseUploadLockMessage;
+            throw new Error(baseUploadLockMessage || 'Já existe uma atualização de base em andamento.');
+          } catch (e) {
+            if (e instanceof Error && /atualização/i.test(e.message)) throw e;
+            throw new Error(errorText || 'Já existe uma atualização de base em andamento.');
+          }
+        } else if (response.status === 502) {
           throw new Error('Servidor não está respondendo (502 Bad Gateway). Verifique se o backend está online.');
         } else if (response.status === 504) {
           throw new Error('Timeout do servidor. O arquivo pode ser muito grande. Tente novamente.');
@@ -2118,7 +2231,10 @@
             const errorData = JSON.parse(errorText);
             // Usar a mensagem de erro do servidor diretamente (já vem formatada)
             throw new Error(errorData.error || `Erro do servidor (${response.status})`);
-          } catch {
+          } catch (e) {
+            if (e instanceof Error && e.message && !e.message.startsWith('Erro do servidor') && e.message !== errorText) {
+              throw e;
+            }
             throw new Error(`Erro do servidor (${response.status}): ${errorText.substring(0, 200) || response.statusText}`);
           }
         }
@@ -2210,6 +2326,7 @@
             displayedPercent = 0;
             targetPercent = 0;
             lastUploadPercent = 0;
+            finishBaseOpModal({ success: false, message: uploadMessage });
           }, 7200000);
           
           // Iniciar polling do progresso (mais frequente para atualização suave)
@@ -2270,7 +2387,18 @@
                     
                     // Usar totalCTOsLoaded atualizado pelo loadBaseLastModified, ou fallback
                     const totalCTOs = totalCTOsLoaded || progressData.totalCTOs || progressData.importedRows || 0;
-                    uploadMessage = `✅ Base de dados Atualizada com sucesso!<br>                  (${formatNumber(totalCTOs)} CTOs)`;
+                    if (progressData.pendingSwap) {
+                      uploadMessage = `✅ Base staging pronta (${formatNumber(totalCTOs)} CTOs).<br>A ferramenta continua na base anterior.<br><strong>Crie a mancha de cobertura</strong> para publicar a nova base.`;
+                    } else {
+                      uploadMessage = `✅ Base de dados Atualizada com sucesso!<br>                  (${formatNumber(totalCTOs)} CTOs)`;
+                    }
+                    finishBaseOpModal({
+                      success: true,
+                      message: progressData.pendingSwap
+                        ? `Base staging pronta (${formatNumber(totalCTOs)} CTOs). Crie a mancha de cobertura para publicar.`
+                        : `Base atualizada com sucesso (${formatNumber(totalCTOs)} CTOs).`,
+                      percent: 100
+                    });
                     if (onReloadCTOs) {
                       try {
                         await onReloadCTOs();
@@ -2296,6 +2424,7 @@
                     displayedPercent = 0;
                     targetPercent = 0;
                     lastUploadPercent = 0;
+                    finishBaseOpModal({ success: false, message: uploadMessage });
                   }
                 }
               }
@@ -2337,6 +2466,11 @@
           // Usar totalCTOsLoaded atualizado pelo loadBaseLastModified
           const totalCTOs = totalCTOsLoaded || 0;
           uploadMessage = `✅ Base de dados Atualizada com sucesso!<br>                  (${formatNumber(totalCTOs)} CTOs)`;
+          finishBaseOpModal({
+            success: true,
+            message: `Base atualizada com sucesso (${formatNumber(totalCTOs)} CTOs).`,
+            percent: 100
+          });
 
           event.target.value = '';
           uploadingBase = false;
@@ -2345,6 +2479,7 @@
         uploadSuccess = false;
         uploadMessage = data.error || 'Erro ao atualizar base de dados';
         uploadingBase = false;
+        finishBaseOpModal({ success: false, message: uploadMessage });
       }
     } catch (err) {
       // Limpar polling se houver erro
@@ -2373,6 +2508,7 @@
       console.error('❌ [Upload] Erro ao fazer upload da base:', err);
       console.error('❌ [Upload] Tipo do erro:', err.name);
       console.error('❌ [Upload] Mensagem:', err.message);
+      finishBaseOpModal({ success: false, message: uploadMessage });
     }
   }
 </script>
@@ -2589,64 +2725,7 @@
       </div>
 
       {#if userTipo === 'admin'}
-        <div class="settings-section">
-          <div class="cluster-section-header">
-            <h3>Cluster Supabase</h3>
-            <button
-              type="button"
-              class="info-icon"
-              on:click={() => (showClusterInfo = true)}
-              title="Informação"
-              aria-label="Informação sobre o cluster Supabase"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="12" cy="12" r="10" fill="#7B68EE" stroke="#7B68EE" stroke-width="1"/>
-                <path d="M12 16V12" stroke="white" stroke-width="2" stroke-linecap="round"/>
-                <circle cx="12" cy="8" r="1" fill="white"/>
-              </svg>
-            </button>
-          </div>
-          {#if clusterLoading && !clusterMode}
-            <p class="empty-message">Carregando...</p>
-          {:else}
-            <p class="cluster-status-line">
-              Status:
-              {#if !clusterEnabled}
-                <span class="cluster-badge cluster-badge-off">Desabilitado</span>
-              {:else if !clusterAvailable}
-                <span class="cluster-badge cluster-badge-warn">Réplica não configurada</span>
-              {:else}
-                <span class="cluster-badge cluster-badge-on">Ativo</span>
-              {/if}
-            </p>
-            <div class="cluster-mode-buttons tools-permissions-grid">
-              {#each ['primary', 'replica'] as mode}
-                <button
-                  type="button"
-                  class="tool-permission-card cluster-mode-card"
-                  class:active={clusterMode === mode}
-                  disabled={clusterLoading || clusterSwitchStep === 'running' || !clusterEnabled || !clusterAvailable}
-                  on:click={() => requestClusterSwitch(mode)}
-                  title={clusterModeLabels[mode]}
-                  aria-pressed={clusterMode === mode}
-                >
-                  <span class="tool-permission-label">
-                    <span class="tool-checkbox-custom" aria-hidden="true"></span>
-                    <span class="tool-title">{clusterModeLabels[mode]}</span>
-                  </span>
-                </button>
-              {/each}
-            </div>
-            {#if clusterMessage}
-              <p class="cluster-message success">{clusterMessage}</p>
-            {/if}
-            {#if clusterError}
-              <p class="cluster-message error">{clusterError}</p>
-            {/if}
-          {/if}
-        </div>
-
-        {#if showClusterSwitchModal}
+        {#if showMduUploadModal}
           <div
             class="modal-overlay confirm-overlay cluster-switch-overlay"
             role="presentation"
@@ -2655,64 +2734,62 @@
               class="modal-content cluster-switch-modal"
               role="dialog"
               aria-modal="true"
-              aria-labelledby="cluster-switch-title"
+              aria-labelledby="mdu-upload-title"
               tabindex="-1"
               on:click|stopPropagation
-              on:keydown={(e) => e.key === 'Escape' && clusterSwitchStep !== 'running' && closeClusterSwitchModal()}
+              on:keydown={(e) => e.key === 'Escape' && mduUploadStep !== 'running' && closeMduUploadModal()}
             >
               <div class="modal-header">
-                <h2 id="cluster-switch-title">Trocar backend</h2>
-                {#if clusterSwitchStep !== 'running'}
+                <h2 id="mdu-upload-title">Atualizar base MDU</h2>
+                {#if mduUploadStep !== 'running'}
                   <button
                     type="button"
                     class="modal-close"
-                    on:click={closeClusterSwitchModal}
+                    on:click={closeMduUploadModal}
                     aria-label="Fechar"
                   >×</button>
                 {/if}
               </div>
 
               <div class="modal-body">
-                {#if clusterSwitchStep === 'confirm'}
-                  <p>
-                    Deseja realmente atualizar e trocar para
-                    <strong> {clusterModeLabels[clusterSwitchTarget]}</strong>?
+                {#if mduUploadFileName}
+                  <p class="cluster-switch-hint" style="margin: 0 0 0.75rem 0;">
+                    Arquivo: <strong>{mduUploadFileName}</strong>
                   </p>
-                  <p class="cluster-switch-warn">
-                    Ao confirmar, os dados serão copiados
-                    <strong>
-                      {clusterSwitchTarget === 'replica' ? ' de B1 para B2' : ' de B2 para B1'}
-                    </strong>
-                    (o destino será substituído) e em seguida o backend ativo mudará.
-                  </p>
-                  <p>Isso pode levar vários minutos.</p>
-                {:else if clusterSwitchStep === 'running'}
-                  <p class="cluster-switch-status">{clusterSwitchMessage || 'Atualizando…'}</p>
-                  <div class="cluster-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(clusterSwitchPercent)}>
-                    <div class="cluster-progress-fill" style={`width: ${clusterSwitchPercent}%`}></div>
+                {/if}
+
+                {#if mduUploadStep === 'running'}
+                  <p class="cluster-switch-status">{mduUploadMessage || 'Atualizando base MDU…'}</p>
+                  <div
+                    class="cluster-progress-track"
+                    role="progressbar"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow={Math.round(mduUploadPercent)}
+                  >
+                    <div class="cluster-progress-fill mdu-progress-fill" style={`width: ${Math.max(mduUploadPercent, 3)}%`}></div>
                   </div>
-                  <p class="cluster-progress-label">{Math.round(clusterSwitchPercent)}%</p>
-                  <p class="cluster-switch-hint">Não feche esta janela até concluir. Use Cancelar para interromper.</p>
-                {:else if clusterSwitchStep === 'done'}
-                  <p class="cluster-switch-status success-text">{clusterSwitchMessage}</p>
+                  <p class="cluster-progress-label">{Math.round(mduUploadPercent)}%</p>
+                  <p class="cluster-switch-hint">
+                    Não feche esta janela até concluir. A base atual será substituída e os prédios sem lat/lng serão geocodificados.
+                  </p>
+                {:else if mduUploadStep === 'done'}
+                  <p class="cluster-switch-status success-text">{mduUploadMessage}</p>
                   <div class="cluster-progress-track" aria-hidden="true">
-                    <div class="cluster-progress-fill" style="width: 100%"></div>
+                    <div class="cluster-progress-fill mdu-progress-fill" style="width: 100%"></div>
                   </div>
                   <p class="cluster-progress-label">100%</p>
-                {:else if clusterSwitchStep === 'cancelled'}
-                  <p class="cluster-switch-status">{clusterSwitchMessage}</p>
                 {:else}
-                  <p class="cluster-switch-status error-text">{clusterSwitchMessage}</p>
+                  <p class="cluster-switch-status error-text">{mduUploadMessage}</p>
                 {/if}
 
                 <div class="modal-actions">
-                  {#if clusterSwitchStep === 'confirm'}
-                    <button type="button" class="btn-cancel" on:click={closeClusterSwitchModal}>Cancelar</button>
-                    <button type="button" class="btn-add-confirm" on:click={confirmClusterSwitch}>Confirmar</button>
-                  {:else if clusterSwitchStep === 'running'}
-                    <button type="button" class="btn-cancel" on:click={cancelClusterSwitch}>Cancelar atualização</button>
+                  {#if mduUploadStep === 'running'}
+                    <button type="button" class="btn-cancel" disabled title="Aguarde a conclusão do upload">
+                      Atualizando…
+                    </button>
                   {:else}
-                    <button type="button" class="btn-add-confirm" on:click={closeClusterSwitchModal}>Fechar</button>
+                    <button type="button" class="btn-add-confirm" on:click={closeMduUploadModal}>Fechar</button>
                   {/if}
                 </div>
               </div>
@@ -2720,46 +2797,73 @@
           </div>
         {/if}
 
-        {#if showClusterInfo}
+        {#if showBaseOpModal}
           <div
-            class="info-modal-overlay"
-            on:click={() => (showClusterInfo = false)}
-            on:keydown={(e) => e.key === 'Escape' && (showClusterInfo = false)}
-            role="button"
-            tabindex="-1"
-            aria-label="Fechar modal de informação"
+            class="modal-overlay confirm-overlay cluster-switch-overlay"
+            role="presentation"
           >
             <div
-              class="info-modal-box"
-              on:click|stopPropagation
-              on:keydown={(e) => e.key === 'Enter' && e.stopPropagation()}
+              class="modal-content cluster-switch-modal"
               role="dialog"
-              tabindex="0"
               aria-modal="true"
+              aria-labelledby="base-op-title"
+              tabindex="-1"
+              on:click|stopPropagation
+              on:keydown={(e) => e.key === 'Escape' && baseOpStep !== 'running' && closeBaseOpModal()}
             >
-              <div class="info-modal-header">
-                <h3>Cluster Supabase</h3>
-                <button
-                  type="button"
-                  class="info-modal-close"
-                  on:click={() => (showClusterInfo = false)}
-                  aria-label="Fechar"
-                >×</button>
+              <div class="modal-header">
+                <h2 id="base-op-title">{baseOpTitle || 'Processando…'}</h2>
+                {#if baseOpStep !== 'running'}
+                  <button
+                    type="button"
+                    class="modal-close"
+                    on:click={closeBaseOpModal}
+                    aria-label="Fechar"
+                  >×</button>
+                {/if}
               </div>
-              <div class="info-modal-body">
-                <p>
-                  Escolha qual backend a Viabilidade usa. Ao trocar, o sistema copia os dados
-                  para o backend escolhido e só então ativa esse backend.
-                </p>
-                <p>
-                  <strong>Backend Principal (B1)</strong>: lê e grava somente no B1.
-                </p>
-                <p>
-                  <strong>Backend Secundário (B2)</strong>: lê e grava somente no B2.
-                </p>
-                <p>
-                  Não há atualização automática em segundo plano entre B1 e B2.
-                </p>
+
+              <div class="modal-body">
+                {#if baseOpFileName}
+                  <p class="cluster-switch-hint" style="margin: 0 0 0.75rem 0;">
+                    Arquivo: <strong>{baseOpFileName}</strong>
+                  </p>
+                {/if}
+
+                {#if baseOpStep === 'running'}
+                  <p class="cluster-switch-status">{baseOpMessage || 'Processando…'}</p>
+                  <div
+                    class="cluster-progress-track"
+                    role="progressbar"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow={Math.round(baseOpPercent)}
+                  >
+                    <div class="cluster-progress-fill" style={`width: ${baseOpPercent > 0 ? Math.max(baseOpPercent, 3) : 0}%`}></div>
+                  </div>
+                  <p class="cluster-progress-label">{Math.round(baseOpPercent)}%</p>
+                  {#if baseOpHint}
+                    <p class="cluster-switch-hint">{baseOpHint}</p>
+                  {/if}
+                {:else if baseOpStep === 'done'}
+                  <p class="cluster-switch-status success-text">{baseOpMessage}</p>
+                  <div class="cluster-progress-track" aria-hidden="true">
+                    <div class="cluster-progress-fill" style="width: 100%"></div>
+                  </div>
+                  <p class="cluster-progress-label">100%</p>
+                {:else}
+                  <p class="cluster-switch-status error-text">{baseOpMessage}</p>
+                {/if}
+
+                <div class="modal-actions">
+                  {#if baseOpStep === 'running'}
+                    <button type="button" class="btn-cancel" disabled title="Aguarde a conclusão">
+                      Processando…
+                    </button>
+                  {:else}
+                    <button type="button" class="btn-add-confirm" on:click={closeBaseOpModal}>Fechar</button>
+                  {/if}
+                </div>
               </div>
             </div>
           </div>
@@ -2770,14 +2874,73 @@
         <h3>Base de Dados</h3>
         <div class="upload-section">
           <div class="upload-button-container">
-            <label for="baseFileInput" class="upload-label">
-              <span>Carregar Nova Base de Dados</span>
+            <label
+              for="baseFileInput"
+              class="upload-label"
+              class:upload-label-disabled={uploadingBase || uploadingMduBase || baseUploadRemoteBusy}
+              title={baseUploadRemoteBusy ? baseUploadLockMessage : 'Carregar nova base de dados CTOs'}
+            >
+              <span>
+                {#if uploadingBase || baseUploadRemoteBusy}
+                  Atualização em andamento…
+                {:else}
+                  Carregar Nova Base de Dados
+                {/if}
+              </span>
               <input 
                 type="file" 
                 id="baseFileInput"
                 accept=".xlsx,.xls"
                 on:change={(e) => handleBaseUpload(e)}
-                disabled={uploadingBase}
+                disabled={uploadingBase || uploadingMduBase || baseUploadRemoteBusy}
+                style="display: none;"
+              />
+            </label>
+          </div>
+
+          {#if baseUploadRemoteBusy || uploadingBase}
+            <div class="base-upload-lock-banner" role="status" aria-live="polite">
+              <strong>{baseUploadLockMessage || 'Atualização em Andamento'}</strong>
+              {#if uploadProgress?.message}
+                <span class="base-upload-lock-detail">{uploadProgress.message}</span>
+              {/if}
+              <div
+                class="cluster-progress-track"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={Math.round(displayedPercent || baseOpPercent || 0)}
+              >
+                <div
+                  class="cluster-progress-fill"
+                  style={`width: ${Math.max(displayedPercent || baseOpPercent || 3, 3)}%`}
+                ></div>
+              </div>
+              <p class="cluster-progress-label">{Math.round(displayedPercent || baseOpPercent || 0)}%</p>
+            </div>
+          {:else if uploadProgress?.coverageFailed || (uploadMessage && !uploadSuccess && /mancha/i.test(uploadMessage))}
+            <div class="base-upload-lock-banner base-upload-warning-banner" role="alert" aria-live="assertive">
+              <strong>Aviso — falha na mancha de cobertura</strong>
+              <span class="base-upload-lock-detail">{uploadProgress?.message || uploadMessage}</span>
+              <span class="base-upload-lock-detail">A base de CTOs foi atualizada; use “Criar Nova Mancha de Cobertura” para tentar de novo.</span>
+            </div>
+          {/if}
+
+          <div class="upload-button-container" style="margin-top: 0.75rem;">
+            <label
+              for="mduBaseFileInput"
+              class="upload-label"
+              class:upload-label-disabled={uploadingBase || uploadingMduBase}
+              style="background: linear-gradient(135deg, #0d9488 0%, #0891b2 100%); box-shadow: 0 4px 6px rgba(13, 148, 136, 0.3);"
+              title="Substitui a tabela condominios_mdu e geocodifica prédios sem lat/lng"
+            >
+              <span>{uploadingMduBase ? 'Atualizando base MDU...' : 'Atualizar base de dados MDU'}</span>
+              <input
+                type="file"
+                id="mduBaseFileInput"
+                accept=".xlsx,.xls"
+                on:change={(e) => handleMduBaseUpload(e)}
+                disabled={uploadingBase || uploadingMduBase}
                 style="display: none;"
               />
             </label>
@@ -2788,7 +2951,7 @@
               <button 
                 class="btn-delete-base" 
                 on:click={() => showDeleteBaseModal = true}
-                disabled={deletingBase || uploadingBase}
+                disabled={deletingBase || uploadingBase || uploadingMduBase}
                 title="Deletar todos os dados da base de dados CTO"
               >
                 🗑️ Deletar Base Atual
@@ -2800,18 +2963,18 @@
           <div style="margin-top: 1.5rem;">
             <button 
               on:click={handleCreateCoverage}
-              disabled={calculatingCoverage || uploadingBase || !baseDataExists}
+              disabled={calculatingCoverage || uploadingBase || uploadingMduBase || !baseDataExists}
               title={!baseDataExists ? 'É necessário carregar uma base de dados primeiro' : 'Criar nova mancha de cobertura baseada nas CTOs atuais'}
-              style="width: 100%; padding: 0.75rem; background: {calculatingCoverage || uploadingBase || !baseDataExists ? '#ccc' : 'linear-gradient(135deg, #7B68EE 0%, #6495ED 100%)'}; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: {calculatingCoverage || uploadingBase || !baseDataExists ? 'not-allowed' : 'pointer'}; transition: all 0.3s; box-shadow: {calculatingCoverage || uploadingBase || !baseDataExists ? 'none' : '0 4px 6px rgba(123, 104, 238, 0.3)'}; opacity: {calculatingCoverage || uploadingBase || !baseDataExists ? '0.6' : '1'};"
+              style="width: 100%; padding: 0.75rem; background: {calculatingCoverage || uploadingBase || uploadingMduBase || !baseDataExists ? '#ccc' : 'linear-gradient(135deg, #7B68EE 0%, #6495ED 100%)'}; color: white; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: {calculatingCoverage || uploadingBase || uploadingMduBase || !baseDataExists ? 'not-allowed' : 'pointer'}; transition: all 0.3s; box-shadow: {calculatingCoverage || uploadingBase || uploadingMduBase || !baseDataExists ? 'none' : '0 4px 6px rgba(123, 104, 238, 0.3)'}; opacity: {calculatingCoverage || uploadingBase || uploadingMduBase || !baseDataExists ? '0.6' : '1'};"
               on:mouseenter={(e) => {
-                if (!calculatingCoverage && !uploadingBase && baseDataExists) {
+                if (!calculatingCoverage && !uploadingBase && !uploadingMduBase && baseDataExists) {
                   e.currentTarget.style.transform = 'translateY(-2px)';
                   e.currentTarget.style.boxShadow = '0 6px 12px rgba(123, 104, 238, 0.4)';
                 }
               }}
               on:mouseleave={(e) => {
                 e.currentTarget.style.transform = 'translateY(0)';
-                e.currentTarget.style.boxShadow = calculatingCoverage || uploadingBase || !baseDataExists ? 'none' : '0 4px 6px rgba(123, 104, 238, 0.3)';
+                e.currentTarget.style.boxShadow = calculatingCoverage || uploadingBase || uploadingMduBase || !baseDataExists ? 'none' : '0 4px 6px rgba(123, 104, 238, 0.3)';
               }}
             >
               {#if calculatingCoverage}
@@ -2822,22 +2985,7 @@
             </button>
           </div>
           
-          {#if calculatingCoverage}
-            <div class="progress-container" style="margin-top: 1rem;">
-              <div class="progress-bar-wrapper">
-                <div class="progress-label">
-                  Calculando área de cobertura<span class="loading-dots">
-                    <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
-                  </span> {Math.round(uploadProgress.calculationPercent || 0)}%
-                </div>
-                <div class="progress-bar">
-                  <div class="progress-fill" style="width: {uploadProgress.calculationPercent || 0}%;"></div>
-                </div>
-              </div>
-            </div>
-          {/if}
-          
-          {#if coverageMessage && !calculatingCoverage}
+          {#if coverageMessage && !calculatingCoverage && !showBaseOpModal}
             <div class="upload-message" class:success={coverageSuccess} class:error={!coverageSuccess} style="margin-top: 1rem;">
               {coverageMessage}
             </div>
@@ -2879,22 +3027,7 @@
             </p>
           {/if}
           
-          {#if uploadingBase}
-            <div class="progress-container" style="margin-top: 1rem;">
-              <div class="progress-bar-wrapper">
-                <div class="progress-label">
-                  Carregando<span class="loading-dots">
-                    <span class="dot">.</span><span class="dot">.</span><span class="dot">.</span>
-                  </span> {Math.round(displayedPercent)}%
-                </div>
-                <div class="progress-bar">
-                  <div class="progress-fill" style="width: {displayedPercent}%;"></div>
-                </div>
-              </div>
-            </div>
-          {/if}
-
-          {#if uploadMessage && !uploadingBase}
+          {#if uploadMessage && !uploadingBase && !showBaseOpModal}
             <div class="upload-message" class:success={uploadSuccess} class:error={!uploadSuccess}>
               {@html uploadMessage}
             </div>
@@ -3294,6 +3427,27 @@
 {/if}
 
 
+{#if showBaseReadyReloadModal}
+  <div
+    class="base-ready-reload-overlay"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="config-base-ready-title"
+    tabindex="-1"
+  >
+    <div class="base-ready-reload-box" role="document">
+      <h3 id="config-base-ready-title">Base atualizada com sucesso</h3>
+      <p>
+        A base de CTOs e a mancha de cobertura foram publicadas. Atualize a página para
+        trabalhar com a nova base de dados.
+      </p>
+      <button type="button" class="base-ready-reload-btn" on:click={forceReloadForNewBase}>
+        Atualizar página
+      </button>
+    </div>
+  </div>
+{/if}
+
 <style>
   /* Tela de Configurações - Fullscreen */
   .settings-screen {
@@ -3431,90 +3585,6 @@
     border-bottom: 2px solid #7B68EE;
   }
 
-  .cluster-section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    margin-bottom: 1.5rem;
-    padding-bottom: 0.75rem;
-    border-bottom: 2px solid #7B68EE;
-  }
-
-  .cluster-section-header h3 {
-    margin: 0;
-    padding-bottom: 0;
-    border-bottom: none;
-    flex: 1;
-  }
-
-  .cluster-status-line {
-    margin: 0 0 0.75rem 0;
-    color: #444;
-    font-size: 0.95rem;
-  }
-
-  .cluster-badge {
-    display: inline-block;
-    padding: 0.15rem 0.5rem;
-    border-radius: 999px;
-    font-size: 0.8rem;
-    font-weight: 600;
-    margin-left: 0.35rem;
-  }
-
-  .cluster-badge-on { background: #d4edda; color: #155724; }
-  .cluster-badge-off { background: #f8d7da; color: #721c24; }
-  .cluster-badge-warn { background: #fff3cd; color: #856404; }
-
-  .cluster-mode-buttons {
-    margin-top: 0.25rem;
-  }
-
-  .cluster-mode-card {
-    width: 100%;
-    margin: 0;
-    padding: 0;
-    font-family: inherit;
-    text-align: left;
-    appearance: none;
-    -webkit-appearance: none;
-  }
-
-  .cluster-mode-card::before,
-  .cluster-mode-card.active::before {
-    display: none;
-  }
-
-  .cluster-mode-card:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
-    transform: none !important;
-    box-shadow: none !important;
-  }
-
-  .cluster-mode-card:disabled:hover {
-    border-color: #E2E8F0;
-    transform: none;
-  }
-
-  .cluster-message {
-    margin-top: 0.75rem;
-    font-size: 0.85rem;
-    padding: 0.6rem 0.75rem;
-    border-radius: 6px;
-  }
-
-  .cluster-message.success {
-    background: rgba(40, 167, 69, 0.1);
-    color: #155724;
-  }
-
-  .cluster-message.error {
-    background: rgba(220, 53, 69, 0.1);
-    color: #721c24;
-  }
-
   .cluster-switch-overlay {
     /* Clique fora não fecha — troca exige confirmação/cancelamento explícito */
     pointer-events: auto;
@@ -3526,14 +3596,6 @@
 
   .cluster-switch-modal .modal-body {
     min-height: auto;
-  }
-
-  .cluster-switch-warn {
-    color: #856404;
-    background: #fff3cd;
-    padding: 0.75rem 0.9rem;
-    border-radius: 6px;
-    font-size: 0.92rem;
   }
 
   .cluster-switch-status {
@@ -3572,140 +3634,16 @@
     min-width: 0;
   }
 
+  .mdu-progress-fill {
+    background: linear-gradient(135deg, #0d9488 0%, #0891b2 100%);
+  }
+
   .cluster-progress-label {
     margin: 0.5rem 0 0 0;
     text-align: center;
     font-weight: 600;
     color: #444;
     font-size: 0.95rem;
-  }
-
-  .info-icon {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 0;
-    margin: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 20px;
-    height: 20px;
-    opacity: 0.9;
-    transition: all 0.2s ease;
-    flex-shrink: 0;
-  }
-
-  .info-icon svg {
-    width: 100%;
-    height: 100%;
-    transition: all 0.2s ease;
-  }
-
-  .info-icon:hover {
-    opacity: 1;
-    transform: scale(1.1);
-  }
-
-  .info-icon:focus {
-    outline: 2px solid #7B68EE;
-    outline-offset: 2px;
-    border-radius: 50%;
-  }
-
-  .info-modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-    animation: clusterInfoFadeIn 0.2s ease;
-  }
-
-  @keyframes clusterInfoFadeIn {
-    from { opacity: 0; }
-    to { opacity: 1; }
-  }
-
-  .info-modal-box {
-    background: white;
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-    max-width: 500px;
-    width: 90%;
-    max-height: 90vh;
-    overflow-y: auto;
-    animation: clusterInfoSlideUp 0.3s ease;
-  }
-
-  @keyframes clusterInfoSlideUp {
-    from {
-      transform: translateY(20px);
-      opacity: 0;
-    }
-    to {
-      transform: translateY(0);
-      opacity: 1;
-    }
-  }
-
-  .info-modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 1.5rem;
-    border-bottom: 2px solid #7B68EE;
-    background: linear-gradient(135deg, #7B68EE 0%, #6495ED 100%);
-    color: white;
-  }
-
-  .info-modal-header h3 {
-    margin: 0;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: white;
-    border: none;
-    padding: 0;
-  }
-
-  .info-modal-close {
-    background: none;
-    border: none;
-    color: white;
-    font-size: 2rem;
-    cursor: pointer;
-    padding: 0;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    transition: background 0.3s;
-    line-height: 1;
-  }
-
-  .info-modal-close:hover {
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .info-modal-body {
-    padding: 1.5rem;
-    color: #333;
-    line-height: 1.6;
-  }
-
-  .info-modal-body p {
-    margin: 0 0 1rem 0;
-  }
-
-  .info-modal-body p:last-child {
-    margin-bottom: 0;
   }
 
   .empty-message {
@@ -4432,6 +4370,42 @@
     transform: translateY(0);
   }
 
+  .upload-label-disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
+  .base-upload-lock-banner {
+    margin-top: 0.85rem;
+    padding: 0.85rem 1rem;
+    border-radius: 10px;
+    border: 1px solid rgba(123, 104, 238, 0.35);
+    background: rgba(123, 104, 238, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .base-upload-lock-banner strong {
+    color: #4c3fb8;
+    font-size: 0.9rem;
+  }
+
+  .base-upload-lock-detail {
+    font-size: 0.82rem;
+    color: #555;
+  }
+
+  .base-upload-warning-banner {
+    border-color: rgba(185, 28, 28, 0.45);
+    background: rgba(185, 28, 28, 0.08);
+  }
+
+  .base-upload-warning-banner strong {
+    color: #b91c1c;
+  }
+
   .upload-hint {
     font-size: 0.875rem;
     color: #666;
@@ -4610,6 +4584,60 @@
     box-shadow: 
       0 0 0 3px rgba(244, 67, 54, 0.2),
       0 4px 6px rgba(244, 67, 54, 0.3);
+  }
+
+  .base-ready-reload-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    background: rgba(15, 23, 42, 0.72);
+    box-sizing: border-box;
+  }
+
+  .base-ready-reload-box {
+    width: min(420px, 100%);
+    background: #fff;
+    border-radius: 12px;
+    padding: 1.5rem 1.35rem 1.25rem;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    text-align: center;
+  }
+
+  .base-ready-reload-box h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .base-ready-reload-box p {
+    margin: 0 0 1.25rem;
+    font-size: 0.95rem;
+    line-height: 1.45;
+    color: #334155;
+  }
+
+  .base-ready-reload-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 180px;
+    padding: 0.75rem 1.25rem;
+    border: none;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .base-ready-reload-btn:hover {
+    filter: brightness(1.05);
   }
 </style>
 

@@ -1,20 +1,44 @@
 <script>
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import {
     analisarPortalCensupChamado,
     fetchPortalCensupChamadoById,
     fetchTabulacoesList
   } from './portalCensupApi.js';
   import { getApiUrl } from '../config.js';
+  import { theme } from '../themeStore.js';
 
   // Import dinâmico — evita ciclo com registry/Config no bundle principal
   let ViabilidadeAlares = null;
+  let viabilidadeRef = null;
 
   const MSG_SOURCE = 'censup-workbench';
   const PARENT_SOURCE = 'censup-extension';
 
+  $: isDarkUi = $theme === 'dark';
+
+  function applyUiTheme(next) {
+    const value = next === 'dark' ? 'dark' : 'light';
+    theme.set(value);
+    try {
+      document.documentElement.dataset.theme = value;
+      document.documentElement.classList.toggle('wb-theme-dark', value === 'dark');
+      document.body?.classList.toggle('wb-theme-dark', value === 'dark');
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function applyPreferredMapType(next) {
+    preferredMapType = next === 'satellite' ? 'satellite' : 'roadmap';
+  }
+
   let usuario = '';
   let chamadoId = '';
+  /** Layout compacto para o app mobile (`layout=mobile`). */
+  let layoutMobile = false;
+  /** Seed da Agenda (extensão) — usado para criar no Portal só ao finalizar. */
+  let workbenchSeed = null;
   let chamado = null;
   let loading = true;
   let error = '';
@@ -22,7 +46,540 @@
   let generating = false;
   let statusMsg = '';
   let tabulacoes = [];
+  /** Preferência da extensão: 'roadmap' | 'satellite' */
+  let preferredMapType = 'roadmap';
   let sugeridaOriginal = '';
+  /** true = usuário escolheu a tabulação no select; não sobrescrever com sugestão automática */
+  let tabulacaoUserOverride = false;
+  /** Se a localização falhou porque o mapa ainda não estava pronto, tenta de novo no MAP_READY */
+  let pendingLocateAfterMapReady = false;
+  let showInfoModal = false;
+  let equipamentos = [];
+  /** Box “Fora do Limite” (CTO > 250m) — espelho do oficial. */
+  let foraLimiteInfo = null;
+  let showInfoForaLimite = false;
+  /** Painel flutuante “Lista de equipamentos” sobre o mapa (botão acima dos prédios). */
+  let equipPanelOpen = false;
+  let equipPanelEl = null;
+  const EQUIP_PANEL_STORAGE_KEY = 'censupWbEquipPanel';
+  const savedEquipPanel = loadEquipPanelLayout();
+  /** Posição manual (px, relativa ao mapa); null = canto padrão ao lado dos botões. */
+  let equipPanelPos = savedEquipPanel.pos;
+  /** Tamanho escolhido pelo usuário (px); null = tamanho padrão do CSS. */
+  let equipPanelSize = savedEquipPanel.size;
+  let equipPanelDrag = null;
+  let equipPanelSaveTimer = null;
+
+  function loadEquipPanelLayout() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(EQUIP_PANEL_STORAGE_KEY) || 'null');
+      const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : null);
+      const w = num(raw?.w);
+      const h = num(raw?.h);
+      const left = num(raw?.left);
+      const top = num(raw?.top);
+      return {
+        size: w > 0 && h > 0 ? { w, h } : null,
+        pos: left != null && top != null ? { left, top } : null
+      };
+    } catch {
+      return { size: null, pos: null };
+    }
+  }
+
+  function saveEquipPanelLayout() {
+    if (equipPanelSaveTimer) clearTimeout(equipPanelSaveTimer);
+    equipPanelSaveTimer = setTimeout(() => {
+      try {
+        localStorage.setItem(
+          EQUIP_PANEL_STORAGE_KEY,
+          JSON.stringify({ ...(equipPanelSize || {}), ...(equipPanelPos || {}) })
+        );
+      } catch {
+        // ignore
+      }
+    }, 250);
+  }
+
+  /** Mantém tamanho/posição do painel: grava o redimensionamento e encaixa no mapa ao abrir. */
+  function equipPanelLayout(node) {
+    const pane = node.parentElement;
+    if (pane && equipPanelPos) {
+      const maxLeft = Math.max(0, pane.clientWidth - node.offsetWidth);
+      const maxTop = Math.max(0, pane.clientHeight - node.offsetHeight);
+      if (equipPanelPos.left > maxLeft || equipPanelPos.top > maxTop) {
+        equipPanelPos = {
+          left: Math.min(equipPanelPos.left, maxLeft),
+          top: Math.min(equipPanelPos.top, maxTop)
+        };
+      }
+    }
+    if (typeof ResizeObserver !== 'function') return {};
+    const ro = new ResizeObserver(() => {
+      const w = Math.round(node.offsetWidth);
+      const h = Math.round(node.offsetHeight);
+      if (!w || !h) return;
+      if (equipPanelSize && Math.abs(equipPanelSize.w - w) < 2 && Math.abs(equipPanelSize.h - h) < 2) return;
+      equipPanelSize = { w, h };
+      saveEquipPanelLayout();
+    });
+    ro.observe(node);
+    return {
+      destroy() {
+        ro.disconnect();
+      }
+    };
+  }
+  /** Coords da casinha (mapa) — evita re-geocode por texto ao sync do form. */
+  let pinCoords = null;
+  let reanaliseTimer = null;
+  let reanalyzing = false;
+  let mapPreviewImage = '';
+  let capturingMapPreview = false;
+  let locating = false;
+  let mapSearchError = '';
+
+  function requestMapResize(delayMs = 120) {
+    setTimeout(() => {
+      try {
+        window.dispatchEvent(new Event('resize'));
+      } catch {
+        // ignore
+      }
+    }, delayMs);
+  }
+
+  function onEquipamentosFromViabilidade(payload = {}) {
+    const next = Array.isArray(payload.items) ? payload.items : [];
+    const signature = (list) =>
+      list
+        .map((i) => `${i.ctoKey || i.nome}:${i.visible !== false ? 1 : 0}:${i.n}`)
+        .join('|');
+    const prevKey = signature(equipamentos);
+    const nextKey = signature(next);
+    if (prevKey === nextKey) return;
+    const sameSet =
+      equipamentos.map((i) => i.ctoKey || i.nome).join('|') ===
+      next.map((i) => i.ctoKey || i.nome).join('|');
+    equipamentos = next;
+    if (!sameSet) clearEquipSelection();
+  }
+
+  function onForaLimiteFromViabilidade(payload = {}) {
+    if (!payload?.active) {
+      if (foraLimiteInfo !== null) foraLimiteInfo = null;
+      showInfoForaLimite = false;
+      return;
+    }
+    foraLimiteInfo = {
+      nome: payload.nome || 'N/A',
+      distancia: Number(payload.distancia) || 0
+    };
+  }
+
+  /** 2.5 — tabulação automática acompanha o endereço atual no mapa */
+  function motivoAtual() {
+    return String(chamado?.motivo || workbenchSeed?.motivo || '').trim();
+  }
+
+  function onTabulacaoSugeridaFromMap(payload = {}) {
+    const tab = String(payload?.tabulacaoFinal || '').trim();
+    if (!tab) return;
+    // Sempre atualiza o texto de sugestão; a escolha manual no select prevalece
+    sugeridaOriginal = tab;
+    if (tabulacaoUserOverride) return;
+    form.tabulacaoFinal = tab;
+    form = form;
+  }
+
+  function applyTabulacaoFromMapNow() {
+    try {
+      if (typeof viabilidadeRef?.getWorkbenchTabulacaoSugerida !== 'function') return;
+      const suggestion = viabilidadeRef.getWorkbenchTabulacaoSugerida(motivoAtual());
+      if (suggestion?.tabulacaoFinal) {
+        onTabulacaoSugeridaFromMap(suggestion);
+      }
+    } catch (err) {
+      console.warn('[Workbench] applyTabulacaoFromMapNow:', err?.message || err);
+    }
+  }
+
+  function onTabulacaoManualChange() {
+    tabulacaoUserOverride = true;
+  }
+
+  function clearTabulacaoUserOverride() {
+    tabulacaoUserOverride = false;
+  }
+
+  function syncForaLimiteFromRef() {
+    try {
+      const info =
+        typeof viabilidadeRef?.getWorkbenchForaLimiteInfo === 'function'
+          ? viabilidadeRef.getWorkbenchForaLimiteInfo()
+          : null;
+      onForaLimiteFromViabilidade(info || { active: false });
+    } catch (err) {
+      console.warn('[Workbench] sync Fora do Limite:', err?.message || err);
+    }
+  }
+
+  function formatForaLimiteDistancia(metros) {
+    const d = Number(metros) || 0;
+    if (d >= 1000) return `${(d / 1000).toFixed(2)} km`;
+    return `${Math.round(d)} m`;
+  }
+
+  // ——— Seleção / cópia da tabela Equipamentos (igual ao oficial, só cols Nº…POP) ———
+  // Colunas: 0=checkbox, 1=Nº, 2=CTO, 3=Status, 4=Cidade, 5=POP
+  let equipSelectedCells = [];
+  let equipSelectedRows = [];
+  let equipSelectedColumns = [];
+  let equipSelectionStart = null;
+  $: equipAllVisible =
+    equipamentos.length > 0 && equipamentos.every((item) => item.visible !== false);
+  $: equipSomeVisible =
+    equipamentos.some((item) => item.visible !== false) && !equipAllVisible;
+
+  function equipCellKey(rowIndex, colIndex) {
+    return `${rowIndex}-${colIndex}`;
+  }
+
+  function clearEquipSelection() {
+    equipSelectedCells = [];
+    equipSelectedRows = [];
+    equipSelectedColumns = [];
+    equipSelectionStart = null;
+  }
+
+  function selectEquipCell(rowIndex, colIndex) {
+    equipSelectedCells = [equipCellKey(rowIndex, colIndex)];
+    equipSelectedRows = [];
+    equipSelectedColumns = [];
+    equipSelectionStart = { row: rowIndex, col: colIndex };
+  }
+
+  function selectEquipRow(rowIndex, addToSelection = false) {
+    if (!addToSelection) {
+      equipSelectedCells = [];
+      equipSelectedRows = [rowIndex];
+      equipSelectedColumns = [];
+    } else if (!equipSelectedRows.includes(rowIndex)) {
+      equipSelectedRows = [...equipSelectedRows, rowIndex];
+    }
+    equipSelectionStart = { row: rowIndex, col: 1 };
+  }
+
+  function selectEquipColumn(colIndex, addToSelection = false) {
+    if (!addToSelection) {
+      equipSelectedCells = [];
+      equipSelectedRows = [];
+      equipSelectedColumns = [colIndex];
+    } else if (!equipSelectedColumns.includes(colIndex)) {
+      equipSelectedColumns = [...equipSelectedColumns, colIndex];
+    }
+    equipSelectionStart = null;
+  }
+
+  function selectEquipRange(startRow, startCol, endRow, endCol) {
+    const minRow = Math.min(startRow, endRow);
+    const maxRow = Math.max(startRow, endRow);
+    const minCol = Math.min(startCol, endCol);
+    const maxCol = Math.max(startCol, endCol);
+    const next = [];
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = Math.max(1, minCol); col <= maxCol; col++) {
+        next.push(equipCellKey(row, col));
+      }
+    }
+    equipSelectedCells = next;
+    equipSelectedRows = [];
+    equipSelectedColumns = [];
+  }
+
+  function getEquipCellValue(item, colIndex) {
+    switch (colIndex) {
+      case 1:
+        return String(item?.n ?? '-');
+      case 2:
+        return String(item?.nome ?? '');
+      case 3:
+        return String(item?.status ?? '');
+      case 4:
+        return String(item?.cidade ?? '');
+      case 5:
+        return String(item?.pop ?? '');
+      default:
+        return '';
+    }
+  }
+
+  function handleEquipCellClick(event, rowIndex, colIndex) {
+    if (colIndex === 0) return;
+    if (
+      event.target?.tagName === 'INPUT' ||
+      event.target?.type === 'checkbox' ||
+      event.target?.closest?.('input[type="checkbox"]')
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    // Clique na coluna Nº seleciona a linha inteira (como “cabeçalho de linha”)
+    if (colIndex === 1 && !event.shiftKey) {
+      selectEquipRow(rowIndex, event.ctrlKey || event.metaKey);
+      return;
+    }
+
+    if (event.shiftKey && equipSelectionStart) {
+      selectEquipRange(
+        equipSelectionStart.row,
+        equipSelectionStart.col,
+        rowIndex,
+        colIndex
+      );
+    } else if (event.ctrlKey || event.metaKey) {
+      const key = equipCellKey(rowIndex, colIndex);
+      equipSelectedRows = [];
+      equipSelectedColumns = [];
+      equipSelectedCells = equipSelectedCells.includes(key)
+        ? equipSelectedCells.filter((k) => k !== key)
+        : [...equipSelectedCells, key];
+      equipSelectionStart = { row: rowIndex, col: colIndex };
+    } else {
+      selectEquipCell(rowIndex, colIndex);
+    }
+  }
+
+  function handleEquipColumnHeaderClick(event, colIndex) {
+    if (colIndex === 0) return;
+    if (
+      event.target?.tagName === 'INPUT' ||
+      event.target?.type === 'checkbox' ||
+      event.target?.closest?.('input[type="checkbox"]')
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (event.ctrlKey || event.metaKey) {
+      equipSelectedCells = [];
+      equipSelectedRows = [];
+      if (equipSelectedColumns.includes(colIndex)) {
+        equipSelectedColumns = equipSelectedColumns.filter((c) => c !== colIndex);
+      } else {
+        equipSelectedColumns = [...equipSelectedColumns, colIndex];
+      }
+    } else {
+      selectEquipColumn(colIndex, false);
+    }
+  }
+
+  function preventEquipTextSelection(event) {
+    if (
+      event.target?.tagName === 'INPUT' ||
+      event.target?.tagName === 'TEXTAREA' ||
+      event.target?.closest?.('input') ||
+      event.target?.closest?.('textarea')
+    ) {
+      return;
+    }
+    if (event.target?.closest?.('.wb-equip-table')) {
+      event.preventDefault();
+    }
+  }
+
+  function handleEquipDocumentClick(event) {
+    if (!event.target?.closest?.('.wb-equip-table')) {
+      clearEquipSelection();
+    }
+  }
+
+  async function copyEquipSelectionToClipboard() {
+    if (
+      !equipSelectedCells.length &&
+      !equipSelectedRows.length &&
+      !equipSelectedColumns.length
+    ) {
+      return;
+    }
+    let textToCopy = '';
+    if (equipSelectedColumns.length) {
+      const cols = [...equipSelectedColumns].filter((c) => c >= 1).sort((a, b) => a - b);
+      for (let r = 0; r < equipamentos.length; r++) {
+        textToCopy += cols.map((c) => getEquipCellValue(equipamentos[r], c)).join('\t') + '\n';
+      }
+    } else if (equipSelectedRows.length) {
+      const rows = [...equipSelectedRows].sort((a, b) => a - b);
+      for (const r of rows) {
+        const item = equipamentos[r];
+        if (!item) continue;
+        textToCopy += [1, 2, 3, 4, 5].map((c) => getEquipCellValue(item, c)).join('\t') + '\n';
+      }
+    } else {
+      const cellsByRow = {};
+      equipSelectedCells.forEach((cellKey) => {
+        const [row, col] = String(cellKey).split('-').map(Number);
+        if (!Number.isFinite(row) || !Number.isFinite(col) || col < 1) return;
+        if (!cellsByRow[row]) cellsByRow[row] = {};
+        if (equipamentos[row]) {
+          cellsByRow[row][col] = getEquipCellValue(equipamentos[row], col);
+        }
+      });
+      const sortedRows = Object.keys(cellsByRow)
+        .map(Number)
+        .sort((a, b) => a - b);
+      const allColumns = new Set();
+      sortedRows.forEach((row) => {
+        Object.keys(cellsByRow[row]).forEach((col) => allColumns.add(Number(col)));
+      });
+      const sortedColumns = [...allColumns].sort((a, b) => a - b);
+      sortedRows.forEach((rowIndex) => {
+        textToCopy +=
+          sortedColumns.map((colIndex) => cellsByRow[rowIndex][colIndex] || '').join('\t') +
+          '\n';
+      });
+    }
+    const text = textToCopy.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      try {
+        document.execCommand('copy');
+      } catch {
+        /* ignore */
+      }
+      ta.remove();
+    }
+  }
+
+  function onEquipCopyKeydown(event) {
+    if (!(event.ctrlKey || event.metaKey) || (event.key !== 'c' && event.key !== 'C')) return;
+    if (
+      !equipSelectedCells.length &&
+      !equipSelectedRows.length &&
+      !equipSelectedColumns.length
+    ) {
+      return;
+    }
+    const active = document.activeElement;
+    const isInput =
+      active?.tagName === 'INPUT' ||
+      active?.tagName === 'TEXTAREA' ||
+      active?.contentEditable === 'true';
+    if (isInput) return;
+    event.preventDefault();
+    event.stopPropagation();
+    copyEquipSelectionToClipboard();
+  }
+
+  async function toggleEquipVisible(item, checked) {
+    if (!item?.ctoKey || !viabilidadeRef) return;
+    // Feedback imediato na tabela (mapa atualiza em seguida)
+    const nextVisible = !!checked;
+    let num = 0;
+    equipamentos = equipamentos.map((e) => {
+      if (e.ctoKey === item.ctoKey) {
+        return { ...e, visible: nextVisible, n: nextVisible ? e.n : '-' };
+      }
+      return e;
+    });
+    equipamentos = equipamentos.map((e) => {
+      if (e.visible === false) return { ...e, n: '-' };
+      num += 1;
+      return { ...e, n: num };
+    });
+    try {
+      await viabilidadeRef.setWorkbenchCtoVisible?.(item.ctoKey, nextVisible);
+    } catch (err) {
+      console.warn('[Workbench] toggle CTO:', err?.message || err);
+    }
+  }
+
+  async function toggleAllEquipVisible(checked) {
+    if (!viabilidadeRef) return;
+    const on = !!checked;
+    let num = 0;
+    equipamentos = equipamentos.map((e) => {
+      if (!on) return { ...e, visible: false, n: '-' };
+      num += 1;
+      return { ...e, visible: true, n: num };
+    });
+    try {
+      await viabilidadeRef.setAllWorkbenchCtosVisible?.(on);
+    } catch (err) {
+      console.warn('[Workbench] toggle all CTO:', err?.message || err);
+    }
+  }
+
+  function toggleEquipPanel() {
+    equipPanelOpen = !equipPanelOpen;
+    if (!equipPanelOpen) clearEquipSelection();
+  }
+
+  function closeEquipPanel() {
+    equipPanelOpen = false;
+    clearEquipSelection();
+  }
+
+  /** Arrasta o painel pelo cabeçalho, sempre dentro da área do mapa. */
+  function startEquipPanelDrag(e) {
+    if (e.button != null && e.button !== 0) return;
+    if (e.target?.closest?.('button')) return;
+    const pane = equipPanelEl?.parentElement;
+    if (!equipPanelEl || !pane) return;
+    e.preventDefault();
+    const paneRect = pane.getBoundingClientRect();
+    const rect = equipPanelEl.getBoundingClientRect();
+    equipPanelDrag = {
+      pointerId: e.pointerId,
+      offsetX: e.clientX - rect.left,
+      offsetY: e.clientY - rect.top,
+      paneRect
+    };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+  }
+
+  function onEquipPanelDragMove(e) {
+    if (!equipPanelDrag || e.pointerId !== equipPanelDrag.pointerId || !equipPanelEl) return;
+    const { paneRect, offsetX, offsetY } = equipPanelDrag;
+    const w = equipPanelEl.offsetWidth;
+    const h = equipPanelEl.offsetHeight;
+    const left = Math.max(0, Math.min(paneRect.width - w, e.clientX - paneRect.left - offsetX));
+    const top = Math.max(0, Math.min(paneRect.height - h, e.clientY - paneRect.top - offsetY));
+    equipPanelPos = { left: Math.round(left), top: Math.round(top) };
+  }
+
+  function endEquipPanelDrag(e) {
+    if (!equipPanelDrag || (e?.pointerId != null && e.pointerId !== equipPanelDrag.pointerId)) return;
+    equipPanelDrag = null;
+    saveEquipPanelLayout();
+  }
+
+  $: equipPanelStyle = [
+    equipPanelPos
+      ? `left:${equipPanelPos.left}px;top:${equipPanelPos.top}px;right:auto;bottom:auto`
+      : '',
+    equipPanelSize ? `width:${equipPanelSize.w}px;height:${equipPanelSize.h}px` : ''
+  ]
+    .filter(Boolean)
+    .join(';');
 
   let form = {
     numeroALA: '',
@@ -30,19 +587,424 @@
     enderecoCompleto: '',
     numeroEndereco: '',
     cep: '',
+    coordenadas: '',
     tabulacaoFinal: '',
     projetista: ''
   };
+  /** true após endereço/CEP vindos do pin do mapa — não sobrescrever com Agenda */
+  let addressFromMap = false;
 
-  $: mapLat = chamado?.localizacao?.lat ?? chamado?.mapaCoords?.lat ?? null;
-  $: mapLng = chamado?.localizacao?.lng ?? chamado?.mapaCoords?.lng ?? null;
   $: mapAddress = form.enderecoCompleto || chamado?.endereco?.completo || '';
+  // Digitar endereço NÃO altera coords do mapa — só Localizar / casinha / sync do chamado
+  $: mapLat =
+    pinCoords?.lat ?? chamado?.localizacao?.lat ?? chamado?.mapaCoords?.lat ?? null;
+  $: mapLng =
+    pinCoords?.lng ?? chamado?.localizacao?.lng ?? chamado?.mapaCoords?.lng ?? null;
+
+  function formatCoords(lat, lng) {
+    if (lat == null || lng == null || Number.isNaN(Number(lat)) || Number.isNaN(Number(lng))) {
+      return '';
+    }
+    return `${Number(lat).toFixed(6)}, ${Number(lng).toFixed(6)}`;
+  }
+
+  /** CEP da Agenda às vezes vem concatenado com o pedido; mantém só 8 dígitos. */
+  function normalizeCep(cep) {
+    const digits = String(cep || '').replace(/\D/g, '');
+    if (!digits) return '';
+    return digits.length > 8 ? digits.slice(0, 8) : digits;
+  }
+
+  function applyMapAddressToForm(address = {}) {
+    if (!address || typeof address !== 'object') return;
+    let changed = false;
+    if (address.enderecoCompleto) {
+      form.enderecoCompleto = address.enderecoCompleto;
+      changed = true;
+    }
+    if (address.cidade) {
+      form.cidade = address.cidade;
+      changed = true;
+    }
+    if (address.numero) {
+      form.numeroEndereco = address.numero;
+      changed = true;
+    }
+    if (address.cep) {
+      form.cep = normalizeCep(address.cep);
+      changed = true;
+    }
+    if (changed) {
+      addressFromMap = true;
+      form = form;
+    }
+  }
+
+  function coordsFromChamado(item) {
+    const lat = item?.localizacao?.lat ?? item?.mapaCoords?.lat ?? null;
+    const lng = item?.localizacao?.lng ?? item?.mapaCoords?.lng ?? null;
+    if (lat == null || lng == null) return null;
+    return { lat: Number(lat), lng: Number(lng) };
+  }
 
   function postToParent(type, payload = {}) {
     try {
       window.parent?.postMessage({ source: MSG_SOURCE, type, ...payload }, '*');
     } catch {
       // ignore
+    }
+  }
+
+  /** Pede à extensão o Tempo da Análise (cronômetro do detalhe). */
+  function requestAnaliseDuracaoFromParent(timeoutMs = 5000) {
+    const requestId = `ad_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (payload) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(payload || null);
+      };
+      const onMsg = (event) => {
+        const data = event?.data;
+        if (!data || data.source !== PARENT_SOURCE) return;
+        if (data.type !== 'ANALISE_DURACAO_RESULT') return;
+        if (String(data.requestId || '') !== requestId) return;
+        finish(data);
+      };
+      const timer = window.setTimeout(() => finish(null), timeoutMs);
+      window.addEventListener('message', onMsg);
+      const pedidoHint = String(form?.numeroALA || workbenchSeed?.pedido || chamadoId || '')
+        .replace(/\D/g, '')
+        .trim();
+      postToParent('REQUEST_ANALISE_DURACAO', { requestId, pedido: pedidoHint });
+    });
+  }
+
+  /**
+   * Pede à extensão que prepare pastas SharePoint (mês/dia) e espera a resposta.
+   * @returns {Promise<{ ok?: boolean, cancelled?: boolean, skipped?: boolean, error?: string }>}
+   */
+  function requestSharePointBackupEnsure(timeoutMs = 180000) {
+    const requestId = `spb_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (payload) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        window.removeEventListener('message', onMsg);
+        resolve(payload || { ok: false, error: 'Sem resposta da extensão' });
+      };
+      const onMsg = (event) => {
+        const data = event?.data;
+        if (!data || data.source !== PARENT_SOURCE) return;
+        if (data.type !== 'REPORT_BACKUP_ENSURE_RESULT') return;
+        if (String(data.requestId || '') !== requestId) return;
+        finish(data);
+      };
+      const timer = window.setTimeout(() => {
+        finish({
+          ok: false,
+          error:
+            'Extensão não respondeu ao preparar pastas. Instale a v0.5.142+, recarregue a Agenda e use «Testar pastas» em Backup Relatórios.'
+        });
+      }, timeoutMs);
+      window.addEventListener('message', onMsg);
+      postToParent('REPORT_BACKUP_ENSURE', { requestId });
+    });
+  }
+
+  /** Envia PDF em base64 (partes) para a extensão — mais leve que HTML com mapa. */
+  async function postSharePointBackupPdf({ pdfBase64, fileName, chamadoId, viAla }) {
+    const b64 = String(pdfBase64 || '');
+    if (!b64) return;
+    const transferId = `pdf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const CHUNK = 280_000;
+    let pdfName = String(fileName || 'VI ALA - relatório.pdf').trim();
+    if (/\.html?$/i.test(pdfName)) pdfName = pdfName.replace(/\.html?$/i, '.pdf');
+    else if (!/\.pdf$/i.test(pdfName)) pdfName = `${pdfName}.pdf`;
+
+    postToParent('REPORT_BACKUP_PDF_BEGIN', {
+      transferId,
+      totalLen: b64.length,
+      fileName: pdfName,
+      chamadoId: chamadoId || null,
+      viAla: viAla || null
+    });
+    for (let i = 0; i < b64.length; i += CHUNK) {
+      const chunk = b64.slice(i, i + CHUNK);
+      postToParent('REPORT_BACKUP_PDF_CHUNK', { transferId, chunk });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    postToParent('REPORT_BACKUP_PDF_END', { transferId, fileName: pdfName });
+  }
+
+  /** Envia HTML do relatório ao painel (caminho legado — preferir prévia + printToPDF). */
+  async function postSharePointBackupHtml({ htmlContent, fileName, chamadoId, viAla }) {
+    const html = String(htmlContent || '');
+    if (!html) return;
+    const transferId = `html_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const CHUNK = 500_000;
+    let htmlName = String(fileName || 'VI ALA - relatório.html').trim();
+    if (/\.pdf$/i.test(htmlName)) htmlName = htmlName.replace(/\.pdf$/i, '.html');
+    else if (!/\.html?$/i.test(htmlName)) htmlName = `${htmlName}.html`;
+
+    postToParent('REPORT_BACKUP_HTML_BEGIN', {
+      transferId,
+      totalLen: html.length,
+      fileName: htmlName,
+      chamadoId: chamadoId || null,
+      viAla: viAla || null
+    });
+    for (let i = 0; i < html.length; i += CHUNK) {
+      const chunk = html.slice(i, i + CHUNK);
+      postToParent('REPORT_BACKUP_HTML_CHUNK', { transferId, chunk });
+      if (i > 0 && i % (CHUNK * 4) === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+    postToParent('REPORT_BACKUP_HTML_END', { transferId, fileName: htmlName });
+  }
+
+  /** Abas de prévia SharePoint (previewId → Window). */
+  const spPreviewWindows = new Map();
+  /** Metadados da pasta vindos do ENSURE (para o printToPDF). */
+  let lastSpEnsureMeta = null;
+
+  function buildSharePointPreviewHtml(reportHtml, { previewId, fileName, titleMarker }) {
+    const safeId = String(previewId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    const safeMarker = String(titleMarker || safeId).replace(/[<>]/g, '');
+    const titleText = safeMarker || String(fileName || 'relatorio').replace(/\.pdf$/i, '');
+    const previewIdJson = JSON.stringify(safeId);
+    const titleJson = JSON.stringify(titleText);
+    // Pop-up centralizado (sem tag script literal — quebra o parser do Svelte).
+    // Classe .censup-sp-bar: a extensão esconde esses elementos durante o printToPDF.
+    // Visibilidade via classe (não style inline): a extensão restaura com style.display=''.
+    const bar = [
+      '<style>',
+      '.censup-sp-overlay{position:fixed;inset:0;z-index:2147483646;display:flex;align-items:center;justify-content:center;background:rgba(15,23,42,.45);backdrop-filter:blur(2px);font-family:system-ui,"Segoe UI",Roboto,sans-serif}',
+      '.censup-sp-overlay.is-hidden{display:none}',
+      '.censup-sp-card{position:relative;width:min(440px,calc(100vw - 32px));background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(15,23,42,.35);overflow:hidden;animation:censupSpIn .22s ease-out}',
+      '@keyframes censupSpIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}',
+      '.censup-sp-head{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;padding:18px 48px 16px 22px}',
+      '.censup-sp-head .censup-sp-brand{font-size:11px;font-weight:700;letter-spacing:.12em;opacity:.85}',
+      '.censup-sp-head .censup-sp-title{font-size:17px;font-weight:700;margin-top:4px;line-height:1.3;word-break:break-word}',
+      '.censup-sp-close{position:absolute;top:12px;right:12px;width:30px;height:30px;border:0;border-radius:50%;background:rgba(255,255,255,.18);color:#fff;font-size:18px;line-height:30px;cursor:pointer;padding:0}',
+      '.censup-sp-close:hover{background:rgba(255,255,255,.32)}',
+      '.censup-sp-body{padding:22px;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center}',
+      '.censup-sp-icon{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:26px;font-weight:700;background:#ede9fe;color:#7c3aed}',
+      '.censup-sp-spinner{width:26px;height:26px;border:3px solid #c4b5fd;border-top-color:#7c3aed;border-radius:50%;animation:censupSpSpin .8s linear infinite}',
+      '@keyframes censupSpSpin{to{transform:rotate(360deg)}}',
+      '.censup-sp-overlay[data-state=ready] .censup-sp-icon,.censup-sp-overlay[data-state=done] .censup-sp-icon{background:#dcfce7;color:#16a34a}',
+      '.censup-sp-overlay[data-state=error] .censup-sp-icon{background:#fee2e2;color:#dc2626}',
+      '.censup-sp-status-wrap{font-size:14.5px;line-height:1.45;color:#334155;min-height:21px}',
+      '.censup-sp-overlay[data-state=error] .censup-sp-status-wrap{color:#b91c1c}',
+      '.censup-sp-dots{display:none}',
+      '.censup-sp-overlay[data-state=busy] .censup-sp-dots{display:inline}',
+      '.censup-sp-dots span{display:inline-block;animation:censupSpDot 1.2s infinite ease-in-out;will-change:opacity,transform}',
+      '.censup-sp-dots span:nth-child(2){animation-delay:.2s}.censup-sp-dots span:nth-child(3){animation-delay:.4s}',
+      '@keyframes censupSpDot{0%,80%,100%{opacity:.2;transform:translateY(0)}40%{opacity:1;transform:translateY(-2px)}}',
+      '.censup-sp-actions{display:flex;gap:10px;width:100%;margin-top:4px}',
+      '.censup-sp-actions button{flex:1;border:0;border-radius:10px;padding:11px 14px;font:600 14px system-ui,"Segoe UI",sans-serif;cursor:pointer;transition:filter .15s,transform .05s}',
+      '.censup-sp-actions button:active{transform:translateY(1px)}',
+      '.censup-sp-actions button:disabled{opacity:.45;cursor:not-allowed}',
+      '#censup-sp-upload{background:linear-gradient(135deg,#7c3aed 0%,#6d28d9 100%);color:#fff}',
+      '#censup-sp-upload:not(:disabled):hover{filter:brightness(1.08)}',
+      '#censup-sp-print{background:#f1f5f9;color:#334155;border:1px solid #cbd5e1}',
+      '#censup-sp-print:hover{background:#e2e8f0}',
+      '.censup-sp-reopen{position:fixed;right:18px;bottom:18px;z-index:2147483646;display:none;border:0;border-radius:999px;padding:10px 16px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:#fff;font:600 13px system-ui,"Segoe UI",sans-serif;box-shadow:0 8px 24px rgba(15,23,42,.3);cursor:pointer}',
+      '.censup-sp-reopen.is-visible{display:block}',
+      '@media screen{.censup-sp-overlay{display:flex!important}.censup-sp-overlay.is-hidden{display:none!important}.censup-sp-reopen{display:none!important}.censup-sp-reopen.is-visible{display:block!important}}',
+      '@media print{.censup-sp-bar{display:none!important}}',
+      '</style>',
+      '<div class="censup-sp-bar censup-sp-overlay" id="censup-sp-bar" data-state="busy" role="dialog" aria-modal="true" aria-labelledby="censup-sp-title">',
+      '<div class="censup-sp-card">',
+      '<div class="censup-sp-head">',
+      '<div class="censup-sp-brand">CENSUP</div>',
+      '<div class="censup-sp-title" id="censup-sp-title"></div>',
+      '<button type="button" class="censup-sp-close" id="censup-sp-close" title="Fechar prévia" aria-label="Fechar prévia">&times;</button>',
+      '</div>',
+      '<div class="censup-sp-body">',
+      '<div class="censup-sp-icon" id="censup-sp-icon"><div class="censup-sp-spinner"></div></div>',
+      '<div class="censup-sp-status-wrap"><span class="censup-sp-status" id="censup-sp-status">Gerando PDF</span><span class="censup-sp-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span></div>',
+      '<div class="censup-sp-actions">',
+      '<button type="button" id="censup-sp-print">Imprimir / Salvar no PC</button>',
+      '<button type="button" id="censup-sp-upload" disabled>Enviar ao SharePoint</button>',
+      '</div>',
+      '</div>',
+      '</div>',
+      '</div>',
+      '<button type="button" class="censup-sp-bar censup-sp-reopen" id="censup-sp-reopen">Opções do PDF</button>',
+      '<scr' + 'ipt>',
+      '(function(){',
+      'var previewId=' + previewIdJson + ';',
+      'var overlay=document.getElementById("censup-sp-bar");',
+      'var statusEl=document.getElementById("censup-sp-status");',
+      'var iconEl=document.getElementById("censup-sp-icon");',
+      'var uploadBtn=document.getElementById("censup-sp-upload");',
+      'var printBtn=document.getElementById("censup-sp-print");',
+      'var closeBtn=document.getElementById("censup-sp-close");',
+      'var reopenBtn=document.getElementById("censup-sp-reopen");',
+      'var titleEl=document.getElementById("censup-sp-title");',
+      'if(titleEl)titleEl.textContent=' + titleJson + ';',
+      'var forcedState="";var lastSetText=null;',
+      'function setIcon(state){if(!iconEl)return;if(state==="busy"){if(!iconEl.querySelector(".censup-sp-spinner"))iconEl.innerHTML="<div class=\\"censup-sp-spinner\\"></div>";}else{iconEl.textContent=state==="error"?"!":"\\u2713";}}',
+      'function syncState(){',
+      'if(!statusEl||!overlay)return;',
+      'var t=statusEl.textContent||"";',
+      'if(/\\u2026$/.test(t)){statusEl.textContent=t.replace(/\\s*\\u2026$/,"");return;}',
+      'var st=forcedState;',
+      'if(!st){if(/Gerando|Enviando|Preparando/i.test(t))st="busy";else if(/Salvo|salvo no SharePoint/i.test(t))st="done";else if(/pronto/i.test(t))st="ready";else if(/erro|falha|n\\u00e3o|sem permiss/i.test(t))st="error";else st="ready";}',
+      'overlay.setAttribute("data-state",st);setIcon(st);',
+      '}',
+      'if(statusEl&&window.MutationObserver){new MutationObserver(function(){if(statusEl.textContent!==lastSetText)forcedState="";syncState();}).observe(statusEl,{childList:true,characterData:true,subtree:true});}',
+      'function setStatus(msg,ready,state){forcedState=state||"";lastSetText=String(msg||"").replace(/\\s*\\u2026$/,"");if(uploadBtn)uploadBtn.disabled=!ready;if(statusEl)statusEl.textContent=lastSetText;syncState();}',
+      'function showPopup(){overlay.classList.remove("is-hidden");reopenBtn.classList.remove("is-visible");}',
+      'function hidePopup(){overlay.classList.add("is-hidden");reopenBtn.classList.add("is-visible");}',
+      'if(closeBtn)closeBtn.onclick=function(){try{window.close()}catch(e){}setTimeout(function(){if(!window.closed)hidePopup();},150);};',
+      'if(reopenBtn)reopenBtn.onclick=showPopup;',
+      'if(printBtn)printBtn.onclick=function(){try{window.print()}catch(e){}};',
+      'if(uploadBtn)uploadBtn.onclick=function(){',
+      'setStatus("Enviando ao SharePoint",false,"busy");',
+      'try{if(window.opener){window.opener.postMessage({source:"censup-sp-preview",type:"CENSUP_SP_UPLOAD_CLICK",previewId:previewId},"*");}}catch(e){}',
+      '};',
+      'window.addEventListener("message",function(ev){',
+      'var d=ev&&ev.data;if(!d||d.source!=="censup-workbench")return;',
+      'if(d.type!=="CENSUP_SP_STATUS"||String(d.previewId)!==previewId)return;',
+      'var phase=d.phase||"";',
+      'var st=phase==="generating"||phase==="uploading"?"busy":phase==="ready"?"ready":phase==="done"?"done":phase==="error"?"error":"";',
+      'setStatus(d.message||"",phase==="ready"||phase==="done",st);',
+      'if(phase==="done"&&uploadBtn){uploadBtn.textContent="Salvo no SharePoint";uploadBtn.disabled=true;}',
+      'if(phase==="error"&&uploadBtn)uploadBtn.disabled=false;',
+      'if(phase==="ready"||phase==="done"||phase==="error")showPopup();',
+      '});',
+      'syncState();',
+      'try{document.title=' + titleJson + ';}catch(e){}',
+      'try{if(window.opener){window.opener.postMessage({source:"censup-sp-preview",type:"CENSUP_SP_PREVIEW_READY",previewId:previewId},"*");}}catch(e){}',
+      '})();',
+      '</scr' + 'ipt>'
+    ].join('\n');
+    const html = String(reportHtml || '');
+    if (/<\/body>/i.test(html)) {
+      return html.replace(/<\/body>/i, `${bar}</body>`);
+    }
+    return `${html}${bar}`;
+  }
+
+  function ensurePreviewTitleMarker(html, titleMarker) {
+    const marker = String(titleMarker || '').replace(/[<>]/g, '');
+    const titleTag = `<title>${marker}</title>`;
+    const raw = String(html || '');
+    if (/<title[^>]*>[\s\S]*?<\/title>/i.test(raw)) {
+      return raw.replace(/<title[^>]*>[\s\S]*?<\/title>/i, titleTag);
+    }
+    if (/<head[^>]*>/i.test(raw)) {
+      return raw.replace(/<head[^>]*>/i, (m) => `${m}\n${titleTag}`);
+    }
+    return `${titleTag}${raw}`;
+  }
+
+  function openSharePointPreview(reportHtml, { fileName, ensureMeta = null, autoPrepare = true } = {}) {
+    const previewId = `sp${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    let pdfName = String(fileName || 'VI ALA - relatório.pdf').trim();
+    if (/\.html?$/i.test(pdfName)) pdfName = pdfName.replace(/\.html?$/i, '.pdf');
+    else if (!/\.pdf$/i.test(pdfName)) pdfName = `${pdfName}.pdf`;
+    // Nome da aba = nome do arquivo (ex.: VI ALA - 0019936 - ALA-1755914 - Engenharia).
+    // A extensão acha a aba por esse título + aba que abriu a prévia (Agenda).
+    const titleMarker = pdfName.replace(/\.pdf$/i, '').replace(/[<>]/g, '').trim() || `CENSUP:${previewId}`;
+
+    let fullHtml = buildSharePointPreviewHtml(reportHtml, {
+      previewId,
+      fileName: pdfName,
+      titleMarker
+    });
+    fullHtml = ensurePreviewTitleMarker(fullHtml, titleMarker);
+
+    // Mesmo caminho do Gerar PDF (about:blank + write) — blob: atrapalha o debugger/printToPDF
+    const win = window.open('about:blank', '_blank');
+    if (!win) {
+      throw new Error('Pop-up bloqueado. Permita pop-ups para abrir a prévia do PDF.');
+    }
+    try {
+      win.document.open();
+      win.document.write(fullHtml);
+      win.document.close();
+      try {
+        win.document.title = titleMarker;
+      } catch {
+        /* ignore */
+      }
+    } catch (err) {
+      try {
+        win.close();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(err?.message || 'Falha ao abrir a prévia do PDF.');
+    }
+    spPreviewWindows.set(previewId, win);
+
+    const requestPrepare = (metaOverride = null) => {
+      const meta = metaOverride || ensureMeta || lastSpEnsureMeta || {};
+      postToParent('REPORT_PREVIEW_PREPARE', {
+        previewId,
+        titleMarker,
+        fileName: pdfName,
+        webUrl: meta.webUrl || '',
+        dayServerRelativeUrl: meta.dayServerRelativeUrl || '',
+        folderUrl: meta.folderUrl || ''
+      });
+    };
+
+    if (autoPrepare) {
+      setTimeout(() => requestPrepare(), 300);
+    }
+
+    return { previewId, fileName: pdfName, titleMarker, win, requestPrepare };
+  }
+
+  function notifySpPreview(previewId, payload) {
+    const win = spPreviewWindows.get(previewId);
+    if (!win || win.closed) return;
+    try {
+      win.postMessage(
+        { source: MSG_SOURCE, type: 'CENSUP_SP_STATUS', previewId, ...payload },
+        '*'
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function measureMapOverlayContactMinWidth() {
+    try {
+      const pane = document.querySelector('.wb-map-pane');
+      const mapType = document.querySelector('.wb-map-type');
+      const search = document.querySelector('.wb-map-search-box');
+      if (!pane || !mapType) return 0;
+      const paneRect = pane.getBoundingClientRect();
+      const typeRect = mapType.getBoundingClientRect();
+      if (!paneRect.width || !typeRect.width) return 0;
+      const leftOccupied = Math.max(0, typeRect.right - paneRect.left);
+      // Preferir largura real do box (não cortar Gerar Relatório)
+      const searchW = search
+        ? Math.max(260, Math.ceil(search.scrollWidth || search.getBoundingClientRect().width || 0))
+        : 260;
+      const GAP = 8;
+      const RIGHT_MARGIN = 10;
+      return Math.ceil(leftOccupied + GAP + searchW + RIGHT_MARGIN);
+    } catch {
+      return 0;
+    }
+  }
+
+  function reportMapMinWidthToParent() {
+    const w = measureMapOverlayContactMinWidth();
+    if (w >= 300) {
+      postToParent('MAP_MIN_WIDTH', { width: w });
     }
   }
 
@@ -55,47 +1017,386 @@
 
   function fillFormFromChamado(item) {
     const end = item?.endereco || {};
-    form = {
+    const coords = coordsFromChamado(item);
+    const keepTabFromMap =
+      tabulacaoUserOverride ||
+      (!!sugeridaOriginal &&
+        !!form.tabulacaoFinal &&
+        form.tabulacaoFinal === sugeridaOriginal);
+    const rawCompleto = String(end.completo || '').trim();
+    const completoOk =
+      rawCompleto &&
+      !/\?{2,}/.test(rawCompleto) &&
+      !/endere[cç]o\s*\?+/i.test(rawCompleto)
+        ? rawCompleto
+        : '';
+    // Não sobrescrever endereço bom do seed/mapa com placeholder da API
+    const enderecoCompleto =
+      completoOk ||
+      (form.enderecoCompleto && !/\?{2,}/.test(form.enderecoCompleto)
+        ? form.enderecoCompleto
+        : '');
+    const next = {
       numeroALA: String(item?.pedido || '').replace(/\D/g, ''),
-      cidade: end.cidade || item?.cidade || '',
-      enderecoCompleto: end.completo || '',
-      numeroEndereco: end.numero || '',
-      cep: end.cep || '',
-      tabulacaoFinal: item?.tabulacaoFinal || '',
-      projetista: usuario || item?.viabilidadeResumo?.projetista || ''
+      cidade: end.cidade || item?.cidade || form.cidade || '',
+      enderecoCompleto,
+      numeroEndereco: end.numero || form.numeroEndereco || '',
+      cep: normalizeCep(end.cep || form.cep),
+      coordenadas: coords ? formatCoords(coords.lat, coords.lng) : form.coordenadas || '',
+      tabulacaoFinal: keepTabFromMap
+        ? form.tabulacaoFinal
+        : item?.tabulacaoFinal || form.tabulacaoFinal || '',
+      projetista: String(usuario || '').trim() || item?.viabilidadeResumo?.projetista || ''
     };
-    sugeridaOriginal = item?.tabulacaoFinal || item?.analiseIa?.tabulacaoSugerida || '';
+    // Se o mapa já resolveu o endereço do pin, não voltar para o texto da Agenda/busca
+    if (addressFromMap) {
+      next.enderecoCompleto = form.enderecoCompleto || next.enderecoCompleto;
+      next.cidade = form.cidade || next.cidade;
+      next.numeroEndereco = form.numeroEndereco || next.numeroEndereco;
+      next.cep = form.cep || next.cep;
+      next.coordenadas = form.coordenadas || next.coordenadas;
+    }
+    form = next;
+    if (coords) {
+      const same =
+        pinCoords &&
+        Math.abs(Number(pinCoords.lat) - Number(coords.lat)) < 1e-6 &&
+        Math.abs(Number(pinCoords.lng) - Number(coords.lng)) < 1e-6;
+      if (!same) pinCoords = coords;
+    }
+    // Não sobrescrever sugestão do mapa com a do backend (ex.: Complemento → Externo)
+    if (!sugeridaOriginal) {
+      sugeridaOriginal = item?.analiseIa?.tabulacaoSugerida || item?.tabulacaoFinal || '';
+    }
+    ensureProjetistaFromLogin();
   }
 
-  async function loadChamado(id) {
+  /** Projetista = usuário do login da extensão (campo da tela de entrada). */
+  function ensureProjetistaFromLogin() {
+    const name = String(usuario || '').trim();
+    if (!name) return;
+    if (form.projetista !== name) {
+      form.projetista = name;
+      form = form;
+    }
+  }
+
+  /** Digitar no overlay só altera o texto — pesquisa só no botão Localizar. */
+  function onEnderecoManualInput() {
+    if (mapSearchError) mapSearchError = '';
+    // no-op intencional (mantém pin/coords até Localizar ou casinha)
+  }
+
+  async function localizarNoMapa() {
+    const endereco = (form.enderecoCompleto || '').trim();
+    mapSearchError = '';
+    // Erro no box só quando clica Localizar com campo vazio
+    if (!endereco) {
+      mapSearchError = 'Informe um endereço para localizar.';
+      return;
+    }
+
+    // Aguarda o mapa ficar pronto (duplo clique às vezes chega antes do iframe)
+    const mapReady = await waitForViabilidadeMap(8000);
+    if (!mapReady || typeof viabilidadeRef.searchWorkbenchAddress !== 'function') {
+      pendingLocateAfterMapReady = true;
+      error = 'Mapa ainda carregando. Aguarde e tente de novo.';
+      return;
+    }
+    pendingLocateAfterMapReady = false;
+    locating = true;
+    error = '';
+    statusMsg = 'Localizando endereço no mapa…';
+    // Libera pin antigo para a busca por texto valer
+    pinCoords = null;
+    mapPreviewImage = '';
+    capturingMapPreview = false;
+    try {
+      const found = await viabilidadeRef.searchWorkbenchAddress(endereco);
+      // Campo do overlay/relatório = endereço encontrado no pin, não o texto digitado na busca
+      if (found) {
+        applyMapAddressToForm(found);
+      } else if (typeof viabilidadeRef.syncWorkbenchAddressFromMap === 'function') {
+        applyMapAddressToForm(await viabilidadeRef.syncWorkbenchAddressFromMap());
+      }
+      await tick();
+      syncForaLimiteFromRef();
+      // Rotas podem atualizar a distância um pouco depois
+      setTimeout(() => syncForaLimiteFromRef(), 800);
+      setTimeout(() => syncForaLimiteFromRef(), 2000);
+      // 2.5 — tabulação automática após localizar (endereço atual)
+      setTimeout(() => applyTabulacaoFromMapNow(), 900);
+      setTimeout(() => applyTabulacaoFromMapNow(), 2200);
+      statusMsg = 'Endereço localizado no mapa';
+    } catch (err) {
+      const msg = err?.message || String(err);
+      // Mapa ainda inicializando → reagenda
+      if (/aguarde o mapa|mapa carregar|não está disponível/i.test(msg)) {
+        pendingLocateAfterMapReady = true;
+      }
+      error = msg;
+      statusMsg = '';
+    } finally {
+      locating = false;
+    }
+  }
+
+  async function waitForViabilidadeMap(timeoutMs = 8000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (viabilidadeRef && typeof viabilidadeRef.searchWorkbenchAddress === 'function') {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return !!(viabilidadeRef && typeof viabilidadeRef.searchWorkbenchAddress === 'function');
+  }
+
+  function openInfoModal() {
+    error = '';
+    ensureProjetistaFromLogin();
+    showInfoModal = true;
+  }
+
+  function closeInfoModal() {
+    showInfoModal = false;
+  }
+
+  /**
+   * Recarrega tabulações da mesma fonte do oficial (API + lista da Viabilidade).
+   * Evita dropdown desatualizado na extensão após novas tabulações no Config.
+   */
+  async function refreshTabulacoesForReport() {
+    let list = [];
+
+    if (viabilidadeRef && typeof viabilidadeRef.refreshTabulacoesList === 'function') {
+      try {
+        list = await viabilidadeRef.refreshTabulacoesList();
+      } catch {
+        /* fallback abaixo */
+      }
+    }
+
+    if (!Array.isArray(list) || list.length === 0) {
+      try {
+        list = await fetchTabulacoesList();
+      } catch {
+        list = [];
+      }
+    }
+
+    if (Array.isArray(list) && list.length > 0) {
+      tabulacoes = list;
+    }
+  }
+
+  /**
+   * Igual openReportModal da Viabilidade: abre o formulário e captura a prévia do mapa.
+   * Usado pelo botão "Gerar Relatório" do overlay.
+   */
+  async function abrirRelatorioComPrint() {
+    if (!viabilidadeRef || typeof viabilidadeRef.refreshWorkbenchMapPreview !== 'function') {
+      error = 'Mapa ainda carregando. Localize um endereço e tente de novo.';
+      return;
+    }
+
+    error = '';
+    mapPreviewImage = '';
+    ensureProjetistaFromLogin();
+    // Tabulação automática sempre pela posição atual do endereço no mapa
+    applyTabulacaoFromMapNow();
+    // Atualiza opções do select antes de mostrar o modal
+    await refreshTabulacoesForReport();
+    showInfoModal = true;
+    capturingMapPreview = true;
+    statusMsg = 'Capturando prévia do mapa…';
+    await tick();
+    // Deixa o box do relatório pintar antes do ajuste do mapa (atrás do modal)
+    await new Promise((r) => setTimeout(r, 120));
+
+    try {
+      // Endereço Completo / CEP / nº = encontrados no pin do mapa (igual box do mapa)
+      if (typeof viabilidadeRef.syncWorkbenchAddressFromMap === 'function') {
+        const pinAddr = await viabilidadeRef.syncWorkbenchAddressFromMap();
+        if (pinAddr) {
+          applyMapAddressToForm(pinAddr);
+        }
+      }
+      ensureProjetistaFromLogin();
+      applyTabulacaoFromMapNow();
+
+      const preview = await viabilidadeRef.refreshWorkbenchMapPreview();
+      if (!preview) {
+        throw new Error(
+          'Não foi possível capturar a prévia do mapa. Localize o endereço no mapa e tente de novo.'
+        );
+      }
+      mapPreviewImage = preview;
+      statusMsg = 'Prévia do mapa capturada';
+    } catch (err) {
+      error = err?.message || String(err);
+      statusMsg = '';
+      mapPreviewImage = '';
+    } finally {
+      capturingMapPreview = false;
+      ensureProjetistaFromLogin();
+    }
+  }
+
+  /**
+   * Callback da Viabilidade (casinha): atualiza Informações + CEP do mapa + coords
+   * e reanalisa tabulação com as novas coordenadas.
+   */
+  function onClientLocationFromMap(payload = {}) {
+    const coords = payload.coords || {};
+    const address = payload.address || {};
+    const lat = Number(coords.lat);
+    const lng = Number(coords.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const same =
+      pinCoords &&
+      Math.abs(Number(pinCoords.lat) - lat) < 1e-6 &&
+      Math.abs(Number(pinCoords.lng) - lng) < 1e-6;
+    if (!same) {
+      pinCoords = { lat, lng };
+      form.coordenadas = formatCoords(lat, lng);
+    }
+    // Sempre aplica endereço do pin (mesmo se coords iguais) — corrige Agenda ≠ pin
+    applyMapAddressToForm(address);
+    scheduleReanaliseTabulacao();
+  }
+
+  function scheduleReanaliseTabulacao() {
+    if (!usuario || !pinCoords) return;
+    if (!chamadoId) {
+      // Sem Portal ainda: tabulação só pelo mapa local
+      applyTabulacaoFromMapNow();
+      return;
+    }
+    if (reanaliseTimer) clearTimeout(reanaliseTimer);
+    reanaliseTimer = setTimeout(() => {
+      void reanalisarTabulacaoAposCasinha();
+    }, 900);
+  }
+
+  async function reanalisarTabulacaoAposCasinha() {
+    if (!chamadoId || !usuario || !pinCoords) return;
+    reanalyzing = true;
+    statusMsg = 'Recalculando tabulação pela nova posição…';
+    try {
+      const analyzed = await analisarPortalCensupChamado(usuario, chamadoId, {
+        force: true,
+        lat: pinCoords.lat,
+        lng: pinCoords.lng,
+        endereco: {
+          completo: form.enderecoCompleto || undefined,
+          cidade: form.cidade || undefined,
+          numero: form.numeroEndereco || undefined,
+          cep: form.cep || undefined
+        }
+      });
+      if (analyzed?.chamado) {
+        chamado = analyzed.chamado;
+        // Mantém endereço/CEP/coords já vindos do mapa (não sobrescrever com Agenda)
+        const end = chamado.endereco || {};
+        if (!form.cep && end.cep) form.cep = end.cep;
+        form = form;
+      }
+      // Regras 2.1–2.4 pelo mapa (CTOs/cobertura/motivo) — só se o usuário não escolheu manualmente
+      applyTabulacaoFromMapNow();
+      if (!tabulacaoUserOverride && !form.tabulacaoFinal && analyzed?.chamado) {
+        const tab =
+          analyzed.chamado.tabulacaoFinal ||
+          analyzed.chamado.analiseIa?.tabulacaoSugerida ||
+          '';
+        if (tab) {
+          form.tabulacaoFinal = tab;
+          sugeridaOriginal = analyzed.chamado.analiseIa?.tabulacaoSugerida || tab;
+        }
+      }
+      // Se o mapa ainda não sugeriu, usa backend só como fallback de texto
+      if (!sugeridaOriginal && analyzed?.chamado?.analiseIa?.tabulacaoSugerida) {
+        sugeridaOriginal = analyzed.chamado.analiseIa.tabulacaoSugerida;
+      }
+      statusMsg = tabulacaoUserOverride
+        ? `Tabulação mantida (sua escolha): ${form.tabulacaoFinal || '—'}`
+        : form.tabulacaoFinal
+          ? `Tabulação automática: ${form.tabulacaoFinal}`
+          : 'Tabulação atualizada pela posição da casinha';
+    } catch (err) {
+      console.warn('[Workbench] Reanálise:', err?.message || err);
+      applyTabulacaoFromMapNow();
+      statusMsg = 'Posição atualizada (falha ao recalcular tabulação no servidor)';
+    } finally {
+      reanalyzing = false;
+    }
+  }
+
+  async function loadChamado(id, { preserveMap = false } = {}) {
     loading = true;
     error = '';
+    if (!preserveMap) {
+      pinCoords = null;
+      addressFromMap = false;
+      mapPreviewImage = '';
+      capturingMapPreview = false;
+    }
+    equipamentos = [];
     statusMsg = 'Carregando chamado…';
     try {
       chamado = await fetchPortalCensupChamadoById(usuario, id);
       fillFormFromChamado(chamado);
-      statusMsg = 'Analisando tabulação…';
-      try {
-        const analyzed = await analisarPortalCensupChamado(usuario, id, { force: false });
-        if (analyzed?.chamado) {
-          chamado = analyzed.chamado;
-          fillFormFromChamado(chamado);
+      loading = false;
+      statusMsg = form.coordenadas || pinCoords ? 'Posicionando mapa…' : 'Localizando endereço…';
+      requestMapResize(30);
+
+      // Posiciona na hora; tabulação em background (não bloqueia o mapa)
+      if (!pinCoords && (form.enderecoCompleto || '').trim()) {
+        void localizarNoMapa().catch((err) => {
+          console.warn('[Workbench] Localizar:', err?.message || err);
+        });
+      } else if (pinCoords) {
+        statusMsg = 'Endereço posicionado no mapa';
+        void ensureMapPositionedAfterReady();
+        setTimeout(() => syncForaLimiteFromRef(), 1200);
+        setTimeout(() => syncForaLimiteFromRef(), 3000);
+        setTimeout(() => applyTabulacaoFromMapNow(), 1500);
+      }
+
+      void (async () => {
+        try {
+          const analyzed = await analisarPortalCensupChamado(usuario, id, { force: false });
+          if (analyzed?.chamado) {
+            chamado = analyzed.chamado;
+            fillFormFromChamado(chamado);
+            requestMapResize(30);
+          }
+          if (!form.tabulacaoFinal && chamado?.tabulacaoFinal) {
+            form.tabulacaoFinal = chamado.tabulacaoFinal;
+          }
+          if (!sugeridaOriginal) {
+            sugeridaOriginal =
+              chamado?.analiseIa?.tabulacaoSugerida ||
+              chamado?.tabulacaoFinal ||
+              '';
+          }
+          if (!form.tabulacaoFinal && sugeridaOriginal) {
+            form.tabulacaoFinal = sugeridaOriginal;
+          }
+          // Mapa manda: Complemento → Externo (não fica preso em Com Portas do backend)
+          applyTabulacaoFromMapNow();
+          setTimeout(() => applyTabulacaoFromMapNow(), 1200);
+          setTimeout(() => applyTabulacaoFromMapNow(), 2800);
+          if (!statusMsg || /Posicionando|Localizando|Carregando/i.test(statusMsg)) {
+            statusMsg = 'Pronto para revisar';
+          }
+        } catch (analyzeErr) {
+          console.warn('[Workbench] Análise:', analyzeErr?.message || analyzeErr);
+          statusMsg = statusMsg || 'Pronto para revisar';
         }
-      } catch (analyzeErr) {
-        console.warn('[Workbench] Análise:', analyzeErr?.message || analyzeErr);
-      }
-      if (!form.tabulacaoFinal && chamado?.tabulacaoFinal) {
-        form.tabulacaoFinal = chamado.tabulacaoFinal;
-      }
-      sugeridaOriginal =
-        chamado?.analiseIa?.tabulacaoSugerida ||
-        chamado?.tabulacaoFinal ||
-        sugeridaOriginal ||
-        '';
-      if (!form.tabulacaoFinal && sugeridaOriginal) {
-        form.tabulacaoFinal = sugeridaOriginal;
-      }
-      statusMsg = 'Pronto para revisar';
+      })();
+
       postToParent('READY', { chamadoId: chamado.id, pedido: chamado.pedido });
     } catch (err) {
       error = err?.message || String(err);
@@ -106,21 +1407,179 @@
     }
   }
 
+  /** Evita reiniciar geocode/DROP quando a extensão reenvia o mesmo seed. */
+  let lastLocateKey = '';
+  let locateInFlightKey = '';
+
+  function buildLocateKey(pedido, endereco, coords) {
+    const p = String(pedido || '').replace(/\D/g, '');
+    const a = String(endereco || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    const lat = coords?.lat != null ? Number(coords.lat).toFixed(5) : '';
+    const lng = coords?.lng != null ? Number(coords.lng).toFixed(5) : '';
+    return `${p}|${a}|${lat},${lng}`;
+  }
+
+  function coordsFromSeed(seed) {
+    if (!seed) return null;
+    const c = seed.mapaCoords || seed.localizacao || null;
+    const lat = c?.lat ?? seed.lat ?? null;
+    const lng = c?.lng ?? seed.lng ?? null;
+    if (lat == null || lng == null || Number.isNaN(Number(lat)) || Number.isNaN(Number(lng))) {
+      return null;
+    }
+    return { lat: Number(lat), lng: Number(lng) };
+  }
+
   async function applyInitPayload(payload = {}) {
     usuario = String(payload.usuario || '').trim();
     chamadoId = String(payload.chamadoId || payload.id || '').trim();
+    workbenchSeed = payload.seed && typeof payload.seed === 'object' ? payload.seed : workbenchSeed;
+    clearTabulacaoUserOverride();
+    sugeridaOriginal = '';
+    ensureProjetistaFromLogin();
+
+    let positionedFromSeed = false;
 
     if (payload.seed) {
       const seed = payload.seed;
+      // Não limpa o mapa aqui — localizar/search substitui o pin (preserva DROP)
+
+      const enderecoTxtRaw = String(
+        seed.enderecoCompleto || seed.endereco?.completo || seed.endereco?.logradouro || ''
+      ).trim();
+      // Agenda mostra "????" no card do mapa — não geocodifica placeholder
+      const enderecoTxt =
+        !enderecoTxtRaw ||
+        /\?{2,}/.test(enderecoTxtRaw) ||
+        /endere[cç]o\s*\?+/i.test(enderecoTxtRaw)
+          ? ''
+          : enderecoTxtRaw;
+      let cidadeTxt = String(seed.cidade || seed.endereco?.cidade || '').trim();
+      // "EUNAPOLIS/BA" → cidade + UF
+      const cidadeUf = cidadeTxt.match(/^(.+?)\s*\/\s*([A-Za-z]{2})$/);
+      if (cidadeUf) cidadeTxt = cidadeUf[1].trim();
+      const bairroTxt = String(seed.bairro || seed.endereco?.bairro || '').trim();
+      // Monta query de geocode completa (rua + bairro + cidade) quando possível
+      let enderecoBusca = enderecoTxt;
+      if (enderecoBusca) {
+        const extras = [];
+        if (
+          bairroTxt &&
+          !/\?/.test(bairroTxt) &&
+          !enderecoBusca.toLowerCase().includes(bairroTxt.toLowerCase())
+        ) {
+          extras.push(bairroTxt);
+        }
+        if (
+          cidadeTxt &&
+          !enderecoBusca.toLowerCase().includes(cidadeTxt.toLowerCase())
+        ) {
+          extras.push(cidadeTxt);
+        }
+        if (extras.length) enderecoBusca = `${enderecoBusca}, ${extras.join(', ')}`;
+        if (!/,\s*brasil\b/i.test(enderecoBusca)) {
+          enderecoBusca = `${enderecoBusca}, Brasil`;
+        }
+      }
+
+      const nextPedido = String(seed.pedido || seed.numeroALA || '').replace(/\D/g, '');
+      const seedCoords = coordsFromSeed(seed);
+      const locateKey = buildLocateKey(nextPedido, enderecoBusca || enderecoTxt, seedCoords);
+      const hasLocatePayload = !!(enderecoBusca || enderecoTxt || seedCoords);
+
+      // Mesmo pedido/endereço já localizando ou já no mapa → só atualiza metadados (sem re-DROP)
+      const alreadySame =
+        hasLocatePayload &&
+        locateKey &&
+        (locateKey === lastLocateKey || locateKey === locateInFlightKey) &&
+        (locating || !!pinCoords || locateInFlightKey === locateKey || pendingLocateAfterMapReady);
+      if (alreadySame) {
+        form = {
+          ...form,
+          numeroALA: nextPedido || form.numeroALA,
+          cidade: cidadeTxt || form.cidade,
+          enderecoCompleto: enderecoBusca || enderecoTxt || form.enderecoCompleto,
+          numeroEndereco: seed.numeroEndereco || seed.endereco?.numero || form.numeroEndereco,
+          cep: normalizeCep(seed.cep || seed.endereco?.cep || form.cep),
+          projetista: usuario || seed.projetista || form.projetista
+        };
+        form = form;
+        ensureProjetistaFromLogin();
+        if (chamadoId) {
+          await loadChamado(chamadoId, { preserveMap: true });
+          return;
+        }
+        loading = false;
+        statusMsg = locating || pendingLocateAfterMapReady
+          ? 'Localizando endereço no mapa…'
+          : 'Pronto para revisar — salve ou gere o PDF para gravar no Portal';
+        postToParent('READY', { chamadoId: '', pedido: form.numeroALA });
+        return;
+      }
+
+      // Novo locate (ou upgrade de seed vazio → com endereço)
+      pendingLocateAfterMapReady = false;
+      addressFromMap = false;
+      pinCoords = null;
+
       form = {
-        numeroALA: String(seed.pedido || seed.numeroALA || '').replace(/\D/g, ''),
-        cidade: seed.cidade || '',
-        enderecoCompleto: seed.enderecoCompleto || seed.endereco?.completo || '',
+        numeroALA: nextPedido,
+        cidade: cidadeTxt,
+        // Prefere query completa para o Localizar automático trazer CTOs no lugar certo
+        enderecoCompleto: enderecoBusca || enderecoTxt,
         numeroEndereco: seed.numeroEndereco || seed.endereco?.numero || '',
         cep: seed.cep || seed.endereco?.cep || '',
+        coordenadas: '',
         tabulacaoFinal: seed.tabulacaoFinal || '',
         projetista: usuario || seed.projetista || ''
       };
+      form.cep = normalizeCep(form.cep);
+      ensureProjetistaFromLogin();
+      form = form;
+
+      const hasAddress = !!(form.enderecoCompleto || '').trim();
+
+      // Preferência: geocode do endereço (traz CTOs). Coords só se não houver endereço.
+      if (hasAddress) {
+        statusMsg = 'Localizando endereço no mapa…';
+        positionedFromSeed = true;
+        pendingLocateAfterMapReady = true;
+        lastLocateKey = locateKey;
+        locateInFlightKey = locateKey;
+        void localizarNoMapa()
+          .catch((err) => {
+            console.warn('[Workbench] Localizar (seed):', err?.message || err);
+            // Fallback coords da Agenda se geocode falhar
+            if (seedCoords) {
+              pinCoords = seedCoords;
+              form.coordenadas = formatCoords(seedCoords.lat, seedCoords.lng);
+              form = form;
+              void ensureMapPositionedAfterReady();
+            }
+          })
+          .finally(() => {
+            if (locateInFlightKey === locateKey) locateInFlightKey = '';
+          });
+      } else if (seedCoords) {
+        pinCoords = seedCoords;
+        form.coordenadas = formatCoords(seedCoords.lat, seedCoords.lng);
+        form = form;
+        positionedFromSeed = true;
+        lastLocateKey = locateKey;
+        statusMsg = 'Endereço posicionado no mapa';
+        requestMapResize(30);
+        void ensureMapPositionedAfterReady();
+        setTimeout(() => applyTabulacaoFromMapNow(), 1200);
+      } else {
+        statusMsg = 'Pedido aberto — aguardando endereço da Agenda…';
+        error = '';
+      }
+    } else {
+      pendingLocateAfterMapReady = false;
+      addressFromMap = false;
     }
 
     if (!usuario) {
@@ -131,26 +1590,43 @@
     }
 
     if (chamadoId) {
-      await loadChamado(chamadoId);
+      // Formulário/tabulação em paralelo; mapa já pode estar posicionado pelo seed
+      await loadChamado(chamadoId, { preserveMap: positionedFromSeed });
       return;
     }
 
+    // Sem ID no Portal: trabalha com seed até Salvar / Gerar PDF
     loading = false;
-    chamado = null;
     error = '';
-    statusMsg = 'Aguardando sincronização de um chamado…';
+    if (positionedFromSeed || (form.numeroALA && form.enderecoCompleto)) {
+      statusMsg = 'Pronto para revisar — salve ou gere o PDF para gravar no Portal';
+      postToParent('READY', { chamadoId: '', pedido: form.numeroALA });
+    } else {
+      chamado = null;
+      equipamentos = [];
+      mapPreviewImage = '';
+      capturingMapPreview = false;
+      statusMsg = 'Mapa pronto — sincronize um chamado para preencher o formulário';
+    }
+    ensureProjetistaFromLogin();
   }
 
   function buildReportPayload() {
+    ensureProjetistaFromLogin();
     return {
       numeroALA: form.numeroALA.trim(),
       cidade: form.cidade.trim(),
       enderecoCompleto: form.enderecoCompleto.trim(),
       numeroEndereco: form.numeroEndereco.trim(),
       cep: form.cep.trim(),
+      coordenadas: (form.coordenadas || '').trim(),
+      latitude: pinCoords?.lat ?? null,
+      longitude: pinCoords?.lng ?? null,
       tabulacaoFinal: form.tabulacaoFinal.trim(),
-      projetista: form.projetista.trim(),
-      tabulacaoSugeridaOriginal: sugeridaOriginal || null
+      projetista: (form.projetista || usuario || '').trim(),
+      tabulacaoSugeridaOriginal: sugeridaOriginal || null,
+      mapPreviewImage: mapPreviewImage || null,
+      previewImage: mapPreviewImage || null
     };
   }
 
@@ -173,70 +1649,285 @@
   }
 
   async function gerarRelatorio() {
-    if (!chamadoId) {
-      error = 'Chamado não carregado.';
+    if (generating) return;
+    if (!viabilidadeRef || typeof viabilidadeRef.generateWorkbenchReport !== 'function') {
+      error = 'Mapa ainda carregando. Localize um endereço e tente de novo.';
       return;
     }
+    if (!showInfoModal) {
+      openInfoModal();
+      await tick();
+    }
+
     generating = true;
     error = '';
-    statusMsg = 'Gerando relatório…';
+    statusMsg = 'Gerando PDF…';
+    await waitForPaint();
+
     try {
-      const response = await fetch(
-        getApiUrl(`/api/portal-censup/chamados/${encodeURIComponent(chamadoId)}/relatorio`),
-        {
-          method: 'POST',
-          headers: authHeaders(),
-          body: JSON.stringify({ ...buildReportPayload(), persist: false })
-        }
-      );
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || `Falha ao gerar relatório (${response.status})`);
+      // Garante que o PDF use o endereço do pin (não o da Agenda)
+      if (typeof viabilidadeRef.syncWorkbenchAddressFromMap === 'function') {
+        const pinAddr = await viabilidadeRef.syncWorkbenchAddressFromMap();
+        if (pinAddr) applyMapAddressToForm(pinAddr);
       }
-      openPdfHtml(data.pdfHtml);
-      statusMsg = 'PDF gerado';
-      postToParent('REPORT_GENERATED', { chamadoId });
+
+      // Reusa a prévia já capturada ao abrir o modal — só captura de novo se faltar
+      if (!mapPreviewImage && typeof viabilidadeRef.refreshWorkbenchMapPreview === 'function') {
+        capturingMapPreview = true;
+        statusMsg = 'Capturando mapa…';
+        const preview = await viabilidadeRef.refreshWorkbenchMapPreview();
+        if (preview) {
+          mapPreviewImage = preview;
+        }
+        capturingMapPreview = false;
+        statusMsg = 'Gerando PDF…';
+        await tick();
+      }
+
+      const result = await viabilidadeRef.generateWorkbenchReport({
+        ...buildReportPayload(),
+        previewImage: mapPreviewImage || undefined
+      });
+      if (result?.preview) {
+        mapPreviewImage = result.preview;
+      }
+      statusMsg = result?.viAla
+        ? `PDF gerado (${result.viAla})`
+        : 'PDF gerado (modelo Viabilidade Alares)';
+      showInfoModal = false;
+      // Gerar PDF: Portal + download local — sem backup SharePoint
+      if (chamadoId) {
+        postToParent('REPORT_GENERATED', {
+          chamadoId,
+          viAla: result?.viAla || null
+        });
+      }
+      void salvarRelatorio({
+        silent: true,
+        pdfHtml: result?.htmlContent || null,
+        geradoEm: result?.geradoEm || null,
+        backupSharePoint: false
+      });
     } catch (err) {
       error = err?.message || String(err);
-      statusMsg = '';
+      statusMsg = mapPreviewImage ? 'Prévia ok — corrija os campos e tente de novo' : '';
+      showInfoModal = true;
     } finally {
+      capturingMapPreview = false;
       generating = false;
     }
   }
 
-  async function salvarRelatorio() {
-    if (!chamadoId) {
-      error = 'Chamado não carregado.';
+  async function onSalvarRelatorioSubmit() {
+    await salvarRelatorio({ backupSharePoint: true });
+    if (!error) {
+      showInfoModal = false;
+    }
+  }
+
+  async function waitForPaint() {
+    await tick();
+    await new Promise((resolve) => {
+      const done = () => setTimeout(resolve, 30);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => requestAnimationFrame(done));
+      } else {
+        done();
+      }
+    });
+  }
+
+  async function salvarRelatorio({
+    silent = false,
+    pdfHtml = null,
+    geradoEm = null,
+    backupSharePoint = false
+  } = {}) {
+    const pedidoKey = String(form.numeroALA || workbenchSeed?.pedido || chamadoId || '')
+      .replace(/\D/g, '')
+      .trim();
+    if (!pedidoKey && !chamadoId) {
+      if (!silent) error = 'Informe o número do ALA / pedido.';
       return;
     }
-    saving = true;
-    error = '';
-    statusMsg = 'Salvando relatório no Portal…';
+    if (!silent) {
+      saving = true;
+      error = '';
+      statusMsg = backupSharePoint
+        ? 'Preparando relatório…'
+        : 'Salvando relatório no Portal…';
+      await waitForPaint();
+    }
     try {
-      const response = await fetch(
-        getApiUrl(`/api/portal-censup/chamados/${encodeURIComponent(chamadoId)}/relatorio`),
+      let doSharePointBackup = backupSharePoint === true;
+
+      // Pastas SharePoint em paralelo (não bloqueia a prévia — era a causa da demora)
+      const ensurePromise = doSharePointBackup
+        ? requestSharePointBackupEnsure()
+            .then((ensure) => {
+              if (ensure?.cancelled) {
+                doSharePointBackup = false;
+                return { ...ensure, _cancelled: true };
+              }
+              if (ensure?.skipped && !ensure?.ok) {
+                doSharePointBackup = false;
+                return { ...ensure, _skipped: true };
+              }
+              if (!ensure?.ok) {
+                throw new Error(ensure?.error || 'Falha ao preparar pastas no SharePoint');
+              }
+              lastSpEnsureMeta = {
+                webUrl: ensure.webUrl || '',
+                dayServerRelativeUrl: ensure.dayServerRelativeUrl || '',
+                folderUrl: ensure.folderUrl || '',
+                dayFolderName: ensure.dayFolderName || ''
+              };
+              return ensure;
+            })
+            .catch((err) => {
+              throw err;
+            })
+        : Promise.resolve(null);
+
+      // Só captura mapa se ainda não tiver prévia (igual Gerar PDF)
+      if (
+        doSharePointBackup &&
+        !mapPreviewImage &&
+        typeof viabilidadeRef?.refreshWorkbenchMapPreview === 'function'
+      ) {
+        capturingMapPreview = true;
+        try {
+          const preview = await viabilidadeRef.refreshWorkbenchMapPreview();
+          if (preview) mapPreviewImage = preview;
+        } finally {
+          capturingMapPreview = false;
+        }
+      }
+
+      let htmlForSave = pdfHtml;
+      let fileNameForBackup = null;
+      let geradoEmSave = geradoEm;
+
+      if (doSharePointBackup && !htmlForSave && viabilidadeRef?.generateWorkbenchReport) {
+        if (typeof viabilidadeRef.syncWorkbenchAddressFromMap === 'function') {
+          const pinAddr = await viabilidadeRef.syncWorkbenchAddressFromMap();
+          if (pinAddr) applyMapAddressToForm(pinAddr);
+        }
+        const built = await viabilidadeRef.generateWorkbenchReport({
+          ...buildReportPayload(),
+          previewImage: mapPreviewImage || undefined,
+          skipPrint: true
+        });
+        htmlForSave = built?.htmlContent || null;
+        fileNameForBackup = built?.pdfFileName || null;
+        geradoEmSave = built?.geradoEm || geradoEmSave;
+        if (built?.preview) mapPreviewImage = built.preview;
+      }
+
+      if (doSharePointBackup && !htmlForSave) {
+        throw new Error(
+          'Não foi possível montar o HTML do relatório. Confira os campos obrigatórios e tente Salvar PDF de novo.'
+        );
+      }
+
+      const targetId = chamadoId || pedidoKey;
+
+      // Tempo da Análise (cronômetro do detalhe na extensão)
+      let analiseDuracaoLabel = null;
+      let analiseDuracaoMs = null;
+      try {
+        const dur = await requestAnaliseDuracaoFromParent();
+        if (dur?.label) {
+          analiseDuracaoLabel = String(dur.label).trim() || null;
+          const ms = Number(dur.ms);
+          analiseDuracaoMs = Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : null;
+        }
+      } catch {
+        /* extensão pode não responder */
+      }
+
+      // Prévia na hora (como Gerar PDF) — pastas/Portal continuam em paralelo
+      let previewHandle = null;
+      if (doSharePointBackup && htmlForSave) {
+        previewHandle = openSharePointPreview(htmlForSave, {
+          fileName: fileNameForBackup || 'VI ALA - relatório.pdf',
+          autoPrepare: false
+        });
+        statusMsg = 'Prévia aberta — gerando PDF…';
+        if (!silent) showInfoModal = false;
+      }
+
+      const portalPromise = fetch(
+        getApiUrl(`/api/portal-censup/chamados/${encodeURIComponent(targetId)}/relatorio`),
         {
           method: 'POST',
           headers: authHeaders(),
-          body: JSON.stringify({ ...buildReportPayload(), persist: true })
+          body: JSON.stringify({
+            ...buildReportPayload(),
+            persist: true,
+            seed: workbenchSeed || undefined,
+            motivo: motivoAtual() || workbenchSeed?.motivo || undefined,
+            ...(htmlForSave ? { pdfHtml: htmlForSave } : {}),
+            ...(geradoEmSave ? { geradoEm: geradoEmSave } : {}),
+            ...(analiseDuracaoLabel
+              ? { analiseDuracaoLabel, analiseDuracaoMs }
+              : {})
+          })
         }
       );
+
+      // printToPDF logo após a aba abrir (pastas seguem em paralelo — não bloqueiam)
+      if (previewHandle?.requestPrepare) {
+        setTimeout(() => previewHandle.requestPrepare(), 200);
+      }
+
+      const [ensureResult, response] = await Promise.all([ensurePromise, portalPromise]);
+
+      if (ensureResult?._cancelled) {
+        statusMsg = 'Backup SharePoint cancelado — relatório salvo só no Portal';
+        notifySpPreview(previewHandle?.previewId, {
+          phase: 'error',
+          message: 'Backup cancelado. Relatório ficou só no Portal.'
+        });
+      } else if (ensureResult?._skipped) {
+        error =
+          ensureResult?.error ||
+          'Configure o link de Backup Consultas em Configurações → Backup Relatórios.';
+        statusMsg = '';
+        notifySpPreview(previewHandle?.previewId, {
+          phase: 'error',
+          message: error
+        });
+      }
+
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.success) {
         throw new Error(data.error || `Falha ao salvar relatório (${response.status})`);
       }
       chamado = data.chamado || chamado;
-      statusMsg = 'Relatório salvo no arquivo do Portal';
+      if (chamado?.id) {
+        chamadoId = String(chamado.id);
+      }
+      if (!silent && !error) {
+        statusMsg = doSharePointBackup
+          ? 'Prévia aberta — aguarde «PDF pronto» e envie ao SharePoint'
+          : 'Relatório salvo no arquivo do Portal';
+      }
       postToParent('REPORT_SAVED', {
-        chamadoId,
-        pedido: chamado?.pedido,
-        corrected: data.corrected === true
+        chamadoId: chamadoId || chamado?.id || targetId,
+        pedido: chamado?.pedido || pedidoKey,
+        corrected: data.corrected === true,
+        silent: silent === true
       });
     } catch (err) {
-      error = err?.message || String(err);
-      statusMsg = '';
+      if (!silent) {
+        error = err?.message || String(err);
+        statusMsg = '';
+      } else {
+        console.warn('[Workbench] Falha ao salvar relatório no Portal após Gerar PDF:', err);
+      }
     } finally {
-      saving = false;
+      if (!silent) saving = false;
     }
   }
 
@@ -244,16 +1935,113 @@
     postToParent('CLOSE');
   }
 
+  function resetWorkbenchUi() {
+    chamado = null;
+    chamadoId = '';
+    workbenchSeed = null;
+    equipamentos = [];
+    clearEquipSelection();
+    foraLimiteInfo = null;
+    showInfoForaLimite = false;
+    sugeridaOriginal = '';
+    tabulacaoUserOverride = false;
+    error = '';
+    statusMsg = 'Aguardando chamado…';
+    mapPreviewImage = '';
+    capturingMapPreview = false;
+    showInfoModal = false;
+    pinCoords = null;
+    form = {
+      numeroALA: '',
+      cidade: '',
+      enderecoCompleto: '',
+      numeroEndereco: '',
+      cep: '',
+      coordenadas: '',
+      tabulacaoFinal: '',
+      projetista: usuario || ''
+    };
+    try {
+      viabilidadeRef?.clearWorkbenchMap?.();
+    } catch {
+      /* ignore */
+    }
+    requestMapResize(80);
+  }
+
   function onMessage(event) {
     const data = event?.data;
-    if (!data || data.source !== PARENT_SOURCE) return;
+    if (!data) return;
+
+    // Mensagens da aba de prévia SharePoint
+    if (data.source === 'censup-sp-preview') {
+      if (data.type === 'CENSUP_SP_PREVIEW_READY') {
+        // prepare já é disparado ao abrir; status visual na barra
+        return;
+      }
+      if (data.type === 'CENSUP_SP_UPLOAD_CLICK') {
+        const previewId = String(data.previewId || '').trim();
+        if (!previewId) return;
+        notifySpPreview(previewId, {
+          phase: 'uploading',
+          message: 'Enviando PDF ao SharePoint…'
+        });
+        postToParent('REPORT_PREVIEW_UPLOAD', { previewId });
+        statusMsg = 'Enviando PDF ao SharePoint…';
+        return;
+      }
+    }
+
+    if (data.source !== PARENT_SOURCE) return;
+    if (data.type === 'REPORT_PREVIEW_STATUS') {
+      const previewId = String(data.previewId || '').trim();
+      if (previewId) {
+        notifySpPreview(previewId, {
+          phase: data.phase,
+          message: data.message,
+          fileName: data.fileName
+        });
+      }
+      if (data.phase === 'ready') {
+        statusMsg = data.message || 'PDF pronto — envie ao SharePoint na prévia';
+      } else if (data.phase === 'done') {
+        statusMsg = data.message || 'PDF salvo no SharePoint';
+      } else if (data.phase === 'error') {
+        error = data.message || 'Falha no backup SharePoint';
+        statusMsg = '';
+      } else if (data.message) {
+        statusMsg = data.message;
+      }
+      return;
+    }
+    if (data.type === 'THEME') {
+      applyUiTheme(data.theme);
+      return;
+    }
+    if (data.type === 'MAP_TYPE') {
+      applyPreferredMapType(data.mapType);
+      return;
+    }
     if (data.type === 'INIT' || data.type === 'LOAD') {
+      if (data.theme === 'dark' || data.theme === 'light') {
+        applyUiTheme(data.theme);
+      }
+      if (data.mapType === 'satellite' || data.mapType === 'roadmap') {
+        applyPreferredMapType(data.mapType);
+      }
       applyInitPayload(data);
+    }
+    if (data.type === 'CLEAR' || data.type === 'RESET') {
+      resetWorkbenchUi();
     }
   }
 
   onMount(async () => {
     window.addEventListener('message', onMessage);
+    document.addEventListener('keydown', onEquipCopyKeydown);
+    document.addEventListener('click', handleEquipDocumentClick);
+    // Equipamentos inicia minimizado — mapa ocupa o split desde o boot
+    requestMapResize(80);
     try {
       const mod = await import('./ViabilidadeAlares.svelte');
       ViabilidadeAlares = mod.default;
@@ -265,193 +2053,586 @@
     } catch {
       tabulacoes = [];
     }
+    // Segunda chance após o mapa montar (mesma lista que a Viabilidade oficial usa)
+    setTimeout(() => {
+      void refreshTabulacoesForReport();
+    }, 1500);
 
-    // Bootstrap via query (fallback sem postMessage)
+    // Bootstrap via query (seed da Agenda na URL — caminho principal no reload do iframe)
     const params = new URLSearchParams(window.location.search);
+    const qTheme = params.get('theme');
+    if (qTheme === 'dark' || qTheme === 'light') {
+      applyUiTheme(qTheme);
+    }
+    const qMapType = params.get('mapType');
+    if (qMapType === 'satellite' || qMapType === 'roadmap') {
+      applyPreferredMapType(qMapType);
+    }
+    const qLayout = String(params.get('layout') || params.get('mobile') || '').toLowerCase();
+    layoutMobile = qLayout === 'mobile' || qLayout === '1' || qLayout === 'true';
+    try {
+      document.documentElement.classList.toggle('wb-layout-mobile', layoutMobile);
+      document.body?.classList.toggle('wb-layout-mobile', layoutMobile);
+    } catch {
+      /* ignore */
+    }
     const qUser = params.get('usuario') || '';
     const qId = params.get('chamadoId') || params.get('id') || '';
-    if (qUser || qId) {
-      await applyInitPayload({ usuario: qUser, chamadoId: qId });
+    let qSeed = null;
+    try {
+      const rawSeed = params.get('seed');
+      if (rawSeed) {
+        qSeed = typeof rawSeed === 'string' ? JSON.parse(rawSeed) : rawSeed;
+      }
+    } catch (err) {
+      console.warn('[Workbench] seed na URL inválido:', err?.message || err);
+    }
+    if (qUser || qId || qSeed) {
+      await applyInitPayload({ usuario: qUser, chamadoId: qId, seed: qSeed });
     } else {
       loading = false;
       statusMsg = 'Aguardando dados da extensão…';
       postToParent('HELLO');
     }
+    requestMapResize(200);
+    setTimeout(reportMapMinWidthToParent, 200);
+    setTimeout(reportMapMinWidthToParent, 800);
   });
+
+  function onMapReadyFromViabilidade() {
+    postToParent('MAP_READY');
+    setTimeout(reportMapMinWidthToParent, 80);
+    setTimeout(reportMapMinWidthToParent, 400);
+    setTimeout(reportMapMinWidthToParent, 1200);
+    // Agenda → coords: a busca de CTOs roda no mapa; sincroniza o box depois
+    setTimeout(() => syncForaLimiteFromRef(), 600);
+    setTimeout(() => syncForaLimiteFromRef(), 1800);
+    setTimeout(() => syncForaLimiteFromRef(), 4000);
+    setTimeout(() => applyTabulacaoFromMapNow(), 1000);
+    setTimeout(() => applyTabulacaoFromMapNow(), 2500);
+
+    // Duplo clique chegou antes do mapa: completa a localização agora
+    if (pendingLocateAfterMapReady && (form.enderecoCompleto || '').trim()) {
+      pendingLocateAfterMapReady = false;
+      void localizarNoMapa().catch((err) => {
+        console.warn('[Workbench] Localizar (retry MAP_READY):', err?.message || err);
+      });
+      return;
+    }
+
+    if (pinCoords) {
+      void ensureMapPositionedAfterReady();
+      return;
+    }
+
+    if ((form.enderecoCompleto || '').trim()) {
+      void localizarNoMapa().catch((err) => {
+        console.warn('[Workbench] Localizar (MAP_READY):', err?.message || err);
+      });
+    }
+  }
+
+  async function ensureMapPositionedAfterReady() {
+    if (!viabilidadeRef) return;
+    try {
+      if (typeof viabilidadeRef.forceWorkbenchLocationSync === 'function') {
+        const ok = await viabilidadeRef.forceWorkbenchLocationSync();
+        if (ok) {
+          syncForaLimiteFromRef();
+          applyTabulacaoFromMapNow();
+          statusMsg = statusMsg || 'Endereço posicionado no mapa';
+          return;
+        }
+      }
+      if ((form.enderecoCompleto || '').trim()) {
+        await localizarNoMapa();
+      }
+    } catch (err) {
+      console.warn('[Workbench] ensureMapPositionedAfterReady:', err?.message || err);
+    }
+  }
+
+  function onMapPreviewFromViabilidade(payload = {}) {
+    capturingMapPreview = !!payload.capturing;
+    if (!payload.capturing) {
+      mapPreviewImage = payload.image || '';
+    }
+  }
 
   onDestroy(() => {
     window.removeEventListener('message', onMessage);
+    document.removeEventListener('keydown', onEquipCopyKeydown);
+    document.removeEventListener('click', handleEquipDocumentClick);
+    if (reanaliseTimer) clearTimeout(reanaliseTimer);
+    if (equipPanelSaveTimer) clearTimeout(equipPanelSaveTimer);
   });
 </script>
 
-<div class="workbench">
-  <header class="wb-header">
-    <div class="wb-title-wrap">
-      <h1>Preencher Relatório</h1>
-      {#if chamado?.pedido}
-        <span class="wb-pedido">Pedido {chamado.pedido}</span>
-      {/if}
-    </div>
-    <div class="wb-header-actions">
-      {#if statusMsg}
-        <span class="wb-status">{statusMsg}</span>
-      {/if}
-      <button type="button" class="wb-close" on:click={fecharWorkbench} aria-label="Fechar">×</button>
-    </div>
-  </header>
-
+<div class="workbench" class:theme-dark={isDarkUi} class:layout-mobile={layoutMobile}>
   {#if error}
     <p class="wb-error" role="alert">{error}</p>
   {/if}
 
   <div class="wb-body">
-    <aside class="wb-form-pane">
-      <form class="wb-form" on:submit|preventDefault={salvarRelatorio}>
-        <label>
-          <span>1. Número do ALA *</span>
-          <input bind:value={form.numeroALA} inputmode="numeric" placeholder="Digite apenas números" />
-        </label>
-        <label>
-          <span>2. Cidade *</span>
-          <input bind:value={form.cidade} />
-        </label>
-        <label>
-          <span>3. Endereço Completo *</span>
-          <input bind:value={form.enderecoCompleto} />
-        </label>
-        <label>
-          <span>4. Número do Endereço *</span>
-          <input bind:value={form.numeroEndereco} />
-        </label>
-        <label>
-          <span>5. CEP do Endereço *</span>
-          <input bind:value={form.cep} />
-        </label>
-        <label>
-          <span>6. Tabulação Final *</span>
-          <select bind:value={form.tabulacaoFinal}>
-            <option value="">Selecione uma opção</option>
-            {#each tabulacoes as tab}
-              <option value={tab}>{tab}</option>
-            {/each}
-            {#if form.tabulacaoFinal && !tabulacoes.includes(form.tabulacaoFinal)}
-              <option value={form.tabulacaoFinal}>{form.tabulacaoFinal}</option>
-            {/if}
-          </select>
-          {#if sugeridaOriginal}
-            <small class="hint">Sugestão automática: {sugeridaOriginal}</small>
-          {/if}
-        </label>
-        <label>
-          <span>7. Projetista *</span>
-          <input bind:value={form.projetista} readonly />
-        </label>
-
-        <div class="wb-actions">
-          <button type="button" class="btn-secondary" on:click={gerarRelatorio} disabled={generating || loading || !chamadoId}>
-            {generating ? 'Gerando…' : 'Gerar Relatório'}
-          </button>
-          <button type="submit" class="btn-primary" disabled={saving || loading || !chamadoId}>
-            {saving ? 'Salvando…' : 'Salvar Relatório'}
-          </button>
-        </div>
-      </form>
-    </aside>
-
-    <section class="wb-map-pane">
-      <div class="wb-map-label">8. Mapa interativo *</div>
-      {#if loading}
-        <div class="wb-map-placeholder">Carregando mapa…</div>
-      {:else if mapAddress || (mapLat != null && mapLng != null)}
-        {#key `${chamadoId}:${mapLat ?? ''}:${mapLng ?? ''}:${mapAddress}`}
-          <div class="wb-map-host">
-            {#if ViabilidadeAlares}
-              <svelte:component
-                this={ViabilidadeAlares}
-                embedded={true}
-                mapDomId="censup-workbench-map"
-                currentUser={usuario}
-                initialAddress={mapAddress}
-                initialLat={mapLat}
-                initialLng={mapLng}
-              />
+    <div class="wb-split">
+      <section class="wb-map-pane">
+        {#if equipPanelOpen}
+        <div
+          class="wb-equip-panel"
+          bind:this={equipPanelEl}
+          use:equipPanelLayout
+          style={equipPanelStyle}
+          role="dialog"
+          aria-label="Lista de equipamentos"
+        >
+          <div
+            class="wb-equip-panel-head"
+            title="Segure e arraste para mover"
+            on:pointerdown={startEquipPanelDrag}
+            on:pointermove={onEquipPanelDragMove}
+            on:pointerup={endEquipPanelDrag}
+            on:pointercancel={endEquipPanelDrag}
+          >
+            <span class="wb-equip-panel-title">Equipamentos</span>
+            <button
+              type="button"
+              class="wb-equip-panel-close"
+              on:click={closeEquipPanel}
+              title="Fechar"
+              aria-label="Fechar lista de equipamentos"
+            >×</button>
+          </div>
+          <div class="wb-equip-body">
+            {#if equipamentos.length > 0}
+              <div class="wb-equip-table-wrap" role="presentation">
+                <table class="wb-equip-table" on:selectstart={preventEquipTextSelection}>
+                  <thead>
+                    <tr>
+                      <th class="wb-equip-check-col" title="Mostrar/ocultar no mapa">
+                        <input
+                          type="checkbox"
+                          checked={equipAllVisible}
+                          indeterminate={equipSomeVisible}
+                          aria-label="Marcar todos os equipamentos no mapa"
+                          on:change={(e) => toggleAllEquipVisible(e.currentTarget.checked)}
+                          on:click|stopPropagation
+                        />
+                      </th>
+                      <th
+                        class:selected={equipSelectedColumns.includes(1)}
+                        on:click={(e) => handleEquipColumnHeaderClick(e, 1)}
+                      >Nº</th>
+                      <th
+                        class:selected={equipSelectedColumns.includes(2)}
+                        on:click={(e) => handleEquipColumnHeaderClick(e, 2)}
+                      >CTO</th>
+                      <th
+                        class:selected={equipSelectedColumns.includes(3)}
+                        on:click={(e) => handleEquipColumnHeaderClick(e, 3)}
+                      >Status</th>
+                      <th
+                        class:selected={equipSelectedColumns.includes(4)}
+                        on:click={(e) => handleEquipColumnHeaderClick(e, 4)}
+                      >Cidade</th>
+                      <th
+                        class:selected={equipSelectedColumns.includes(5)}
+                        on:click={(e) => handleEquipColumnHeaderClick(e, 5)}
+                      >POP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each equipamentos as item, rowIndex (item.ctoKey || item.n + '-' + item.nome)}
+                      {@const cellKey1 = `${rowIndex}-1`}
+                      {@const cellKey2 = `${rowIndex}-2`}
+                      {@const cellKey3 = `${rowIndex}-3`}
+                      {@const cellKey4 = `${rowIndex}-4`}
+                      {@const cellKey5 = `${rowIndex}-5`}
+                      <tr class:row-selected={equipSelectedRows.includes(rowIndex)}>
+                        <td class="wb-equip-check-col">
+                          <input
+                            type="checkbox"
+                            checked={item.visible !== false}
+                            aria-label={`Mostrar ${item.nome || 'equipamento'} no mapa`}
+                            on:change={(e) => toggleEquipVisible(item, e.currentTarget.checked)}
+                            on:click|stopPropagation
+                          />
+                        </td>
+                        <td
+                          class="wb-equip-num-col"
+                          class:cell-selected={equipSelectedCells.includes(cellKey1) || equipSelectedRows.includes(rowIndex) || equipSelectedColumns.includes(1)}
+                          title="Clique para selecionar a linha"
+                          on:click={(e) => handleEquipCellClick(e, rowIndex, 1)}
+                        >{item.n}</td>
+                        <td
+                          title={item.nome}
+                          class:cell-selected={equipSelectedCells.includes(cellKey2) || equipSelectedRows.includes(rowIndex) || equipSelectedColumns.includes(2)}
+                          on:click={(e) => handleEquipCellClick(e, rowIndex, 2)}
+                        >{item.nome}</td>
+                        <td
+                          class:cell-selected={equipSelectedCells.includes(cellKey3) || equipSelectedRows.includes(rowIndex) || equipSelectedColumns.includes(3)}
+                          on:click={(e) => handleEquipCellClick(e, rowIndex, 3)}
+                        >
+                          <span class="wb-status-badge" class:ativado={item.statusClass === 'ativado'} class:desativado={item.statusClass === 'desativado'}>
+                            {item.status}
+                          </span>
+                        </td>
+                        <td
+                          class:cell-selected={equipSelectedCells.includes(cellKey4) || equipSelectedRows.includes(rowIndex) || equipSelectedColumns.includes(4)}
+                          on:click={(e) => handleEquipCellClick(e, rowIndex, 4)}
+                        >{item.cidade}</td>
+                        <td
+                          class:cell-selected={equipSelectedCells.includes(cellKey5) || equipSelectedRows.includes(rowIndex) || equipSelectedColumns.includes(5)}
+                          on:click={(e) => handleEquipCellClick(e, rowIndex, 5)}
+                        >{item.pop}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
             {:else}
-              <div class="wb-map-placeholder">Carregando mapa…</div>
+              <p class="wb-equip-empty">
+                {chamadoId
+                  ? 'Nenhum equipamento encontrado para este chamado.'
+                  : 'Sincronize um chamado na Agenda para carregar os equipamentos aqui.'}
+              </p>
             {/if}
           </div>
-        {/key}
-      {:else}
-        <div class="wb-map-placeholder">
-          {usuario
-            ? 'Sincronize um chamado na Agenda para carregar o mapa e a tabulação aqui.'
-            : 'Informe o usuário no painel ao lado para iniciar.'}
         </div>
-      {/if}
-      <p class="wb-map-hint">Mapa arrastável e editável — ajuste rotas/CTOs se necessário.</p>
-    </section>
+        {/if}
+
+        {#if ViabilidadeAlares}
+          <div class="wb-map-host">
+            <svelte:component
+              this={ViabilidadeAlares}
+              bind:this={viabilidadeRef}
+              embedded={true}
+              workbenchMode={true}
+              mapDomId="censup-workbench-map"
+              currentUser={usuario}
+              preferredMapType={preferredMapType}
+              workbenchMotivo={chamado?.motivo || workbenchSeed?.motivo || ''}
+              initialAddress={mapAddress}
+              initialLat={mapLat}
+              initialLng={mapLng}
+              onClientLocationChange={onClientLocationFromMap}
+              onMapPreviewChange={onMapPreviewFromViabilidade}
+              onEquipamentosChange={onEquipamentosFromViabilidade}
+              equipListOpen={equipPanelOpen}
+              onEquipListToggle={toggleEquipPanel}
+              onForaLimiteChange={onForaLimiteFromViabilidade}
+              onTabulacaoSugeridaChange={onTabulacaoSugeridaFromMap}
+              onMapReady={onMapReadyFromViabilidade}
+            />
+          </div>
+        {:else}
+          <div class="wb-map-placeholder">Carregando mapa…</div>
+        {/if}
+
+          <div class="wb-map-search-box">
+            <label class="wb-map-search-label" for="wb-map-address">
+              Endereço
+            </label>
+            <input
+              id="wb-map-address"
+              class="wb-map-search-input"
+              type="text"
+              bind:value={form.enderecoCompleto}
+              on:input={onEnderecoManualInput}
+              placeholder="Endereço para localizar no mapa"
+            />
+            <div class="wb-map-search-actions">
+              <button
+                type="button"
+                class="wb-map-btn wb-map-btn-locate"
+                on:click={localizarNoMapa}
+                disabled={locating}
+              >
+                {#if locating}Localizando<span class="wb-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>{:else}Localizar{/if}
+              </button>
+              <button
+                type="button"
+                class="wb-map-btn wb-map-btn-report"
+                on:click={abrirRelatorioComPrint}
+                disabled={loading || locating || capturingMapPreview || generating || !ViabilidadeAlares}
+              >
+                {#if capturingMapPreview}Capturando<span class="wb-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>{:else}Gerar Relatório{/if}
+              </button>
+            </div>
+            {#if mapSearchError}
+              <p class="wb-map-search-error" role="alert">{mapSearchError}</p>
+            {/if}
+            {#if foraLimiteInfo}
+              <div class="wb-fora-limite-box" role="status">
+                <div class="wb-fora-limite-header">
+                  <span class="wb-fora-limite-icon" aria-hidden="true">📍</span>
+                  <span class="wb-fora-limite-title">Fora do Limite</span>
+                  <button
+                    type="button"
+                    class="wb-fora-limite-info"
+                    title="Informação"
+                    aria-label="Informação sobre CTO fora do limite"
+                    on:click={() => (showInfoForaLimite = !showInfoForaLimite)}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                      <circle cx="12" cy="12" r="10" fill="#FF9800" stroke="#FF9800" stroke-width="1"/>
+                      <path d="M12 16V12" stroke="white" stroke-width="2" stroke-linecap="round"/>
+                      <circle cx="12" cy="8" r="1" fill="white"/>
+                    </svg>
+                  </button>
+                </div>
+                <p class="wb-fora-limite-text">
+                  Equipamento mais próximo é <strong>{foraLimiteInfo.nome}</strong> a
+                  <strong>{formatForaLimiteDistancia(foraLimiteInfo.distancia)}</strong>.
+                </p>
+              </div>
+            {/if}
+          </div>
+      </section>
+    </div>
   </div>
 </div>
+
+{#if showInfoForaLimite}
+  <div
+    class="wb-modal-overlay"
+    role="button"
+    tabindex="-1"
+    aria-label="Fechar modal de informação"
+    on:click={() => (showInfoForaLimite = false)}
+    on:keydown={(e) => e.key === 'Escape' && (showInfoForaLimite = false)}
+  >
+    <div
+      class="wb-modal-content wb-fora-limite-modal"
+      role="dialog"
+      tabindex="0"
+      aria-modal="true"
+      aria-labelledby="wb-fora-limite-modal-title"
+      on:click|stopPropagation
+      on:keydown={(e) => e.key === 'Enter' && e.stopPropagation()}
+    >
+      <div class="wb-modal-header">
+        <h2 id="wb-fora-limite-modal-title">Informação</h2>
+        <button type="button" class="wb-modal-close" on:click={() => (showInfoForaLimite = false)} aria-label="Fechar">×</button>
+      </div>
+      <div class="wb-modal-body">
+        <p>
+          Nenhuma CTO foi encontrada dentro do limite padrão de 250 metros do endereço pesquisado.
+          O sistema realizou uma busca progressiva e encontrou a CTO mais próxima disponível,
+          que está além da metragem limite padrão para atendimento. A distância informada representa
+          a distância real calculada através de rotas.
+        </p>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showInfoModal}
+  <div
+    class="wb-modal-overlay"
+    role="presentation"
+  >
+    <div
+      class="wb-modal-content"
+      role="dialog"
+      tabindex="0"
+      aria-modal="true"
+      aria-labelledby="wb-info-modal-title"
+      on:click|stopPropagation
+      on:keydown={(e) => e.stopPropagation()}
+    >
+      <div class="wb-modal-header">
+        <h2 id="wb-info-modal-title">Preencher Relatório</h2>
+        <button type="button" class="wb-modal-close" on:click={closeInfoModal} aria-label="Fechar modal">×</button>
+      </div>
+      <div class="wb-modal-body">
+        <form class="wb-modal-form" on:submit|preventDefault={onSalvarRelatorioSubmit}>
+          <div class="wb-modal-field">
+            <label for="wb-modal-ala">1. Número do ALA</label>
+            <input id="wb-modal-ala" bind:value={form.numeroALA} inputmode="numeric" placeholder="Digite apenas números" />
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-cidade">2. Cidade</label>
+            <input id="wb-modal-cidade" bind:value={form.cidade} />
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-end">3. Endereço Completo</label>
+            <input id="wb-modal-end" bind:value={form.enderecoCompleto} on:input={onEnderecoManualInput} />
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-num">4. Número do Endereço</label>
+            <input id="wb-modal-num" bind:value={form.numeroEndereco} />
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-cep">5. CEP do Endereço</label>
+            <input id="wb-modal-cep" bind:value={form.cep} placeholder="Preenchido pelo mapa quando disponível" />
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-coords">6. Coordenadas</label>
+            <input id="wb-modal-coords" bind:value={form.coordenadas} readonly placeholder="Ajuste a casinha no mapa" />
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-tab">7. Tabulação Final</label>
+            <select id="wb-modal-tab" bind:value={form.tabulacaoFinal} on:change={onTabulacaoManualChange}>
+              <option value="">Selecione uma opção</option>
+              {#each tabulacoes as tab}
+                <option value={tab}>{tab}</option>
+              {/each}
+              {#if form.tabulacaoFinal && !tabulacoes.includes(form.tabulacaoFinal)}
+                <option value={form.tabulacaoFinal}>{form.tabulacaoFinal}</option>
+              {/if}
+            </select>
+            {#if sugeridaOriginal}
+              <small class="hint">
+                Sugestão automática: {sugeridaOriginal}{reanalyzing ? ' (recalculando…)' : ''}{tabulacaoUserOverride ? ' — mantida a sua escolha' : ''}
+              </small>
+            {:else if reanalyzing}
+              <small class="hint">Recalculando tabulação…</small>
+            {/if}
+          </div>
+          <div class="wb-modal-field">
+            <label for="wb-modal-proj">8. Projetista</label>
+            <input id="wb-modal-proj" bind:value={form.projetista} readonly />
+          </div>
+
+          <div class="wb-map-preview-block">
+            <span class="wb-map-preview-label">9. Prévia do Mapa</span>
+            <div class="wb-map-preview-container">
+              {#if capturingMapPreview}
+                <div class="wb-preview-loading">
+                  <div class="wb-loading-spinner"></div>
+                  <p>Capturando mapa...</p>
+                </div>
+              {:else if mapPreviewImage}
+                <div class="wb-preview-image-wrapper">
+                  <img src={mapPreviewImage} alt="Prévia do Mapa" class="wb-preview-image" />
+                </div>
+                <p class="wb-preview-hint">
+                  O mapa foi capturado automaticamente com as CTOs, rotas e condomínios visíveis (quando a opção estiver ativa).
+                </p>
+              {:else}
+                <div class="wb-preview-loading">
+                  <p>A prévia será capturada ao abrir por Gerar Relatório.</p>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <div class="wb-modal-actions">
+            <button type="button" class="wb-modal-btn-cancel" on:click={closeInfoModal}>Cancelar</button>
+            <button type="submit" class="wb-modal-btn-save" disabled={saving || loading || !(form.numeroALA || '').trim()}>
+              {#if saving}Salvando<span class="wb-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>{:else}Salvar PDF{/if}
+            </button>
+            <button
+              type="button"
+              class="wb-modal-btn-pdf"
+              on:click={gerarRelatorio}
+              disabled={generating || loading || capturingMapPreview}
+            >
+              {#if generating || capturingMapPreview}Gerando<span class="wb-dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>{:else}Gerar PDF{/if}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .workbench {
     display: flex;
     flex-direction: column;
     width: 100%;
-    height: 100%;
-    background: #ffffff;
-    color: #1f2937;
-  }
-
-  .wb-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    padding: 0.85rem 1rem;
-    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
-    color: #fff;
-    flex-shrink: 0;
-  }
-
-  .wb-title-wrap {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
+    max-width: 100%;
     min-width: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #eef1f8;
+    color: #1f2937;
+    box-sizing: border-box;
   }
 
-  .wb-header h1 {
-    margin: 0;
-    font-size: 1.05rem;
-    font-weight: 700;
+  .workbench.theme-dark {
+    background: #0b1220;
+    color: #e2e8f0;
   }
 
-  .wb-pedido {
-    font-size: 0.82rem;
-    opacity: 0.92;
+  .workbench.theme-dark .wb-body,
+  .workbench.theme-dark .wb-split,
+  .workbench.theme-dark .wb-map-pane,
+  .workbench.theme-dark .wb-map-host {
+    background: #0b1220;
   }
 
-  .wb-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
+  .workbench.theme-dark .wb-map-placeholder {
+    background: #121826;
+    border-color: #3f4b63;
+    color: #94a3b8;
   }
 
-  .wb-status {
-    font-size: 0.78rem;
-    opacity: 0.95;
+  .workbench.theme-dark .wb-equip-panel {
+    background: #111827;
+    border-color: #334155;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
   }
 
-  .wb-close {
-    border: none;
-    background: rgba(255, 255, 255, 0.18);
-    color: #fff;
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    font-size: 1.4rem;
-    line-height: 1;
-    cursor: pointer;
+  .workbench.theme-dark .wb-equip-panel-head {
+    border-bottom-color: #334155;
+  }
+
+  .workbench.theme-dark .wb-equip-panel-title {
+    color: #a78bfa;
+  }
+
+  .workbench.theme-dark .wb-equip-panel-close {
+    background: #1e293b;
+    border-color: #475569;
+    color: #cbd5e1;
+  }
+
+  .workbench.theme-dark .wb-equip-panel-close:hover {
+    background: #334155;
+    border-color: #a78bfa;
+    color: #c4b5fd;
+  }
+
+  .workbench.theme-dark .wb-equip-table th {
+    background: #1e293b;
+    color: #cbd5e1;
+  }
+
+  .workbench.theme-dark .wb-equip-table td {
+    border-bottom-color: #334155;
+    border-right-color: #334155;
+    color: #e2e8f0;
+  }
+
+  .workbench.theme-dark .wb-map-search-box {
+    background: rgba(15, 23, 42, 0.96);
+    border-color: #334155;
+  }
+
+  .workbench.theme-dark .wb-map-search-label {
+    color: #a78bfa;
+  }
+
+  .workbench.theme-dark .wb-map-search-input {
+    background: #0f172a;
+    border-color: #475569;
+    color: #f1f5f9;
+  }
+
+  .workbench.theme-dark .wb-equip-empty {
+    color: #94a3b8;
+  }
+
+  .workbench.theme-dark .wb-modal-content {
+    background: #1e293b;
+    color: #e2e8f0;
+  }
+
+  .workbench.theme-dark .wb-map-host :global(.viabilidade-content.workbench-mode .map-container) {
+    background: #121826 !important;
+    border-color: #3f4b63 !important;
   }
 
   .wb-error {
@@ -461,119 +2642,749 @@
     color: #b91c1c;
     font-size: 0.85rem;
     flex-shrink: 0;
+    box-sizing: border-box;
   }
 
   .wb-body {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: minmax(300px, 380px) 1fr;
-    gap: 0;
-  }
-
-  .wb-form-pane {
-    border-right: 1px solid #e5e7eb;
-    overflow: auto;
-    padding: 0.9rem 1rem 1.25rem;
-    background: #fafbff;
-  }
-
-  .wb-form {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    gap: 0.55rem;
+    padding: 0.45rem;
+    overflow: hidden;
+    background: #eef1f8;
+    box-sizing: border-box;
   }
 
-  .wb-form label {
+  .wb-split {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #374151;
+    overflow: hidden;
+    box-sizing: border-box;
   }
 
-  .wb-form input,
-  .wb-form select {
+  /* Painel flutuante ao lado da coluna de botões do mapa (Equipamentos / Prédios / …) */
+  .wb-equip-panel {
+    position: absolute;
+    right: 56px;
+    bottom: 10px;
+    z-index: 6;
+    width: 380px;
+    height: 220px;
+    min-width: 220px;
+    min-height: 120px;
+    max-width: calc(100% - 20px);
+    max-height: calc(100% - 20px);
+    display: flex;
+    flex-direction: column;
+    background: #ffffff;
     border: 1px solid #d1d5db;
-    border-radius: 8px;
-    padding: 0.55rem 0.65rem;
-    font-size: 0.88rem;
-    font-weight: 500;
-    color: #111827;
-    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
+    box-sizing: border-box;
+    overflow: hidden;
+    resize: both;
   }
 
-  .wb-form input[readonly] {
-    background: #f3f4f6;
+  .wb-equip-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem;
+    flex-shrink: 0;
+    padding: 0.3rem 0.35rem 0.3rem 0.6rem;
+    border-bottom: 1px solid #e5e7eb;
+    cursor: move;
+    touch-action: none;
+    user-select: none;
   }
 
-  .hint {
-    font-weight: 500;
+  .wb-equip-panel-title {
+    font-size: 0.74rem;
+    font-weight: 700;
     color: #7b68ee;
   }
 
-  .wb-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-  }
-
-  .btn-primary,
-  .btn-secondary {
-    border: none;
-    border-radius: 8px;
-    padding: 0.65rem 0.9rem;
-    font-size: 0.85rem;
-    font-weight: 600;
+  .wb-equip-panel-close {
+    width: 24px;
+    height: 24px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #4b5563;
+    font-size: 1rem;
+    line-height: 1;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
   }
 
-  .btn-primary {
-    background: #6495ed;
-    color: #fff;
+  .wb-equip-panel-close:hover {
+    border-color: #a78bfa;
+    color: #7b68ee;
+    background: #f5f3ff;
   }
 
-  .btn-primary:disabled,
-  .btn-secondary:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
+  .wb-equip-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: auto;
+    padding: 0 0.45rem 0.45rem;
+    box-sizing: border-box;
   }
 
-  .btn-secondary {
+  .wb-equip-empty {
+    margin: 0;
+    padding: 0.75rem 0.35rem;
+    text-align: center;
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: #64748b;
+    line-height: 1.35;
+  }
+
+  .wb-equip-table-wrap {
+    width: 100%;
+    overflow: auto;
+  }
+
+  .wb-equip-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.68rem;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .wb-equip-table th,
+  .wb-equip-table td {
+    padding: 0.28rem 0.35rem;
+    text-align: center;
+    border-bottom: 1px solid #e5e7eb;
+    border-right: 1px solid #e5e7eb;
+    white-space: nowrap;
+    max-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: cell;
+    vertical-align: middle;
+  }
+
+  .wb-equip-table th:last-child,
+  .wb-equip-table td:last-child {
+    border-right: none;
+  }
+
+  .wb-equip-table th {
+    position: sticky;
+    top: 0;
+    background: #f8fafc;
+    color: #4b5563;
+    font-weight: 700;
+    z-index: 1;
+    cursor: pointer;
+    border-bottom: 2px solid #e5e7eb;
+  }
+
+  .wb-equip-table th.selected {
+    background: rgba(100, 149, 237, 0.2) !important;
+    color: #1e40af;
+    border-bottom: 2px solid #6495ed !important;
+  }
+
+  .wb-equip-table td.cell-selected {
+    background: rgba(100, 149, 237, 0.15) !important;
+    outline: 2px solid #6495ed;
+    outline-offset: -2px;
+    position: relative;
+  }
+
+  .wb-equip-table tr.row-selected td {
+    background: rgba(100, 149, 237, 0.1) !important;
+  }
+
+  .wb-equip-table tr.row-selected td.cell-selected {
+    background: rgba(100, 149, 237, 0.18) !important;
+  }
+
+  .wb-equip-table .wb-equip-check-col {
+    width: 1.75rem;
+    max-width: 2rem;
+    text-align: center;
+    cursor: default;
+    overflow: visible;
+  }
+
+  .wb-equip-table .wb-equip-check-col input[type='checkbox'] {
+    width: 0.85rem;
+    height: 0.85rem;
+    margin: 0;
+    cursor: pointer;
+    accent-color: #7b68ee;
+  }
+
+  .wb-equip-table .wb-equip-num-col {
+    width: 2rem;
+    max-width: 2.5rem;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wb-equip-table td:nth-child(2),
+  .wb-equip-table th:nth-child(2) {
+    width: 2rem;
+    max-width: 2.5rem;
+  }
+
+  .wb-status-badge {
+    display: inline-block;
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.62rem;
+    font-weight: 700;
     background: #e5e7eb;
     color: #374151;
   }
 
-  .wb-map-pane {
-    min-width: 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding: 0.75rem;
-    background: #eef1f8;
+  .wb-status-badge.ativado {
+    background: #dcfce7;
+    color: #166534;
   }
 
-  .wb-map-label {
-    font-size: 0.78rem;
+  .wb-status-badge.desativado {
+    background: #fee2e2;
+    color: #991b1b;
+  }
+
+  .hint {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: #7b68ee;
+  }
+
+  .wb-map-preview-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.35rem;
+  }
+
+  .wb-map-preview-label {
+    font-size: 0.95rem;
     font-weight: 600;
-    color: #374151;
+    color: #333;
+  }
+
+  .wb-map-preview-container {
+    width: 100%;
+    margin-top: 0.25rem;
+  }
+
+  .wb-preview-image-wrapper {
+    position: relative;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    border: 2px solid #ddd;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #fff;
+    line-height: 0;
+  }
+
+  .wb-preview-image {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    object-fit: contain;
+    object-position: center;
+    vertical-align: top;
+  }
+
+  .wb-preview-loading {
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+    background: #f5f5f5;
+    border: 2px dashed #ddd;
+    border-radius: 6px;
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+  }
+
+  .wb-preview-loading p {
+    margin: 0.75rem 0 0;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #7b68ee;
+  }
+
+  .wb-loading-spinner {
+    border: 4px solid #f3f3f3;
+    border-top: 4px solid #7b68ee;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: wb-spin 1s linear infinite;
+    margin: 0 auto;
+  }
+
+  @keyframes wb-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .wb-preview-hint {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+    color: #666;
+    font-style: italic;
+    text-align: center;
+    line-height: 1.3;
+  }
+
+  .wb-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    z-index: 2147483646;
+    padding: 16px;
+    box-sizing: border-box;
+    overflow-y: auto;
+  }
+
+  .wb-modal-content {
+    background: #fff;
+    border-radius: 12px;
+    max-width: 600px;
+    width: 100%;
+    max-height: none;
+    overflow: visible;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    box-sizing: border-box;
+    margin: 0 auto 24px;
+  }
+
+  .wb-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.85rem 1.1rem;
+    border-bottom: 2px solid #7b68ee;
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    color: #fff;
+  }
+
+  .wb-modal-header h2 {
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: 600;
+  }
+
+  .wb-modal-close {
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 1.75rem;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    line-height: 1;
+  }
+
+  .wb-modal-close:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .wb-modal-body {
+    padding: 1.25rem 1.35rem 1.35rem;
+  }
+
+  .wb-modal-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .wb-modal-field {
+    margin-bottom: 1rem;
+  }
+
+  .wb-modal-field label {
+    display: block;
     margin-bottom: 0.4rem;
+    font-weight: 600;
+    color: #333;
+    font-size: 0.95rem;
+  }
+
+  .wb-modal-field input,
+  .wb-modal-field select {
+    width: 100%;
+    border: 2px solid #ddd;
+    border-radius: 6px;
+    padding: 0.65rem 0.75rem;
+    font-size: 0.95rem;
+    color: #111827;
+    background: #fff;
+    box-sizing: border-box;
+  }
+
+  .wb-modal-field input[readonly] {
+    background: #f3f4f6;
+  }
+
+  .wb-modal-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 0.55rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .wb-modal-btn-cancel,
+  .wb-modal-btn-save,
+  .wb-modal-btn-pdf {
+    border: none;
+    border-radius: 6px;
+    padding: 0.5rem 0.85rem;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .wb-modal-btn-cancel {
+    background: #e5e7eb;
+    color: #374151;
+  }
+
+  .wb-modal-btn-save {
+    background: #6495ed;
+    color: #fff;
+  }
+
+  .wb-modal-btn-pdf {
+    background: #7b68ee;
+    color: #fff;
+  }
+
+  .wb-modal-btn-cancel:disabled,
+  .wb-modal-btn-save:disabled,
+  .wb-modal-btn-pdf:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .wb-map-pane {
+    flex: 1 1 auto;
+    align-self: stretch;
+    min-width: 0;
+    min-height: 0;
+    width: auto;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    background: transparent;
+    box-sizing: border-box;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .wb-map-search-box {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 25;
+    width: 260px;
+    min-width: 260px;
+    /* Não encolher abaixo do texto dos botões (Gerar Relatório) */
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding: 0.5rem 0.55rem;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12);
+    box-sizing: border-box;
+    pointer-events: auto;
+    max-height: calc(100% - 20px);
+    overflow-x: visible;
+    overflow-y: auto;
+  }
+
+  .wb-map-search-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #7b68ee;
+    line-height: 1.2;
+  }
+
+  .wb-map-search-input {
+    width: 100%;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    padding: 0.35rem 0.45rem;
+    font-size: 0.74rem;
+    font-weight: 500;
+    color: #111827;
+    background: #fff;
+    box-sizing: border-box;
+    min-height: 1.85rem;
+  }
+
+  .wb-map-search-input:focus {
+    outline: none;
+    border-color: #a78bfa;
+    box-shadow: 0 0 0 2px rgba(123, 104, 238, 0.18);
+  }
+
+  .wb-map-search-actions {
+    display: flex;
+    gap: 0.35rem;
+  }
+
+  .wb-map-search-error {
+    margin: 0;
+    padding: 0.3rem 0.35rem;
+    border-radius: 6px;
+    background: #fef2f2;
+    color: #b91c1c;
+    font-size: 0.68rem;
+    line-height: 1.3;
+  }
+
+  .wb-fora-limite-box {
+    margin-top: 0.15rem;
+    padding: 0.45rem 0.5rem;
+    background: linear-gradient(135deg, #ffe0b2 0%, #ffcc80 100%);
+    border: 1.5px solid #ff9800;
+    border-radius: 8px;
+    box-shadow: 0 2px 6px rgba(255, 152, 0, 0.18);
+  }
+
+  .wb-fora-limite-header {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-bottom: 0.2rem;
+  }
+
+  .wb-fora-limite-icon {
+    font-size: 0.85rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .wb-fora-limite-title {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #e65100;
+    line-height: 1.2;
+  }
+
+  .wb-fora-limite-info {
+    all: unset;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 999px;
+    flex-shrink: 0;
+  }
+
+  .wb-fora-limite-info:focus-visible {
+    outline: 2px solid #ff9800;
+    outline-offset: 1px;
+  }
+
+  .wb-fora-limite-text {
+    margin: 0;
+    font-size: 0.66rem;
+    line-height: 1.35;
+    color: #e65100;
+  }
+
+  .wb-fora-limite-text strong {
+    color: #e65100;
+    font-weight: 700;
+  }
+
+  .wb-fora-limite-modal {
+    max-width: min(420px, calc(100vw - 2rem));
+  }
+
+  .wb-fora-limite-modal .wb-modal-body {
+    padding: 0.85rem 1rem 1rem;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    color: #374151;
+  }
+
+  .wb-fora-limite-modal .wb-modal-body p {
+    margin: 0;
+  }
+
+  .wb-map-btn {
+    flex: 1 1 auto;
+    border: none;
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    cursor: pointer;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .wb-map-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .wb-map-btn-locate {
+    background: #7b68ee;
+    color: #fff;
+  }
+
+  .wb-map-btn-locate:hover:not(:disabled) {
+    background: #6a58e0;
+  }
+
+  .wb-map-btn-report {
+    background: #6495ed;
+    color: #fff;
+  }
+
+  .wb-map-btn-report:hover:not(:disabled) {
+    background: #4f7fd6;
+  }
+
+  .wb-dots {
+    display: inline-block;
+    margin-left: 1px;
+  }
+
+  .wb-dots span {
+    display: inline-block;
+    animation: wb-dot-blink 1.2s infinite ease-in-out both;
+    will-change: opacity, transform;
+  }
+
+  .wb-dots span:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .wb-dots span:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  @keyframes wb-dot-blink {
+    0%,
+    80%,
+    100% {
+      opacity: 0.15;
+      transform: translateY(0);
+    }
+    40% {
+      opacity: 1;
+      transform: translateY(-2px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .wb-dots span {
+      animation: none;
+    }
   }
 
   .wb-map-host {
     flex: 1;
+    min-width: 0;
     min-height: 0;
-    border-radius: 12px;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 0;
     overflow: hidden;
-    border: 1px solid #d1d5db;
-    background: #fff;
+    border: none;
+    background: transparent;
+    box-sizing: border-box;
   }
 
   .wb-map-host :global(.viabilidade-content.embedded) {
     height: 100%;
-    min-height: 420px;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .wb-map-host :global(.viabilidade-content.workbench-mode .main-layout) {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .wb-map-host :global(.viabilidade-content.workbench-mode .search-panel),
+  .wb-map-host :global(.viabilidade-content.workbench-mode .resize-handle-vertical),
+  .wb-map-host :global(.viabilidade-content.workbench-mode .resize-handle-horizontal) {
+    display: none !important;
+  }
+
+  .wb-map-host :global(.viabilidade-content.workbench-mode .main-area) {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    box-sizing: border-box;
+  }
+
+  .wb-map-host :global(.viabilidade-content.workbench-mode .results-table-container),
+  .wb-map-host :global(.viabilidade-content.workbench-mode .empty-state),
+  .wb-map-host :global(.viabilidade-content.workbench-mode .map-container) {
+    max-width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
   }
 
   .wb-map-placeholder {
@@ -581,29 +3392,90 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 12px;
+    border-radius: 10px;
     border: 1px dashed #cbd5e1;
     color: #64748b;
     background: #fff;
+    padding: 1rem;
+    text-align: center;
+    font-size: 0.8rem;
   }
 
-  .wb-map-hint {
-    margin: 0.45rem 0 0;
+  /* ——— Layout mobile (app Capacitor / ?layout=mobile) ——— */
+  .workbench.layout-mobile {
+    background: #f4f6fb;
+  }
+
+  .workbench.layout-mobile .wb-error {
+    padding: 0.4rem 0.65rem;
     font-size: 0.72rem;
-    color: #6b7280;
-    font-style: italic;
+    line-height: 1.3;
   }
 
-  @media (max-width: 900px) {
-    .wb-body {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto 1fr;
-    }
+  .workbench.layout-mobile .wb-body {
+    padding: 0.25rem;
+    gap: 0.3rem;
+    background: #f4f6fb;
+  }
 
-    .wb-form-pane {
-      border-right: none;
-      border-bottom: 1px solid #e5e7eb;
-      max-height: 42vh;
-    }
+  .workbench.layout-mobile .wb-equip-panel {
+    top: 8px;
+    bottom: auto;
+    right: 52px;
+    width: calc(100% - 68px);
+    height: 45%;
+  }
+
+  .workbench.layout-mobile .wb-map-search-box {
+    top: auto;
+    right: 8px;
+    left: 8px;
+    bottom: 8px;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    padding: 0.45rem 0.5rem;
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18);
+  }
+
+  .workbench.layout-mobile .wb-map-search-label {
+    font-size: 0.65rem;
+  }
+
+  .workbench.layout-mobile .wb-map-search-input {
+    font-size: 0.8rem;
+    min-height: 2.15rem;
+    padding: 0.45rem 0.55rem;
+    border-radius: 8px;
+  }
+
+  .workbench.layout-mobile .wb-map-search-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+  }
+
+  .workbench.layout-mobile .wb-map-btn {
+    min-height: 2.25rem;
+    font-size: 0.72rem;
+    padding: 0.45rem 0.35rem;
+    border-radius: 8px;
+  }
+
+  .workbench.layout-mobile .wb-fora-limite-box {
+    padding: 0.4rem 0.45rem;
+  }
+
+  .workbench.layout-mobile .wb-fora-limite-title {
+    font-size: 0.7rem;
+  }
+
+  .workbench.layout-mobile .wb-fora-limite-text {
+    font-size: 0.68rem;
+  }
+
+  .workbench.layout-mobile .wb-map-host :global(.viabilidade-content.workbench-mode .map-container) {
+    border-radius: 8px !important;
   }
 </style>

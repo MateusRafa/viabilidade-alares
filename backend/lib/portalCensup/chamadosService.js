@@ -3,7 +3,8 @@ import path from 'path';
 import crypto from 'crypto';
 import { analisarLocalizacaoChamado } from './analiseLocalizacao.js';
 import { isPortalCensupSupabaseAvailable } from './supabaseCensup.js';
-import { dbFindChamado, dbListAllChamados, dbListChamadosNaFila, dbReconcileChamadosComAgenda, dbUpsertChamado } from './chamadosDb.js';
+import { dbFindChamado, dbListAllChamados, dbListChamadosNaFila, dbReconcileChamadosComAgenda, dbRestoreChamadosSalvosArquivados, dbUpsertChamado, stripHeavyPersistFields } from './chamadosDb.js';
+import { peekAtribuicaoPedido } from './filaEsteira.js';
 
 const FAKE_SEED_ID = '5303036a-6e14-4ca1-b5a7-46207c301735';
 const FAKE_SEED_PEDIDO = '1745000';
@@ -89,18 +90,169 @@ async function trySupabase(action, fn) {
   }
 }
 
-function formatDataSituacao(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toLocaleString('pt-BR', {
+const TZ_BR = 'America/Sao_Paulo';
+
+function parseSituacaoDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  // Agenda: relógio de Brasília (sem DST desde 2019)
+  const br = raw.match(
+    /(\d{2})\/(\d{2})\/(\d{4})(?:,?\s*(\d{2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (br) {
+    const [, dd, mm, yyyy, hh = '00', mi = '00', ss = '00'] = br;
+    const d = new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}-03:00`);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Divide "18/09/2026, 14:18:45" da Agenda sem converter fuso. */
+function splitAgendaDataHora(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const m = raw.match(/(\d{2}\/\d{2}\/\d{4})(?:,?\s*(\d{2}:\d{2}(?::\d{2})?))?/);
+  if (!m) return null;
+  let hora = m[2] || '';
+  if (hora && /^\d{2}:\d{2}$/.test(hora)) hora = `${hora}:00`;
+  return { data: m[1], hora: hora || null };
+}
+
+function formatDataSituacao(value) {
+  const split = splitAgendaDataHora(value);
+  if (split?.data) return split.data;
+
+  const d = parseSituacaoDate(value);
+  if (!d) return value ? String(value) : '—';
+  return d.toLocaleDateString('pt-BR', {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
+    timeZone: TZ_BR
+  });
+}
+
+/** Hora com segundos — Agenda / SALVO EM. */
+function formatHoraCompleta(value) {
+  const split = splitAgendaDataHora(value);
+  if (split?.hora) return split.hora;
+
+  const d = parseSituacaoDate(value);
+  if (!d) return '—';
+  return d.toLocaleTimeString('pt-BR', {
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit'
+    second: '2-digit',
+    timeZone: TZ_BR
   });
+}
+
+function resolveDataSituacaoSource(item) {
+  return item?.dataSituacaoRaw || item?.dataSituacao || null;
+}
+
+/** Partes de hora em America/Sao_Paulo. */
+function getBrHourMinute(date) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: TZ_BR,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return { hour, minute };
+}
+
+/**
+ * Janela sem equipe online: 20:20 → 08:00 (horário de Brasília).
+ * Nesses casos a Hora da Abertura vem da Data Situação (só o horário).
+ */
+function isJanelaSemEquipe(date) {
+  if (!date || Number.isNaN(date.getTime())) return false;
+  const hm = getBrHourMinute(date);
+  if (!hm) return false;
+  const mins = hm.hour * 60 + hm.minute;
+  return mins >= 20 * 60 + 20 || mins < 8 * 60;
+}
+
+/**
+ * Hora da Abertura:
+ * - Padrão: momento em que o chamado chegou para o time (createdAt na esteira).
+ * - Exceção 20:20–08h: usa Data Situação da Agenda (somente a hora).
+ */
+function resolveHoraAberturaSource(item) {
+  const dataSit = resolveDataSituacaoSource(item);
+  const dataSitDate = parseSituacaoDate(dataSit);
+  if (dataSitDate && isJanelaSemEquipe(dataSitDate)) {
+    return dataSit;
+  }
+  return item?.createdAt || item?.filaAtribuidaEm || dataSit || null;
+}
+
+/** Formato do Tempo da Análise: 0s…59s, depois 1:00m, 1:01m… */
+function formatAnaliseDuracaoMs(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}:${String(sec).padStart(2, '0')}m`;
+}
+
+/**
+ * Tempo da Análise = só o valor gravado pela extensão no Supabase
+ * (analiseDuracaoLabel / analiseDuracaoMs). Sem estimar por abertura/fechamento.
+ */
+function resolveHoraAnaliseLabel(item) {
+  const label = String(item?.analiseDuracaoLabel || '').trim();
+  if (label && label !== '—') return label;
+
+  if (item?.analiseDuracaoMs != null && item?.analiseDuracaoMs !== '') {
+    const fromMs = formatAnaliseDuracaoMs(Number(item.analiseDuracaoMs));
+    if (fromMs) return fromMs;
+  }
+
+  return '—';
+}
+
+function resolveHoraFechamentoIso(item) {
+  return (
+    item?.relatorioSalvoAt ||
+    item?.relatorio?.savedAt ||
+    item?.geradoEm ||
+    (item?.filaStatus === 'finalizada' || item?.relatorioSalvo === true
+      ? item?.updatedAt
+      : null) ||
+    null
+  );
+}
+
+function isEmAnaliseChamado(item) {
+  if (!item) return false;
+  if (extractAnalistaFromSituacao(item.situacao)) return true;
+  if (String(item.usuarioAnalise || '').trim()) return true;
+  return /em\s+an[aá]lise/i.test(String(item.situacao || ''));
+}
+
+function withPortalListLabels(item) {
+  const dataSit = resolveDataSituacaoSource(item);
+  return {
+    ...item,
+    dataSituacaoLabel: formatDataSituacao(dataSit),
+    horaAberturaLabel: formatHoraCompleta(resolveHoraAberturaSource(item)),
+    horaAnaliseLabel: resolveHoraAnaliseLabel(item),
+    horaFechamentoLabel: formatHoraCompleta(resolveHoraFechamentoIso(item)),
+    situacaoLabel: formatSituacaoLabel(item)
+  };
 }
 
 function extractAnalistaFromSituacao(situacao) {
@@ -123,7 +275,30 @@ function isPendenteNaAgenda(situacao) {
   return isDateLikeSituacao(raw);
 }
 
+export function resolveResultadoFinal(chamado) {
+  const explicit = String(chamado?.resultadoFinal || chamado?.relatorio?.resultadoFinal || '')
+    .trim()
+    .toLowerCase();
+  if (explicit === 'aprovado' || explicit === 'reprovado') return explicit;
+
+  const tab = String(
+    chamado?.tabulacaoFinal || chamado?.relatorio?.tabulacaoFinal || ''
+  ).trim();
+  if (!tab) return null;
+  return /^aprovado\b/i.test(tab) ? 'aprovado' : 'reprovado';
+}
+
 export function formatSituacaoLabel(chamado) {
+  const fila = chamado?.filaStatus || 'na_fila';
+  const salvo = chamado?.relatorioSalvo === true || fila === 'finalizada';
+
+  if (salvo) {
+    const resultado = resolveResultadoFinal(chamado);
+    if (resultado === 'aprovado') return 'Aprovado';
+    if (resultado === 'reprovado') return 'Reprovado';
+    return 'Finalizado';
+  }
+
   const raw = String(chamado?.situacao ?? '').trim();
   const analista = extractAnalistaFromSituacao(raw) || String(chamado?.usuarioAnalise ?? '').trim();
 
@@ -144,6 +319,13 @@ export async function claimChamadoForAnalise(id, usuario) {
   if (!chamado || !nome) return chamado;
 
   if (extractAnalistaFromSituacao(chamado.situacao) || chamado.usuarioAnalise) {
+    // Já em análise: garante o carimbo da Hora da Análise se ainda faltar
+    if (!chamado.analiseIniciadaEm) {
+      return upsertChamado({
+        ...chamado,
+        analiseIniciadaEm: new Date().toISOString()
+      });
+    }
     return chamado;
   }
 
@@ -153,8 +335,46 @@ export async function claimChamadoForAnalise(id, usuario) {
 
   return upsertChamado({
     ...chamado,
-    usuarioAnalise: nome
+    usuarioAnalise: nome,
+    analiseIniciadaEm: chamado.analiseIniciadaEm || new Date().toISOString()
   });
+}
+
+/** Grava a duração do cronômetro interno (Tempo da Análise) ao fechar o chamado. */
+export async function saveAnaliseDuracao({
+  id = null,
+  pedido = null,
+  analiseDuracaoLabel = null,
+  analiseDuracaoMs = null
+} = {}) {
+  const label = String(analiseDuracaoLabel || '').trim();
+  if (!label) {
+    const err = new Error('analiseDuracaoLabel é obrigatório');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const pedidoKey = String(pedido || id || '').trim();
+  const chamado = await findChamadoByPedidoOrCode({
+    id: id && isUuid(id) ? id : null,
+    pedido: pedidoKey || null
+  });
+  if (!chamado) {
+    const err = new Error(`Chamado não encontrado${pedidoKey ? ` (pedido ${pedidoKey})` : ''}`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const ms = Number(analiseDuracaoMs);
+  const saved = await upsertChamado({
+    ...chamado,
+    analiseDuracaoLabel: label,
+    analiseDuracaoMs: Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : chamado.analiseDuracaoMs || null
+  });
+  console.log(
+    `✅ [PortalCENSUP] Tempo da Análise salvo — pedido ${saved?.pedido || pedidoKey}: ${label}`
+  );
+  return saved;
 }
 
 function escapeHtml(value) {
@@ -164,6 +384,14 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/** Evita gravar/exibir o texto literal "null" / "undefined". */
+function cleanText(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!s || /^null$/i.test(s) || /^undefined$/i.test(s)) return null;
+  return s;
 }
 
 function getMapsApiKey() {
@@ -176,9 +404,10 @@ function getMapsApiKey() {
 }
 
 function formatCep(cep) {
-  const digits = String(cep || '').replace(/\D/g, '');
+  let digits = String(cep || '').replace(/\D/g, '');
+  if (digits.length > 8) digits = digits.slice(0, 8);
   if (digits.length === 8) return `${digits.slice(0, 5)}-${digits.slice(5)}`;
-  return cep || '—';
+  return digits || cep || '—';
 }
 
 function buildStaticMapUrl(lat, lng) {
@@ -230,8 +459,9 @@ export function buildChamadoPdfHtml(chamado) {
   const totalPortas =
     resumo.portasDisponiveis ??
     ctos.reduce((sum, cto) => {
-      const total = Number(cto.vagas_total ?? cto.totalPortas ?? 0);
-      const conectadas = Number(cto.clientes_conectados ?? cto.portasConectadas ?? 0);
+      const conectadas = Math.max(0, Number(cto.clientes_conectados ?? cto.portasConectadas ?? 0));
+      let total = Math.max(0, Number(cto.vagas_total ?? cto.totalPortas ?? 0));
+      if (total < conectadas) total = conectadas;
       return sum + Math.max(0, total - conectadas);
     }, 0);
 
@@ -255,6 +485,18 @@ export function buildChamadoPdfHtml(chamado) {
   }
 
   const mapUrl = buildStaticMapUrl(lat, lng);
+  const mapPreviewRaw =
+    chamado.mapPreviewImage ||
+    chamado.relatorio?.mapPreviewImage ||
+    chamado.previewImage ||
+    '';
+  // data:image base64 do Workbench — usar sem escape que quebre o data URL
+  const mapPreviewSrc =
+    typeof mapPreviewRaw === 'string' && mapPreviewRaw.startsWith('data:image')
+      ? mapPreviewRaw
+      : mapPreviewRaw
+        ? escapeHtml(mapPreviewRaw)
+        : '';
   const coordsTxt =
     lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)
       ? `${lat.toFixed(6)}, ${lng.toFixed(6)}`
@@ -264,8 +506,10 @@ export function buildChamadoPdfHtml(chamado) {
     ctos.length > 0
       ? ctos
           .map((cto, index) => {
-            const total = Number(cto.vagas_total ?? cto.totalPortas ?? 0);
-            const conectadas = Number(cto.clientes_conectados ?? cto.portasConectadas ?? 0);
+            const conectadas = Math.max(0, Number(cto.clientes_conectados ?? cto.portasConectadas ?? 0));
+            let total = Math.max(0, Number(cto.vagas_total ?? cto.totalPortas ?? 0));
+            // Base inconsistente (ex.: total 0 e conectadas 8) → total = conectadas
+            if (total < conectadas) total = conectadas;
             const disponiveis = Math.max(0, total - conectadas);
             const distM = Number(cto.distancia_metros ?? cto.distanciaMetros ?? 0);
             const distKm = (distM / 1000).toFixed(3);
@@ -292,13 +536,14 @@ export function buildChamadoPdfHtml(chamado) {
             </td>
           </tr>`;
 
-  const mapSection = mapUrl
+  const mapImgSrc = mapPreviewSrc || (mapUrl ? escapeHtml(mapUrl) : '');
+  const mapSection = mapImgSrc
     ? `
               <div class="map-section">
                 <h2>Visualização do Mapa</h2>
                 <div class="map-wrapper">
                   <div class="map-image-container">
-                    <img src="${escapeHtml(mapUrl)}" alt="Mapa com localização do cliente" class="map-image" />
+                    <img src="${mapImgSrc}" alt="Mapa com localização do cliente" class="map-image" />
                   </div>
                 </div>
               </div>`
@@ -306,7 +551,7 @@ export function buildChamadoPdfHtml(chamado) {
               <div class="map-section">
                 <h2>Visualização do Mapa</h2>
                 <div class="map-placeholder">
-                  Mapa indisponível — execute <strong>Analisar localização</strong> para obter coordenadas.
+                  Mapa indisponível — o relatório ainda não tem prévia capturada.
                 </div>
               </div>`;
 
@@ -624,11 +869,7 @@ function paginateStore(store, { q = '', page = 1, limit = 10, filaStatus = 'na_f
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
   const start = (safePage - 1) * safeLimit;
-  const items = filtered.slice(start, start + safeLimit).map((item) => ({
-    ...item,
-    dataSituacaoLabel: formatDataSituacao(item.dataSituacao),
-    situacaoLabel: formatSituacaoLabel(item)
-  }));
+  const items = filtered.slice(start, start + safeLimit).map((item) => withPortalListLabels(item));
 
   return {
     chamados: items,
@@ -642,11 +883,20 @@ function paginateStore(store, { q = '', page = 1, limit = 10, filaStatus = 'na_f
 }
 
 function withListLabels(chamados) {
-  return (chamados || []).map((item) => ({
-    ...item,
-    dataSituacaoLabel: formatDataSituacao(item.dataSituacao),
-    situacaoLabel: formatSituacaoLabel(item)
-  }));
+  return (chamados || []).map((item) => {
+    const light = { ...item };
+    delete light.pdfHtml;
+    delete light.mapPreviewImage;
+    delete light.previewImage;
+    if (light.relatorio && typeof light.relatorio === 'object') {
+      const rel = { ...light.relatorio };
+      delete rel.mapPreviewImage;
+      delete rel.previewImage;
+      delete rel.pdfHtml;
+      light.relatorio = rel;
+    }
+    return withPortalListLabels(light);
+  });
 }
 
 export function resolvePortalCensupFilaStatus(view = 'pendentes') {
@@ -657,6 +907,15 @@ export async function listChamados({ q = '', page = 1, limit = 10, view = 'pende
   const filaStatus = resolvePortalCensupFilaStatus(view);
 
   if (isPortalCensupSupabaseAvailable()) {
+    // Recupera salvos que o reconcile antigo marcou como executada_agenda
+    if (filaStatus === 'finalizada') {
+      try {
+        await dbRestoreChamadosSalvosArquivados();
+      } catch (err) {
+        console.warn('⚠️ [PortalCENSUP] Falha ao restaurar salvos arquivados:', err.message);
+      }
+    }
+
     const fromDb = await dbListChamadosNaFila({ q, page, limit, filaStatus });
     syncJsonFromSupabase().catch((err) => {
       console.warn('⚠️ [PortalCENSUP] Não atualizou o JSON local a partir da table:', err.message);
@@ -672,6 +931,25 @@ export async function listChamados({ q = '', page = 1, limit = 10, view = 'pende
       view: view === 'resolvidos' ? 'resolvidos' : 'pendentes',
       filaStatus
     };
+  }
+
+  // JSON local: restaurar salvos arquivados por engano
+  if (filaStatus === 'finalizada') {
+    const store = await readStore();
+    let restored = 0;
+    for (const item of store.chamados) {
+      const isSalvo =
+        item.relatorioSalvo === true ||
+        !!(item.pdfHtml || item.relatorio);
+      if (item.filaStatus === 'executada_agenda' && isSalvo) {
+        item.filaStatus = 'finalizada';
+        restored += 1;
+      }
+    }
+    if (restored > 0) {
+      await writeStore(store);
+      console.log(`✅ [PortalCENSUP] ${restored} relatório(s) salvo(s) restaurado(s) no JSON local.`);
+    }
   }
 
   return paginateStore(await readStore(), { q, page, limit, filaStatus }, {
@@ -694,14 +972,22 @@ export async function getChamadoById(id, { usuario } = {}) {
   }
 
   if (usuario) {
-    chamado = (await claimChamadoForAnalise(id, usuario)) || chamado;
+    const jaFinalizado =
+      chamado.filaStatus === 'finalizada' || chamado.relatorioSalvo === true;
+    if (!jaFinalizado) {
+      chamado = (await claimChamadoForAnalise(id, usuario)) || chamado;
+    }
   }
 
+  // Relatório finalizado: preservar o HTML/print salvo (não regenerar e perder o print do Workbench)
+  const savedPdfHtml =
+    chamado.relatorioSalvo && typeof chamado.pdfHtml === 'string' && chamado.pdfHtml.trim()
+      ? chamado.pdfHtml
+      : null;
+
   return {
-    ...chamado,
-    dataSituacaoLabel: formatDataSituacao(chamado.dataSituacao),
-    situacaoLabel: formatSituacaoLabel(chamado),
-    pdfHtml: buildChamadoPdfHtml(chamado)
+    ...withPortalListLabels(chamado),
+    pdfHtml: savedPdfHtml || buildChamadoPdfHtml(chamado)
   };
 }
 
@@ -763,8 +1049,8 @@ export async function upsertChamadoFromAgenda(payload) {
 }
 
 /**
- * Chamados que sumiram da Agenda (aprovados/reprovados lá) saem das views do Portal.
- * Não vão para Resolvidos — apenas fila_status = executada_agenda (oculto).
+ * Chamados que sumiram da Agenda saem da fila pendente (na_fila → executada_agenda).
+ * Relatórios finalizados/salvos NUNCA são arquivados — ficam no Portal para sempre.
  */
 export async function reconcileChamadosComAgenda(activePedidos = [], situacoes = []) {
   const activeSet = new Set(
@@ -798,17 +1084,26 @@ export async function reconcileChamadosComAgenda(activePedidos = [], situacoes =
   for (const item of store.chamados) {
     const status = item.filaStatus || 'na_fila';
     const pedido = String(item.pedido || '').trim();
+    const isSalvo =
+      item.relatorioSalvo === true ||
+      status === 'finalizada' ||
+      !!(item.pdfHtml || item.relatorio);
 
-    // Atualizar situação se mudou
-    if (pedido && situacaoMap.has(pedido)) {
+    // Atualizar situação da Agenda só em pendentes (não sobrescrever arquivo salvo)
+    if (!isSalvo && pedido && situacaoMap.has(pedido)) {
       const novaSituacao = situacaoMap.get(pedido);
       if (novaSituacao && novaSituacao !== item.situacao) {
+        const wasAnalise = isEmAnaliseChamado(item);
         item.situacao = novaSituacao;
+        if (!item.analiseIniciadaEm && isEmAnaliseChamado(item) && !wasAnalise) {
+          item.analiseIniciadaEm = new Date().toISOString();
+        }
         situacoesAtualizadas += 1;
       }
     }
 
-    if (status !== 'na_fila' && status !== 'finalizada') continue;
+    // Só arquiva pendentes da fila — nunca finalizados/salvos
+    if (status !== 'na_fila' || isSalvo) continue;
     if (!pedido || activeSet.has(pedido)) continue;
     item.filaStatus = 'executada_agenda';
     item.executadaAgendaAt = new Date().toISOString();
@@ -847,11 +1142,72 @@ export async function upsertChamado(payload) {
     crypto.randomUUID();
   const now = new Date().toISOString();
   const previous = existing || {};
+
+  // Esteira: se o pedido já foi atribuído na Agenda, grava no chamado
+  let esteiraUsuario = previous.usuarioFila || payload.usuarioFila || null;
+  let esteiraEm = previous.filaAtribuidaEm || payload.filaAtribuidaEm || null;
+  if (!esteiraUsuario && payload.pedido) {
+    try {
+      const atr = peekAtribuicaoPedido(payload.pedido);
+      if (atr?.usuarioFila) {
+        esteiraUsuario = atr.usuarioFila;
+        esteiraEm = atr.atribuidoEm || now;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  let analiseIniciadaEm =
+    previous.analiseIniciadaEm || payload.analiseIniciadaEm || null;
+  const wasAnalise = isEmAnaliseChamado(previous);
+  const draftForAnalise = {
+    situacao: payload.situacao ?? previous.situacao,
+    usuarioAnalise: payload.usuarioAnalise || previous.usuarioAnalise || null
+  };
+  if (!analiseIniciadaEm && isEmAnaliseChamado(draftForAnalise) && !wasAnalise) {
+    analiseIniciadaEm = now;
+  }
+
+  const analiseDuracaoLabel =
+    cleanText(payload.analiseDuracaoLabel) || previous.analiseDuracaoLabel || null;
+  const analiseDuracaoMs = (() => {
+    if (payload.analiseDuracaoMs != null && Number.isFinite(Number(payload.analiseDuracaoMs))) {
+      return Math.max(0, Math.round(Number(payload.analiseDuracaoMs)));
+    }
+    return previous.analiseDuracaoMs ?? null;
+  })();
+
+  // Não apagar campos de identidade com undefined/null vindos de patches parciais
+  const pickText = (...vals) => {
+    for (const v of vals) {
+      const c = cleanText(v);
+      if (c) return c;
+    }
+    return null;
+  };
+
   const next = {
     ...previous,
     ...payload,
     id,
+    pedido: payload.pedido != null && String(payload.pedido).trim() !== ''
+      ? String(payload.pedido).trim()
+      : previous.pedido != null
+        ? String(previous.pedido)
+        : null,
+    uf: pickText(payload.uf, previous.uf),
+    cidade: pickText(payload.cidade, previous.cidade),
+    sistema: pickText(payload.sistema, previous.sistema),
+    pdv: pickText(payload.pdv, previous.pdv),
+    motivo: pickText(payload.motivo, previous.motivo),
+    situacao: pickText(payload.situacao, previous.situacao),
     filaStatus: payload.filaStatus || previous.filaStatus || 'na_fila',
+    usuarioFila: esteiraUsuario || previous.usuarioFila || null,
+    filaAtribuidaEm: esteiraEm || previous.filaAtribuidaEm || null,
+    analiseIniciadaEm,
+    analiseDuracaoLabel,
+    analiseDuracaoMs,
     endereco: {
       ...(previous.endereco || {}),
       ...(payload.endereco || {})
@@ -865,33 +1221,39 @@ export async function upsertChamado(payload) {
     createdAt: previous.createdAt || now
   };
 
+  const toPersist = stripHeavyPersistFields(next);
+
   const store = await readStore();
   const existingIndex = store.chamados.findIndex(
-    (item) => item.id === id || (next.pedido && String(item.pedido) === String(next.pedido))
+    (item) => item.id === id || (toPersist.pedido && String(item.pedido) === String(toPersist.pedido))
   );
-  if (existingIndex >= 0) store.chamados[existingIndex] = { ...store.chamados[existingIndex], ...next };
-  else store.chamados.unshift(next);
+  if (existingIndex >= 0) {
+    store.chamados[existingIndex] = {
+      ...stripHeavyPersistFields(store.chamados[existingIndex]),
+      ...toPersist
+    };
+  } else store.chamados.unshift(toPersist);
   await writeStore(store);
 
   if (!isPortalCensupSupabaseAvailable()) {
     console.warn(
-      `⚠️ [PortalCENSUP] Pedido ${next.pedido} salvo só no JSON. Configure PORTAL_CENSUP_SUPABASE_URL e PORTAL_CENSUP_SUPABASE_SERVICE_KEY no backend Railway.`
+      `⚠️ [PortalCENSUP] Pedido ${toPersist.pedido} salvo só no JSON. Configure PORTAL_CENSUP_SUPABASE_URL e PORTAL_CENSUP_SUPABASE_SERVICE_KEY no backend Railway.`
     );
-    next.persistedToSupabase = false;
-    next.supabaseError =
+    toPersist.persistedToSupabase = false;
+    toPersist.supabaseError =
       'Supabase CENSUP não configurado neste processo. Confira as variáveis no serviço backend e faça Redeploy.';
-    return next;
+    return toPersist;
   }
 
   try {
-    const saved = await dbUpsertChamado(next);
-    console.log(`✅ [PortalCENSUP] Pedido ${next.pedido} gravado na tabela chamados do Supabase`);
-    return { ...(saved || next), persistedToSupabase: true };
+    const saved = await dbUpsertChamado(toPersist);
+    console.log(`✅ [PortalCENSUP] Pedido ${toPersist.pedido} gravado na tabela chamados do Supabase`);
+    return { ...(saved || toPersist), persistedToSupabase: true };
   } catch (err) {
-    console.error(`❌ [PortalCENSUP] Pedido ${next.pedido} NÃO gravou no Supabase:`, err.message);
-    next.persistedToSupabase = false;
-    next.supabaseError = err.message;
-    return next;
+    console.error(`❌ [PortalCENSUP] Pedido ${toPersist.pedido} NÃO gravou no Supabase:`, err.message);
+    toPersist.persistedToSupabase = false;
+    toPersist.supabaseError = err.message;
+    return toPersist;
   }
 }
 
@@ -922,7 +1284,10 @@ export async function syncFilaToSupabase() {
   return syncJsonFromSupabase();
 }
 
-export async function analisarChamadoById(id, { force = false } = {}) {
+export async function analisarChamadoById(
+  id,
+  { force = false, lat = null, lng = null, enderecoPatch = null } = {}
+) {
   const chamado = await findChamadoByPedidoOrCode({ id });
   if (!chamado) {
     const err = new Error('Chamado não encontrado');
@@ -941,11 +1306,41 @@ export async function analisarChamadoById(id, { force = false } = {}) {
     };
   }
 
-  await upsertChamado({
+  const hasManualCoords =
+    lat != null &&
+    lng != null &&
+    Number.isFinite(Number(lat)) &&
+    Number.isFinite(Number(lng));
+
+  const baseForUpsert = {
     ...chamado,
+    ...(hasManualCoords
+      ? {
+          mapaCoords: { lat: Number(lat), lng: Number(lng) },
+          localizacao: {
+            ...(chamado.localizacao || {}),
+            lat: Number(lat),
+            lng: Number(lng),
+            metodo: 'ajuste_manual_casinha'
+          }
+        }
+      : {}),
+    ...(enderecoPatch
+      ? {
+          endereco: {
+            ...(chamado.endereco || {}),
+            ...(enderecoPatch.completo != null ? { completo: enderecoPatch.completo } : {}),
+            ...(enderecoPatch.cidade != null ? { cidade: enderecoPatch.cidade } : {}),
+            ...(enderecoPatch.numero != null ? { numero: enderecoPatch.numero } : {}),
+            ...(enderecoPatch.cep != null ? { cep: enderecoPatch.cep } : {})
+          }
+        }
+      : {}),
     analiseStatus: 'processando',
     updatedAt: new Date().toISOString()
-  });
+  };
+
+  await upsertChamado(baseForUpsert);
 
   try {
     const current = await findChamadoByPedidoOrCode({ id });
@@ -1105,27 +1500,122 @@ export async function findLearnedTabulacaoForChamado(chamado) {
   return null;
 }
 
-export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persist = true } = {}) {
-  const chamado = await findChamadoByPedidoOrCode({ id });
+export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persist = true, seed = null } = {}) {
+  let chamado = await findChamadoByPedidoOrCode({ id, pedido: id });
+
+  // Primeira finalização: cria o chamado no Portal só agora (não na abertura da extensão)
   if (!chamado) {
-    const err = new Error('Chamado não encontrado');
-    err.statusCode = 404;
-    throw err;
+    const pedido =
+      String(report.numeroALA || seed?.pedido || id || '')
+        .replace(/\D/g, '') || String(id || '').trim();
+    if (!pedido) {
+      const err = new Error('Chamado não encontrado e sem pedido para criar');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const seedEnd = seed?.endereco && typeof seed.endereco === 'object' ? seed.endereco : {};
+    const lat =
+      report.latitude != null
+        ? Number(report.latitude)
+        : seed?.mapaCoords?.lat ?? seed?.localizacao?.lat ?? seed?.lat ?? null;
+    const lng =
+      report.longitude != null
+        ? Number(report.longitude)
+        : seed?.mapaCoords?.lng ?? seed?.localizacao?.lng ?? seed?.lng ?? null;
+
+    chamado = await upsertChamado({
+      pedido,
+      agendaCode: cleanText(seed?.agendaCode) || null,
+      uf: cleanText(seed?.uf) || cleanText(seedEnd.uf) || null,
+      cidade:
+        cleanText(report.cidade) ||
+        cleanText(seed?.cidade) ||
+        cleanText(seedEnd.cidade) ||
+        null,
+      sistema: cleanText(seed?.sistema) || null,
+      pdv: cleanText(seed?.pdv) || null,
+      motivo: cleanText(seed?.motivo) || null,
+      situacao: cleanText(seed?.situacao) || null,
+      dataSituacao:
+        parseSituacaoDate(seed?.dataSituacao || seed?.dataSituacaoRaw)?.toISOString() ||
+        seed?.dataSituacao ||
+        seed?.dataSituacaoRaw ||
+        null,
+      dataSituacaoRaw: cleanText(seed?.dataSituacaoRaw || seed?.dataSituacao) || null,
+      endereco: {
+        ...seedEnd,
+        completo:
+          cleanText(report.enderecoCompleto) ||
+          cleanText(seedEnd.completo) ||
+          cleanText(seed?.enderecoCompleto) ||
+          null,
+        numero:
+          cleanText(report.numeroEndereco) ||
+          cleanText(seedEnd.numero) ||
+          cleanText(seed?.numeroEndereco) ||
+          null,
+        cep: cleanText(report.cep) || cleanText(seedEnd.cep) || cleanText(seed?.cep) || null,
+        cidade:
+          cleanText(report.cidade) ||
+          cleanText(seedEnd.cidade) ||
+          cleanText(seed?.cidade) ||
+          null,
+        uf: cleanText(seed?.uf) || cleanText(seedEnd.uf) || null
+      },
+      mapaCoords:
+        lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)
+          ? { lat, lng }
+          : seed?.mapaCoords || seed?.localizacao || null,
+      origem: 'workbench-finalize',
+      agendaUrl: cleanText(seed?.agendaUrl) || null,
+      filaStatus: 'na_fila'
+    });
+  }
+
+  // Completa meta vazia com o seed (casos já criados sem UF/PDV/etc.)
+  if (seed && typeof seed === 'object') {
+    const seedEnd = seed.endereco && typeof seed.endereco === 'object' ? seed.endereco : {};
+    chamado = {
+      ...chamado,
+      uf: cleanText(chamado.uf) || cleanText(seed.uf) || cleanText(seedEnd.uf) || null,
+      sistema: cleanText(chamado.sistema) || cleanText(seed.sistema) || null,
+      pdv: cleanText(chamado.pdv) || cleanText(seed.pdv) || null,
+      motivo: cleanText(chamado.motivo) || cleanText(seed.motivo) || null,
+      situacao: cleanText(chamado.situacao) || cleanText(seed.situacao) || null,
+      dataSituacao:
+        chamado.dataSituacao ||
+        parseSituacaoDate(seed.dataSituacao || seed.dataSituacaoRaw)?.toISOString() ||
+        seed.dataSituacao ||
+        seed.dataSituacaoRaw ||
+        null,
+      dataSituacaoRaw:
+        cleanText(chamado.dataSituacaoRaw) ||
+        cleanText(seed.dataSituacaoRaw || seed.dataSituacao) ||
+        null,
+      cidade:
+        cleanText(chamado.cidade) ||
+        cleanText(seed.cidade) ||
+        cleanText(seedEnd.cidade) ||
+        null
+    };
   }
 
   const numeroALA = String(report.numeroALA || chamado.pedido || '').replace(/\D/g, '');
-  const cidade = String(report.cidade || chamado.endereco?.cidade || chamado.cidade || '').trim();
-  const enderecoCompleto = String(report.enderecoCompleto || chamado.endereco?.completo || '').trim();
-  const numeroEndereco = String(report.numeroEndereco || chamado.endereco?.numero || '').trim();
-  const cep = String(report.cep || chamado.endereco?.cep || '').trim();
-  const tabulacaoFinal = String(report.tabulacaoFinal || '').trim();
-  const projetista = String(report.projetista || usuario || '').trim();
-  const sugeridaOriginal = String(
+  const cidade = cleanText(report.cidade) || cleanText(chamado.endereco?.cidade) || cleanText(chamado.cidade) || '';
+  const enderecoCompleto =
+    cleanText(report.enderecoCompleto) || cleanText(chamado.endereco?.completo) || '';
+  const numeroEndereco =
+    cleanText(report.numeroEndereco) || cleanText(chamado.endereco?.numero) || '';
+  const cep = cleanText(report.cep) || cleanText(chamado.endereco?.cep) || '';
+  const tabulacaoFinal = cleanText(report.tabulacaoFinal) || '';
+  const projetista = cleanText(report.projetista) || cleanText(usuario) || '';
+  const sugeridaOriginal = cleanText(
     report.tabulacaoSugeridaOriginal ||
       chamado.analiseIa?.tabulacaoSugerida ||
       chamado.tabulacaoFinal ||
       ''
-  ).trim();
+  ) || '';
 
   if (!tabulacaoFinal) {
     const err = new Error('Tabulação Final é obrigatória');
@@ -1133,10 +1623,50 @@ export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persi
     throw err;
   }
 
+  const mapPreviewImage = String(
+    report.mapPreviewImage || report.previewImage || chamado.mapPreviewImage || ''
+  ).trim();
+  const clientPdfHtml = String(report.pdfHtml || '').trim();
+  const resultadoFinal =
+    resolveResultadoFinal({ tabulacaoFinal }) || 'reprovado';
+
+  // Hora do Fechamento = momento exato em que a ordem é fechada (gerar/salvar PDF).
+  const fechamentoIso = new Date().toISOString();
+
+  // Relê o chamado para não perder Tempo da Análise / motivo gravados pela extensão
+  const fresh = (await findChamadoByPedidoOrCode({
+    id: chamado.id,
+    pedido: chamado.pedido
+  })) || chamado;
+
+  // Só persiste Tempo da Análise se a extensão / Workbench enviou o cronômetro
+  const analiseDuracaoLabel =
+    cleanText(report.analiseDuracaoLabel) ||
+    cleanText(chamado.analiseDuracaoLabel) ||
+    cleanText(fresh.analiseDuracaoLabel) ||
+    null;
+  const analiseDuracaoMs =
+    report.analiseDuracaoMs ??
+    chamado.analiseDuracaoMs ??
+    fresh.analiseDuracaoMs ??
+    null;
+
   const next = {
+    ...fresh,
     ...chamado,
     pedido: numeroALA || chamado.pedido,
-    cidade: cidade || chamado.cidade,
+    uf: cleanText(chamado.uf) || cleanText(fresh.uf) || null,
+    cidade: cidade || cleanText(chamado.cidade) || cleanText(fresh.cidade) || null,
+    sistema: cleanText(chamado.sistema) || cleanText(fresh.sistema) || null,
+    pdv: cleanText(chamado.pdv) || cleanText(fresh.pdv) || null,
+    motivo:
+      cleanText(report.motivo) ||
+      cleanText(chamado.motivo) ||
+      cleanText(fresh.motivo) ||
+      cleanText(seed?.motivo) ||
+      null,
+    analiseDuracaoLabel,
+    analiseDuracaoMs,
     endereco: {
       ...(chamado.endereco || {}),
       completo: enderecoCompleto || chamado.endereco?.completo || null,
@@ -1145,10 +1675,14 @@ export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persi
       cidade: cidade || chamado.endereco?.cidade || null
     },
     tabulacaoFinal,
+    resultadoFinal,
     viabilidadeResumo: {
       ...(chamado.viabilidadeResumo || {}),
       projetista: projetista || chamado.viabilidadeResumo?.projetista || null
     },
+    ...(mapPreviewImage ? { mapPreviewImage } : {}),
+    geradoEm: fechamentoIso,
+    relatorioSalvoAt: fechamentoIso,
     relatorio: {
       numeroALA: numeroALA || null,
       cidade,
@@ -1157,13 +1691,16 @@ export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persi
       cep,
       tabulacaoFinal,
       projetista,
-      savedAt: new Date().toISOString(),
-      savedBy: usuario || null
+      resultadoFinal,
+      savedAt: fechamentoIso,
+      savedBy: usuario || null,
+      ...(mapPreviewImage ? { mapPreviewImage } : {})
     },
-    updatedAt: new Date().toISOString()
+    updatedAt: fechamentoIso
   };
 
-  const pdfHtml = buildChamadoPdfHtml(next);
+  // Preferir HTML do print do Workbench; senão montar template com a prévia do mapa
+  const pdfHtml = clientPdfHtml || buildChamadoPdfHtml(next);
   next.pdfHtml = pdfHtml;
 
   let corrected = false;
@@ -1176,9 +1713,10 @@ export async function salvarRelatorioWorkbench(id, { usuario, report = {}, persi
     next.tabulacaoStatus = corrected ? 'corrigida' : 'aprovada';
     next.filaStatus = 'finalizada';
     next.relatorioSalvo = true;
-    next.relatorioSalvoAt = next.updatedAt;
+    next.relatorioSalvoAt = fechamentoIso;
 
-    await upsertChamado(next);
+    // Grava metadados; remove pdfHtml e mapa base64 do JSONB
+    await upsertChamado(stripHeavyPersistFields(next));
 
     if (corrected) {
       await registerFeedback(id, {

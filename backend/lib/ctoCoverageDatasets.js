@@ -1,0 +1,476 @@
+/**
+ * Staging + swap para CTOs + mancha (zero downtime na leitura).
+ *
+ * - Leituras → dataset active
+ * - Upload → grava em dataset staging (não mexe no active)
+ * - Após mancha no staging → swap_active_ctos_dataset
+ */
+import { isSupabaseAvailable } from '../supabase.js';
+
+const CONFIG_KEY = 'active_ctos_coverage_dataset';
+
+let featureCache = { checkedAt: 0, enabled: false };
+
+/** Detecta se a migration de datasets foi aplicada. */
+export async function isDatasetStagingEnabled(client) {
+  if (!client) return false;
+  const now = Date.now();
+  if (now - featureCache.checkedAt < 60_000) return featureCache.enabled;
+
+  try {
+    const { error } = await client.from('data_datasets').select('id').limit(1);
+    if (!error) {
+      featureCache = { checkedAt: now, enabled: true };
+      return true;
+    }
+    const msg = String(error.message || error.code || '');
+    // PostgREST: tabela inexistente / schema cache / PGRST205 etc.
+    const missing =
+      error.code === '42P01' ||
+      error.code === 'PGRST205' ||
+      /does not exist|schema cache|Could not find the table|relation .* does not exist/i.test(
+        msg
+      );
+    featureCache = { checkedAt: now, enabled: !missing };
+    if (missing) {
+      console.warn('ℹ️ [Datasets] Staging desligado (tabelas ausentes):', msg.slice(0, 120));
+    }
+  } catch (err) {
+    featureCache = { checkedAt: now, enabled: false };
+    console.warn('⚠️ [Datasets] feature check:', err.message);
+  }
+  return featureCache.enabled;
+}
+
+const ACTIVE_ID_TTL_MS = 30_000;
+let activeIdCache = { checkedAt: 0, id: null };
+
+export function invalidateDatasetFeatureCache() {
+  featureCache = { checkedAt: 0, enabled: false };
+  activeIdCache = { checkedAt: 0, id: null };
+}
+
+export async function getActiveDatasetId(client) {
+  if (!(await isDatasetStagingEnabled(client))) return null;
+
+  const now = Date.now();
+  if (activeIdCache.id && now - activeIdCache.checkedAt < ACTIVE_ID_TTL_MS) {
+    return activeIdCache.id;
+  }
+
+  const { data, error } = await client
+    .from('app_runtime_config')
+    .select('value_uuid')
+    .eq('key', CONFIG_KEY)
+    .maybeSingle();
+
+  if (error) throw new Error(`getActiveDatasetId: ${error.message}`);
+  let id = data?.value_uuid || null;
+
+  if (!id) {
+    // Bootstrap via RPC se config vazia
+    const { data: rpcId, error: rpcErr } = await client.rpc('get_active_ctos_dataset_id');
+    if (rpcErr) throw new Error(`get_active_ctos_dataset_id: ${rpcErr.message}`);
+    id = rpcId || null;
+  }
+
+  activeIdCache = { checkedAt: now, id };
+  return id;
+}
+
+export async function getStagingDataset(client) {
+  if (!(await isDatasetStagingEnabled(client))) return null;
+
+  const { data, error } = await client
+    .from('data_datasets')
+    .select('id, status, label, created_at, meta')
+    .eq('kind', 'ctos_coverage')
+    .eq('status', 'staging')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(`getStagingDataset: ${error.message}`);
+  return data || null;
+}
+
+/**
+ * Garante dataset active + backfill (caso migration não tenha preenchido).
+ */
+export async function ensureActiveDataset(client, { label = 'bootstrap-runtime' } = {}) {
+  if (!(await isDatasetStagingEnabled(client))) return null;
+
+  let activeId = null;
+  try {
+    activeId = await getActiveDatasetId(client);
+  } catch (_) {
+    activeId = null;
+  }
+
+  if (activeId) return activeId;
+
+  const { data: created, error: createErr } = await client
+    .from('data_datasets')
+    .insert([{ status: 'active', label, activated_at: new Date().toISOString(), meta: { source: 'runtime_bootstrap' } }])
+    .select('id')
+    .single();
+
+  if (createErr) throw new Error(`ensureActiveDataset create: ${createErr.message}`);
+  activeId = created.id;
+
+  const { error: cfgErr } = await client.from('app_runtime_config').upsert({
+    key: CONFIG_KEY,
+    value_uuid: activeId,
+    updated_at: new Date().toISOString()
+  });
+  if (cfgErr) throw new Error(`ensureActiveDataset config: ${cfgErr.message}`);
+
+  // Backfill best-effort (não bloqueia o upload se a tabela for enorme)
+  try {
+    const backfill = client
+      .from('ctos')
+      .update({ dataset_id: activeId })
+      .is('dataset_id', null);
+    const polyBackfill = client
+      .from('coverage_polygons')
+      .update({ dataset_id: activeId })
+      .is('dataset_id', null);
+    await Promise.race([
+      Promise.all([backfill, polyBackfill]),
+      new Promise((resolve) => setTimeout(resolve, 8000))
+    ]);
+  } catch (bfErr) {
+    console.warn('⚠️ [Datasets] Backfill active (não bloqueante):', bfErr?.message || bfErr);
+  }
+
+  console.log(`✅ [Datasets] Active bootstrap: ${activeId}`);
+  return activeId;
+}
+
+/**
+ * Cria novo staging; marca stagings anteriores como failed.
+ * NÃO apaga CTOs antigas de forma síncrona (podia travar o upload em 5% no Railway).
+ * Limpeza pesada fica para GC assíncrono.
+ */
+export async function createStagingDataset(client, { label = null, meta = {} } = {}) {
+  await ensureActiveDataset(client);
+
+  const previous = await getStagingDataset(client);
+  if (previous?.id) {
+    console.log(`♻️ [Datasets] Marcando staging anterior como failed: ${previous.id}`);
+    await client
+      .from('data_datasets')
+      .update({
+        status: 'failed',
+        meta: { ...(previous.meta || {}), replaced_at: new Date().toISOString() }
+      })
+      .eq('id', previous.id);
+
+    // Limpeza em background (não bloqueia o upload)
+    setTimeout(() => {
+      cleanupFailedDataset(client, previous.id).catch((err) => {
+        console.warn(`⚠️ [Datasets] GC staging ${previous.id}:`, err.message);
+      });
+    }, 0);
+  }
+
+  const { data, error } = await client
+    .from('data_datasets')
+    .insert([
+      {
+        status: 'staging',
+        label: label || `staging-${new Date().toISOString()}`,
+        meta: { ...meta, created_by: 'upload-base' }
+      }
+    ])
+    .select('id, status, label, created_at')
+    .single();
+
+  if (error) throw new Error(`createStagingDataset: ${error.message}`);
+  console.log(`🆕 [Datasets] Staging criado: ${data.id}`);
+  return data;
+}
+
+const PURGE_BATCH = 20000;
+
+async function deleteCtosInBatches(c, datasetIds) {
+  let total = 0;
+  for (;;) {
+    const r = await c.query(
+      `
+      DELETE FROM public.ctos
+      WHERE id IN (
+        SELECT id FROM public.ctos
+        WHERE dataset_id = ANY($1::uuid[])
+        LIMIT ${PURGE_BATCH}
+      )
+    `,
+      [datasetIds]
+    );
+    total += r.rowCount;
+    if (r.rowCount < PURGE_BATCH) break;
+  }
+  return total;
+}
+
+/** Remove CTOs/polígonos de um dataset failed (best-effort). */
+export async function cleanupFailedDataset(client, datasetId) {
+  if (!datasetId) return;
+  const pgUrl = resolvePgUrlForActiveWrite();
+  if (pgUrl) {
+    const pg = (await import('pg')).default;
+    const c = new pg.Client({ connectionString: pgUrl, ssl: { rejectUnauthorized: false } });
+    await c.connect();
+    try {
+      await c.query(`SET statement_timeout = 0`);
+      await deleteCtosInBatches(c, [datasetId]);
+      await c.query(`DELETE FROM public.coverage_polygons WHERE dataset_id = $1`, [datasetId]);
+      console.log(`🧹 [Datasets] GC PG ok: ${datasetId}`);
+      return;
+    } finally {
+      await c.end();
+    }
+  }
+
+  // Fallback API em lotes
+  for (let i = 0; i < 500; i++) {
+    const { data, error } = await client
+      .from('ctos')
+      .select('id')
+      .eq('dataset_id', datasetId)
+      .limit(1000);
+    if (error) throw error;
+    if (!data?.length) break;
+    const ids = data.map((r) => r.id);
+    const { error: delErr } = await client.from('ctos').delete().in('id', ids);
+    if (delErr) throw delErr;
+  }
+  await client.from('coverage_polygons').delete().eq('dataset_id', datasetId);
+  console.log(`🧹 [Datasets] GC API ok: ${datasetId}`);
+}
+
+export async function markDatasetFailed(client, datasetId, reason) {
+  if (!datasetId) return;
+  await client
+    .from('data_datasets')
+    .update({
+      status: 'failed',
+      meta: { failed_at: new Date().toISOString(), reason: String(reason || '') }
+    })
+    .eq('id', datasetId);
+}
+
+export async function swapActiveDataset(client, stagingId) {
+  const { data, error } = await client.rpc('swap_active_ctos_dataset', {
+    p_new_dataset_id: stagingId
+  });
+  if (error) throw new Error(`swapActiveDataset: ${error.message}`);
+  invalidateDatasetFeatureCache();
+  console.log(`🔀 [Datasets] Swap OK → active=${data || stagingId}`);
+
+  // A base anterior vira archived e não é lida por nenhuma rota: libera o espaço em background.
+  setTimeout(() => {
+    purgeInactiveDatasets(client).catch((err) => {
+      console.warn('⚠️ [Datasets] Limpeza pós-swap:', err?.message || err);
+    });
+  }, 0);
+
+  return data || stagingId;
+}
+
+/**
+ * Apaga CTOs/polígonos de todas as bases archived e failed.
+ * Nunca toca na active (app_runtime_config) nem na staging.
+ * A linha em data_datasets fica como histórico (meta.purged_at).
+ */
+export async function purgeInactiveDatasets(client) {
+  const pgUrl = resolvePgUrlForActiveWrite();
+  if (!pgUrl) {
+    const { data: rows, error } = await client
+      .from('data_datasets')
+      .select('id')
+      .in('status', ['archived', 'failed']);
+    if (error) throw new Error(`purgeInactiveDatasets: ${error.message}`);
+    const activeId = await getActiveDatasetId(client);
+    for (const r of rows || []) {
+      if (r.id !== activeId) await cleanupFailedDataset(client, r.id);
+    }
+    return;
+  }
+
+  const pg = (await import('pg')).default;
+  const c = new pg.Client({ connectionString: pgUrl, ssl: { rejectUnauthorized: false } });
+  await c.connect();
+  try {
+    await c.query(`SET statement_timeout = 0`);
+    const { rows } = await c.query(`
+      SELECT d.id
+      FROM public.data_datasets d
+      WHERE d.status IN ('archived', 'failed')
+        AND d.id IS DISTINCT FROM (
+          SELECT value_uuid FROM public.app_runtime_config
+          WHERE key = '${CONFIG_KEY}'
+        )
+    `);
+    const ids = rows.map((r) => r.id);
+    if (!ids.length) return;
+
+    const ctos = await deleteCtosInBatches(c, ids);
+    const polys = await c.query(
+      `DELETE FROM public.coverage_polygons
+       WHERE dataset_id = ANY($1::uuid[]) AND is_active = false`,
+      [ids]
+    );
+    await c.query(
+      `DELETE FROM public.coverage_calculation_progress WHERE dataset_id = ANY($1::uuid[])`,
+      [ids]
+    );
+    await c.query(
+      `UPDATE public.data_datasets
+       SET meta = COALESCE(meta, '{}'::jsonb) || jsonb_build_object('purged_at', now())
+       WHERE id = ANY($1::uuid[]) AND NOT (meta ? 'purged_at')`,
+      [ids]
+    );
+    if (ctos > 0) {
+      await c.query(`VACUUM (ANALYZE) public.ctos`);
+    }
+    console.log(
+      `🧹 [Datasets] Bases antigas limpas: ${ctos} CTOs, ${polys.rowCount} polígonos (${ids.length} datasets)`
+    );
+  } finally {
+    await c.end();
+  }
+}
+
+/** Dataset alvo do cálculo de mancha: staging se existir com CTOs, senão active. */
+export async function resolveCoverageTargetDataset(client) {
+  const enabled = await isDatasetStagingEnabled(client);
+  if (!enabled) return { enabled: false, datasetId: null, mode: 'legacy' };
+
+  const staging = await getStagingDataset(client);
+  if (staging?.id) {
+    const { count, error } = await client
+      .from('ctos')
+      .select('id', { count: 'exact', head: true })
+      .eq('dataset_id', staging.id);
+    if (!error && (count || 0) > 0) {
+      return { enabled: true, datasetId: staging.id, mode: 'staging', shouldSwap: true };
+    }
+  }
+
+  const activeId = await ensureActiveDataset(client);
+  return { enabled: true, datasetId: activeId, mode: 'active', shouldSwap: false };
+}
+
+/** Aplica filtro de dataset em query builder Supabase (no-op se id null). */
+export function applyDatasetFilter(query, datasetId) {
+  if (!datasetId) return query;
+  return query.eq('dataset_id', datasetId);
+}
+
+export function resolvePgUrlForActiveWrite() {
+  const api = (process.env.SUPABASE_URL || '').toLowerCase();
+  const repApi = (process.env.SUPABASE_REPLICA_URL || '').toLowerCase();
+  const dbPrimary = (process.env.SUPABASE_DB_URL || '').trim();
+  const dbReplica = (process.env.SUPABASE_REPLICA_DB_URL || '').trim();
+  const apiRef = (api.match(/https:\/\/([a-z0-9]+)\.supabase/) || [])[1];
+  if (apiRef && dbReplica.includes(apiRef)) return dbReplica;
+  if (apiRef && dbPrimary.includes(apiRef)) return dbPrimary;
+  if (repApi && api && api === repApi && dbReplica) return dbReplica;
+  return dbPrimary || dbReplica || null;
+}
+
+export async function countCtosForDataset(client, datasetId) {
+  let q = client.from('ctos').select('id', { count: 'exact', head: true });
+  if (datasetId) q = q.eq('dataset_id', datasetId);
+  const { count, error } = await q;
+  if (error) throw error;
+  return count || 0;
+}
+
+/**
+ * Clona CTOs de um dataset para outro (sem PK id).
+ * Preferência: Postgres direto; fallback: API em lotes.
+ */
+export async function cloneCtosBetweenDatasets(client, fromDatasetId, toDatasetId, { onProgress = null, pgUrl = null } = {}) {
+  if (!fromDatasetId || !toDatasetId) {
+    throw new Error('cloneCtosBetweenDatasets: from/to obrigatórios');
+  }
+  if (fromDatasetId === toDatasetId) return { cloned: 0 };
+
+  const url = (pgUrl || process.env.SUPABASE_DB_URL || process.env.SUPABASE_REPLICA_DB_URL || '').trim();
+  if (url) {
+    const pg = (await import('pg')).default;
+    const c = new pg.Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
+    await c.connect();
+    try {
+      const colsRes = await c.query(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'ctos'
+          AND column_name NOT IN ('id')
+        ORDER BY ordinal_position
+      `);
+      const cols = colsRes.rows.map((r) => r.column_name);
+      if (!cols.includes('dataset_id')) {
+        throw new Error('Coluna dataset_id ausente em ctos');
+      }
+      const selectCols = cols
+        .map((col) => (col === 'dataset_id' ? '$1 AS dataset_id' : `"${col}"`))
+        .join(', ');
+      const insertCols = cols.map((col) => `"${col}"`).join(', ');
+      const result = await c.query(
+        `
+        INSERT INTO public.ctos (${insertCols})
+        SELECT ${selectCols}
+        FROM public.ctos
+        WHERE dataset_id = $2
+        `,
+        [toDatasetId, fromDatasetId]
+      );
+      const cloned = result.rowCount || 0;
+      if (onProgress) onProgress({ cloned, total: cloned, percent: 100 });
+      console.log(`✅ [Datasets] Clone PG: ${cloned} CTOs ${fromDatasetId} → ${toDatasetId}`);
+      return { cloned, method: 'pg' };
+    } finally {
+      await c.end();
+    }
+  }
+
+  // Fallback API
+  let lastId = 0;
+  let cloned = 0;
+  let hasMore = true;
+  while (hasMore) {
+    const { data, error } = await client
+      .from('ctos')
+      .select('*')
+      .eq('dataset_id', fromDatasetId)
+      .gt('id', lastId)
+      .order('id', { ascending: true })
+      .limit(500);
+    if (error) throw new Error(`clone API read: ${error.message}`);
+    if (!data?.length) break;
+
+    const rows = data.map((row) => {
+      const copy = { ...row, dataset_id: toDatasetId };
+      delete copy.id;
+      return copy;
+    });
+    const { error: insErr } = await client.from('ctos').insert(rows);
+    if (insErr) throw new Error(`clone API insert: ${insErr.message}`);
+
+    cloned += rows.length;
+    lastId = data[data.length - 1].id;
+    hasMore = data.length === 500;
+    if (onProgress) onProgress({ cloned, percent: null });
+  }
+  console.log(`✅ [Datasets] Clone API: ${cloned} CTOs ${fromDatasetId} → ${toDatasetId}`);
+  return { cloned, method: 'api' };
+}
+
+export function assertDbAvailable() {
+  if (!isSupabaseAvailable()) {
+    throw new Error('Supabase não disponível');
+  }
+}

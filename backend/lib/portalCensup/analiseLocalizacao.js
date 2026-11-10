@@ -175,17 +175,18 @@ async function checkCoverage(lat, lng) {
   };
 }
 
-function suggestTabulacao(coverage, learned = null) {
-  if (learned?.tabulacaoFinal) {
-    return {
-      tabulacaoFinal: learned.tabulacaoFinal,
-      tabulacaoConfianca: learned.confianca ?? 0.78,
-      tabulacaoStatus: 'pendente_revisao',
-      motivo:
-        learned.motivo ||
-        `Sugestão ajustada com base em correção anterior semelhante (${learned.tabulacaoFinal}).`
-    };
-  }
+function suggestTabulacao(coverage, learned = null, chamado = null) {
+  // Motivo Análise de complemento tem prioridade sobre aprendizado anterior
+  // (sempre Atendimento Externo quando há cobertura; CTOs finas no Workbench).
+  const motivoNorm = String(chamado?.motivo || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+  const isComplemento =
+    motivoNorm.includes('analise de complemento') ||
+    motivoNorm.includes('analise complemento');
 
   if (!coverage?.success) {
     return {
@@ -217,8 +218,29 @@ function suggestTabulacao(coverage, learned = null) {
     };
   }
 
+  if (isComplemento) {
+    return {
+      tabulacaoFinal: 'Aprovado / Sem Estrutura Atendimento Externo',
+      tabulacaoConfianca: 0.85,
+      tabulacaoStatus: 'pendente_revisao',
+      motivo:
+        'Motivo Análise de complemento — Atendimento Externo (confirme equipamentos no mapa).'
+    };
+  }
+
+  if (learned?.tabulacaoFinal) {
+    return {
+      tabulacaoFinal: learned.tabulacaoFinal,
+      tabulacaoConfianca: learned.confianca ?? 0.78,
+      tabulacaoStatus: 'pendente_revisao',
+      motivo:
+        learned.motivo ||
+        `Sugestão ajustada com base em correção anterior semelhante (${learned.tabulacaoFinal}).`
+    };
+  }
+
   return {
-    tabulacaoFinal: 'Aprovado Com Portas',
+    tabulacaoFinal: 'Aprovado - Portas Disponíveis',
     tabulacaoConfianca: 0.7,
     tabulacaoStatus: 'pendente_revisao',
     motivo:
@@ -362,7 +384,7 @@ export async function analisarLocalizacaoChamado(chamado, { learned = null } = {
     message: coverage.message || null
   });
 
-  const suggestion = suggestTabulacao(coverage, learned);
+  const suggestion = suggestTabulacao(coverage, learned, chamado);
   const metodoLabel =
     resolved.metodo === 'referencia_mapa'
       ? `referência do mapa (“${resolved.referencia}”)`

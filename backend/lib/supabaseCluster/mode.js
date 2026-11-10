@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { isClusterEnabled } from './flags.js';
 
 export const CLUSTER_MODES = ['primary', 'replica'];
 export const DEFAULT_CLUSTER_MODE = 'primary';
@@ -24,29 +25,51 @@ function normalizeMode(mode) {
 }
 
 function readModeFromDisk() {
+  // Arquivo gravado pelo admin tem prioridade (evita ficar travado em B2 por env)
+  try {
+    const filePath = getModeFilePath();
+    if (fs.existsSync(filePath)) {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const fromFile = normalizeMode(parsed?.mode);
+      if (fromFile) return fromFile;
+    }
+  } catch {
+    // segue para env / default
+  }
+
   const envMode = normalizeMode(process.env.SUPABASE_CLUSTER_MODE);
   if (envMode) return envMode;
 
-  try {
-    const filePath = getModeFilePath();
-    if (!fs.existsSync(filePath)) return DEFAULT_CLUSTER_MODE;
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    return normalizeMode(parsed?.mode) || DEFAULT_CLUSTER_MODE;
-  } catch {
-    return DEFAULT_CLUSTER_MODE;
-  }
+  return DEFAULT_CLUSTER_MODE;
 }
 
 /** Inicializa persistência do modo (chamar após DATA_DIR estar definido). */
 export function initClusterMode(dir) {
   if (dir) dataDir = dir;
   cachedMode = readModeFromDisk();
+
+  // Cluster off → só B1. Reseta arquivo/cache se ainda estiver em replica.
+  if (!isClusterEnabled() && cachedMode !== 'primary') {
+    try {
+      setClusterMode('primary');
+      console.log('🔹 [Cluster] Cluster desabilitado — modo forçado para primary (B1)');
+    } catch (err) {
+      cachedMode = 'primary';
+      console.warn(
+        '⚠️ [Cluster] Cluster off, mas não gravou primary no disco:',
+        err?.message || err
+      );
+    }
+  }
+
   console.log(`🔹 [Cluster] Modo admin: ${cachedMode}`);
 }
 
 export function getClusterMode() {
   if (!cachedMode) cachedMode = readModeFromDisk();
+  // Com cluster desligado, leituras/gravações e a UI tratam como B1
+  if (!isClusterEnabled()) return 'primary';
   return cachedMode;
 }
 
@@ -76,6 +99,7 @@ export function getClusterModeInfo() {
   return {
     mode: getClusterMode(),
     availableModes: CLUSTER_MODES,
-    defaultMode: DEFAULT_CLUSTER_MODE
+    defaultMode: DEFAULT_CLUSTER_MODE,
+    clusterEnabled: isClusterEnabled()
   };
 }

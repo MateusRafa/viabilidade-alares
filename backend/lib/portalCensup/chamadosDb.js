@@ -3,6 +3,14 @@ import crypto from 'crypto';
 
 const TABLE = 'chamados';
 
+/** null = ainda não testado; false = migration SQL não aplicada no Supabase */
+let durationColumnsAvailable = null;
+
+function isMissingDurationColumnError(error) {
+  const msg = `${error?.message || ''} ${error?.details || ''} ${error?.code || ''}`;
+  return /analise_duracao_label|analise_duracao_ms|42703/i.test(msg);
+}
+
 const CORE_KEYS = new Set([
   'id',
   'agendaCode',
@@ -23,6 +31,8 @@ const CORE_KEYS = new Set([
   'tabulacaoStatus',
   'tabulacaoFinal',
   'pdfPath',
+  'analiseDuracaoLabel',
+  'analiseDuracaoMs',
   'createdAt',
   'updatedAt',
   'dataSituacaoLabel',
@@ -32,39 +42,114 @@ const CORE_KEYS = new Set([
 
 function parseDataSituacao(value) {
   if (!value) return null;
-  const date = new Date(value);
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const br = raw.match(
+    /(\d{2})\/(\d{2})\/(\d{4})(?:,?\s*(\d{2}):(\d{2})(?::(\d{2}))?)?/
+  );
+  if (br) {
+    const [, dd, mm, yyyy, hh = '00', mi = '00', ss = '00'] = br;
+    const date = new Date(`${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}-03:00`);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+
+  const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-export function chamadoToRow(chamado) {
+/** Campos que incham o JSONB (HTML/print e mapa base64) — não persistir. */
+const HEAVY_EXTRAS_KEYS = ['pdfHtml', 'mapPreviewImage', 'previewImage'];
+
+/**
+ * Remove HTML/print e imagens base64 antes de gravar no Supabase/JSON.
+ * Mantém metadados do relatório (tabulação, endereço, CTOs, etc.).
+ */
+export function stripHeavyPersistFields(chamado) {
+  if (!chamado || typeof chamado !== 'object') return chamado;
+  const next = { ...chamado };
+  for (const key of HEAVY_EXTRAS_KEYS) {
+    delete next[key];
+  }
+  if (next.relatorio && typeof next.relatorio === 'object') {
+    const rel = { ...next.relatorio };
+    for (const key of HEAVY_EXTRAS_KEYS) {
+      delete rel[key];
+    }
+    next.relatorio = rel;
+  }
+  return next;
+}
+
+export function chamadoToRow(chamado, { useDurationColumns = durationColumnsAvailable !== false } = {}) {
+  const light = stripHeavyPersistFields(chamado);
   const extras = {};
-  for (const [key, value] of Object.entries(chamado || {})) {
+  for (const [key, value] of Object.entries(light || {})) {
     if (!CORE_KEYS.has(key) && value !== undefined) extras[key] = value;
   }
 
+  const clean = (v) => {
+    if (v == null) return null;
+    const s = String(v).trim();
+    if (!s || /^null$/i.test(s) || /^undefined$/i.test(s)) return null;
+    return s;
+  };
+
+  // Preserva texto BR da Agenda mesmo se data_situacao for gravado em ISO
+  const rawAgenda =
+    clean(light.dataSituacaoRaw) ||
+    (typeof light.dataSituacao === 'string' && /\d{2}\/\d{2}\/\d{4}/.test(light.dataSituacao)
+      ? clean(light.dataSituacao)
+      : null);
+  if (rawAgenda && !extras.dataSituacaoRaw) {
+    extras.dataSituacaoRaw = rawAgenda;
+  }
+
+  const duracaoLabel = clean(light.analiseDuracaoLabel);
+  const duracaoMs = (() => {
+    if (light.analiseDuracaoMs == null || light.analiseDuracaoMs === '') return null;
+    const ms = Number(light.analiseDuracaoMs);
+    return Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : null;
+  })();
+
+  // Sem as colunas no Supabase, grava no extras (legado)
+  if (!useDurationColumns) {
+    if (duracaoLabel) extras.analiseDuracaoLabel = duracaoLabel;
+    if (duracaoMs != null) extras.analiseDuracaoMs = duracaoMs;
+  }
+
   return {
-    id: chamado.id,
-    agenda_code: chamado.agendaCode || null,
-    pedido: chamado.pedido != null ? String(chamado.pedido) : null,
-    uf: chamado.uf || null,
-    cidade: chamado.cidade || null,
-    sistema: chamado.sistema || null,
-    pdv: chamado.pdv || null,
-    motivo: chamado.motivo || null,
-    situacao: chamado.situacao || null,
-    data_situacao: parseDataSituacao(chamado.dataSituacao),
-    endereco: chamado.endereco && typeof chamado.endereco === 'object' ? chamado.endereco : {},
-    mapa_coords: chamado.mapaCoords || null,
-    mapa_referencias: Array.isArray(chamado.mapaReferencias) ? chamado.mapaReferencias : [],
-    origem: chamado.origem || 'extensao',
-    agenda_url: chamado.agendaUrl || null,
-    fila_status: chamado.filaStatus || 'na_fila',
-    tabulacao_status: chamado.tabulacaoStatus || 'aguardando_analise',
-    tabulacao_final: chamado.tabulacaoFinal || null,
-    pdf_path: chamado.pdfPath || null,
+    id: light.id,
+    agenda_code: clean(light.agendaCode),
+    pedido: light.pedido != null ? String(light.pedido) : null,
+    uf: clean(light.uf),
+    cidade: clean(light.cidade),
+    sistema: clean(light.sistema),
+    pdv: clean(light.pdv),
+    motivo: clean(light.motivo),
+    situacao: clean(light.situacao),
+    data_situacao: parseDataSituacao(light.dataSituacao || rawAgenda),
+    endereco: light.endereco && typeof light.endereco === 'object' ? light.endereco : {},
+    mapa_coords: light.mapaCoords || null,
+    mapa_referencias: Array.isArray(light.mapaReferencias) ? light.mapaReferencias : [],
+    origem: light.origem || 'extensao',
+    agenda_url: light.agendaUrl || null,
+    fila_status: light.filaStatus || 'na_fila',
+    tabulacao_status: light.tabulacaoStatus || 'aguardando_analise',
+    tabulacao_final: clean(light.tabulacaoFinal),
+    pdf_path: light.pdfPath || null,
+    ...(useDurationColumns
+      ? {
+          analise_duracao_label: duracaoLabel,
+          analise_duracao_ms: duracaoMs
+        }
+      : {}),
     extras,
     updated_at: new Date().toISOString(),
-    created_at: chamado.createdAt || new Date().toISOString()
+    created_at: light.createdAt || new Date().toISOString()
   };
 }
 
@@ -92,9 +177,51 @@ export function rowToChamado(row) {
     tabulacaoStatus: row.tabulacao_status,
     tabulacaoFinal: row.tabulacao_final,
     pdfPath: row.pdf_path,
+    analiseDuracaoLabel:
+      row.analise_duracao_label ||
+      extras.analiseDuracaoLabel ||
+      null,
+    analiseDuracaoMs: (() => {
+      const raw =
+        row.analise_duracao_ms != null && row.analise_duracao_ms !== ''
+          ? row.analise_duracao_ms
+          : extras.analiseDuracaoMs;
+      if (raw == null || raw === '') return null;
+      const ms = Number(raw);
+      return Number.isFinite(ms) ? ms : null;
+    })(),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+/** Remove HTML/print/base64 da listagem — evita 502 por payload gigante. */
+export function stripHeavyChamadoFields(chamado, { keepFlags = true } = {}) {
+  if (!chamado || typeof chamado !== 'object') return chamado;
+  const next = { ...chamado };
+  const hadPdf = typeof next.pdfHtml === 'string' && next.pdfHtml.trim().length > 0;
+  const hadPreview =
+    typeof next.mapPreviewImage === 'string' && next.mapPreviewImage.trim().length > 0;
+
+  delete next.pdfHtml;
+  delete next.mapPreviewImage;
+  delete next.previewImage;
+
+  if (next.relatorio && typeof next.relatorio === 'object') {
+    const rel = { ...next.relatorio };
+    delete rel.mapPreviewImage;
+    delete rel.previewImage;
+    delete rel.pdfHtml;
+    next.relatorio = rel;
+  }
+
+  if (keepFlags) {
+    if (hadPdf || next.relatorioSalvo) next.relatorioSalvo = true;
+    if (hadPdf) next.hasPdfHtml = true;
+    if (hadPreview) next.hasMapPreview = true;
+  }
+
+  return next;
 }
 
 function client() {
@@ -160,7 +287,86 @@ export async function dbListAllChamados() {
     .select('*')
     .order('created_at', { ascending: false });
   throwIfError(error, 'listar todos os chamados');
-  return (data || []).map(rowToChamado);
+  return (data || []).map((row) => stripHeavyChamadoFields(rowToChamado(row)));
+}
+
+function listSelectColumns(includeDurationColumns) {
+  const cols = [
+    'id',
+    'agenda_code',
+    'pedido',
+    'uf',
+    'cidade',
+    'sistema',
+    'pdv',
+    'motivo',
+    'situacao',
+    'data_situacao',
+    'endereco',
+    'mapa_coords',
+    'mapa_referencias',
+    'origem',
+    'agenda_url',
+    'fila_status',
+    'tabulacao_status',
+    'tabulacao_final',
+    'pdf_path',
+    'created_at',
+    'updated_at',
+    'dataSituacaoRaw:extras->>dataSituacaoRaw',
+    'relatorioSalvoAt:extras->>relatorioSalvoAt',
+    'geradoEm:extras->>geradoEm',
+    'analiseIniciadaEm:extras->>analiseIniciadaEm',
+    'analiseDuracaoLabelExtras:extras->>analiseDuracaoLabel',
+    'analiseDuracaoMsExtras:extras->>analiseDuracaoMs',
+    'relatorioSavedAt:extras->relatorio->>savedAt'
+  ];
+  if (includeDurationColumns) {
+    cols.splice(cols.indexOf('created_at'), 0, 'analise_duracao_label', 'analise_duracao_ms');
+  }
+  return cols.join(', ');
+}
+
+function mapListRow(row) {
+  const {
+    dataSituacaoRaw,
+    relatorioSalvoAt,
+    geradoEm,
+    analiseIniciadaEm,
+    analiseDuracaoLabelExtras,
+    analiseDuracaoMsExtras,
+    relatorioSavedAt,
+    ...coreRow
+  } = row || {};
+  const item = stripHeavyChamadoFields(rowToChamado({ ...coreRow, extras: {} }));
+
+  if (dataSituacaoRaw) item.dataSituacaoRaw = dataSituacaoRaw;
+  if (!item.dataSituacao && dataSituacaoRaw) {
+    item.dataSituacao = parseDataSituacao(dataSituacaoRaw) || dataSituacaoRaw;
+  }
+  if (relatorioSalvoAt) item.relatorioSalvoAt = relatorioSalvoAt;
+  if (geradoEm) item.geradoEm = geradoEm;
+  if (analiseIniciadaEm) item.analiseIniciadaEm = analiseIniciadaEm;
+  if (!item.analiseDuracaoLabel && analiseDuracaoLabelExtras) {
+    item.analiseDuracaoLabel = analiseDuracaoLabelExtras;
+  }
+  if (
+    (item.analiseDuracaoMs == null || item.analiseDuracaoMs === '') &&
+    analiseDuracaoMsExtras != null &&
+    analiseDuracaoMsExtras !== ''
+  ) {
+    const ms = Number(analiseDuracaoMsExtras);
+    if (Number.isFinite(ms)) item.analiseDuracaoMs = ms;
+  }
+  if (relatorioSavedAt) {
+    item.relatorio = { ...(item.relatorio || {}), savedAt: relatorioSavedAt };
+  }
+
+  // Lista de finalizados = relatório salvo (extras pesados não vêm neste select)
+  if (item.filaStatus === 'finalizada') {
+    item.relatorioSalvo = true;
+  }
+  return item;
 }
 
 export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10, filaStatus = 'na_fila' } = {}) {
@@ -173,34 +379,52 @@ export async function dbListChamadosNaFila({ q = '', page = 1, limit = 10, filaS
   const query = (q || '').trim();
   const status = filaStatus === 'finalizada' ? 'finalizada' : 'na_fila';
 
-  let builder = client()
-    .from(TABLE)
-    .select('*', { count: 'exact' })
-    .eq('fila_status', status)
-    .order('created_at', { ascending: false })
-    .range(from, to);
+  const runList = async (includeDurationColumns) => {
+    let builder = client()
+      .from(TABLE)
+      .select(listSelectColumns(includeDurationColumns), { count: 'exact' })
+      .eq('fila_status', status)
+      .order('created_at', { ascending: false })
+      .range(from, to);
 
-  if (query) {
-    const like = `%${query}%`;
-    builder = builder.or(
-      [
-        `pedido.ilike.${like}`,
-        `cidade.ilike.${like}`,
-        `uf.ilike.${like}`,
-        `sistema.ilike.${like}`,
-        `pdv.ilike.${like}`,
-        `motivo.ilike.${like}`,
-        `situacao.ilike.${like}`,
-        `tabulacao_final.ilike.${like}`
-      ].join(',')
+    if (query) {
+      const like = `%${query}%`;
+      builder = builder.or(
+        [
+          `pedido.ilike.${like}`,
+          `cidade.ilike.${like}`,
+          `uf.ilike.${like}`,
+          `sistema.ilike.${like}`,
+          `pdv.ilike.${like}`,
+          `motivo.ilike.${like}`,
+          `situacao.ilike.${like}`,
+          `tabulacao_final.ilike.${like}`
+        ].join(',')
+      );
+    }
+
+    return builder;
+  };
+
+  // Sem extras completos: pdfHtml em JSONB derruba a API.
+  // Tenta colunas dedicadas; se a migration ainda não rodou, cai no extras.
+  const preferColumns = durationColumnsAvailable !== false;
+  let { data, error, count } = await runList(preferColumns);
+
+  if (error && preferColumns && isMissingDurationColumnError(error)) {
+    durationColumnsAvailable = false;
+    console.warn(
+      '⚠️ [PortalCENSUP] Colunas analise_duracao_* ausentes — rode o SQL 2026-10-27_portal_censup_tempo_analise.sql. Usando extras por enquanto.'
     );
+    ({ data, error, count } = await runList(false));
+  } else if (!error && preferColumns) {
+    durationColumnsAvailable = true;
   }
 
-  const { data, error, count } = await builder;
   throwIfError(error, 'listar fila');
 
   return {
-    chamados: (data || []).map(rowToChamado),
+    chamados: (data || []).map(mapListRow),
     total: count || 0,
     page: safePage,
     limit: safeLimit
@@ -225,8 +449,8 @@ export async function dbReconcileChamadosComAgenda(activePedidos = new Set(), si
 
   const { data, error } = await client()
     .from(TABLE)
-    .select('id, pedido, fila_status, situacao')
-    .in('fila_status', ['na_fila', 'finalizada']);
+    .select('id, pedido, fila_status, situacao, extras')
+    .eq('fila_status', 'na_fila');
   throwIfError(error, 'listar chamados para reconciliação com Agenda');
 
   const toArchive = (data || []).filter((row) => {
@@ -241,6 +465,7 @@ export async function dbReconcileChamadosComAgenda(activePedidos = new Set(), si
     const { error: updateError } = await client()
       .from(TABLE)
       .update({ fila_status: 'executada_agenda', updated_at: now })
+      .eq('fila_status', 'na_fila')
       .in('id', ids);
     throwIfError(updateError, 'arquivar chamados executados na Agenda');
 
@@ -258,9 +483,17 @@ export async function dbReconcileChamadosComAgenda(activePedidos = new Set(), si
       const novaSituacao = situacaoMap.get(pedido);
       if (!novaSituacao || novaSituacao === (row.situacao || '')) continue;
 
+      const wasAnalise = /em\s+an[aá]lise/i.test(String(row.situacao || ''));
+      const isAnalise = /em\s+an[aá]lise/i.test(String(novaSituacao || ''));
+      const extras =
+        row.extras && typeof row.extras === 'object' ? { ...row.extras } : {};
+      if (isAnalise && !wasAnalise && !extras.analiseIniciadaEm) {
+        extras.analiseIniciadaEm = now;
+      }
+
       const { error: upErr } = await client()
         .from(TABLE)
-        .update({ situacao: novaSituacao, updated_at: now })
+        .update({ situacao: novaSituacao, updated_at: now, extras })
         .eq('id', row.id);
       if (upErr) {
         console.warn(`⚠️ [PortalCENSUP][Supabase] Falha ao atualizar situação do pedido ${pedido}:`, upErr.message);
@@ -276,6 +509,49 @@ export async function dbReconcileChamadosComAgenda(activePedidos = new Set(), si
   return { updated, situacoesAtualizadas };
 }
 
+let lastRestoreAt = 0;
+const RESTORE_COOLDOWN_MS = 5 * 60 * 1000;
+
+export async function dbRestoreChamadosSalvosArquivados() {
+  if (!isPortalCensupSupabaseAvailable()) return { restored: 0 };
+
+  const nowMs = Date.now();
+  if (nowMs - lastRestoreAt < RESTORE_COOLDOWN_MS) {
+    return { restored: 0, skipped: true };
+  }
+  lastRestoreAt = nowMs;
+
+  // Só IDs — nunca baixar extras/pdfHtml (payload enorme → 502)
+  const { data, error } = await client()
+    .from(TABLE)
+    .select('id')
+    .eq('fila_status', 'executada_agenda')
+    .or(
+      [
+        'extras->>relatorioSalvo.eq.true',
+        'extras->pdfHtml.not.is.null',
+        'extras->relatorio.not.is.null'
+      ].join(',')
+    );
+  throwIfError(error, 'listar salvos arquivados por engano');
+
+  const toRestore = data || [];
+  if (!toRestore.length) return { restored: 0 };
+
+  const ids = toRestore.map((row) => row.id);
+  const now = new Date().toISOString();
+  const { error: updateError } = await client()
+    .from(TABLE)
+    .update({ fila_status: 'finalizada', updated_at: now })
+    .in('id', ids);
+  throwIfError(updateError, 'restaurar chamados salvos no Portal');
+
+  console.log(
+    `✅ [PortalCENSUP][Supabase] ${ids.length} relatório(s) salvo(s) restaurado(s) para finalizada.`
+  );
+  return { restored: ids.length };
+}
+
 export async function dbUpsertChamado(chamado) {
   if (!isPortalCensupSupabaseAvailable()) return null;
 
@@ -286,26 +562,85 @@ export async function dbUpsertChamado(chamado) {
   });
 
   const id = existing?.id || (isUuid(chamado.id) ? chamado.id : crypto.randomUUID());
-  const row = chamadoToRow({
-    ...chamado,
-    id,
-    createdAt: existing?.createdAt || chamado.createdAt
-  });
-  if (!row.created_at) row.created_at = new Date().toISOString();
 
-  if (existing) {
-    const { id: _ignoreId, created_at: _ignoreCreated, ...patch } = row;
-    const { data, error } = await client()
-      .from(TABLE)
-      .update(patch)
-      .eq('id', existing.id)
-      .select('*')
-      .single();
-    throwIfError(error, 'atualizar chamado');
-    return rowToChamado(data);
+  const buildRow = (useDurationColumns) => {
+    const row = chamadoToRow(
+      {
+        ...chamado,
+        id,
+        createdAt: existing?.createdAt || chamado.createdAt
+      },
+      { useDurationColumns }
+    );
+    if (!row.created_at) row.created_at = new Date().toISOString();
+
+    // Não apagar chaves de extras que o payload não trouxe (ex.: Tempo da Análise)
+    if (existing) {
+      const prevExtras = {};
+      for (const [key, value] of Object.entries(existing)) {
+        if (!CORE_KEYS.has(key) && value !== undefined) prevExtras[key] = value;
+      }
+      row.extras = { ...prevExtras, ...(row.extras || {}) };
+
+      // Patches parciais não podem zerar Motivo/UF/etc. já gravados
+      const keepText = (incoming, prev) => {
+        const a = incoming != null ? String(incoming).trim() : '';
+        if (a && !/^null$/i.test(a) && !/^undefined$/i.test(a)) return incoming;
+        return prev ?? incoming;
+      };
+      row.motivo = keepText(row.motivo, existing.motivo);
+      row.uf = keepText(row.uf, existing.uf);
+      row.cidade = keepText(row.cidade, existing.cidade);
+      row.sistema = keepText(row.sistema, existing.sistema);
+      row.pdv = keepText(row.pdv, existing.pdv);
+      row.situacao = keepText(row.situacao, existing.situacao);
+
+      if (useDurationColumns) {
+        row.analise_duracao_label = keepText(
+          row.analise_duracao_label,
+          existing.analiseDuracaoLabel
+        );
+        if (row.analise_duracao_ms == null && existing.analiseDuracaoMs != null) {
+          row.analise_duracao_ms = existing.analiseDuracaoMs;
+        }
+      } else {
+        const label = keepText(null, existing.analiseDuracaoLabel) || row.extras?.analiseDuracaoLabel;
+        const ms =
+          existing.analiseDuracaoMs ??
+          row.extras?.analiseDuracaoMs ??
+          null;
+        if (label) row.extras.analiseDuracaoLabel = label;
+        if (ms != null) row.extras.analiseDuracaoMs = ms;
+        delete row.analise_duracao_label;
+        delete row.analise_duracao_ms;
+      }
+    }
+
+    return row;
+  };
+
+  const persist = async (useDurationColumns) => {
+    const row = buildRow(useDurationColumns);
+    if (existing) {
+      const { id: _ignoreId, created_at: _ignoreCreated, ...patch } = row;
+      return client().from(TABLE).update(patch).eq('id', existing.id).select('*').single();
+    }
+    return client().from(TABLE).insert(row).select('*').single();
+  };
+
+  const preferColumns = durationColumnsAvailable !== false;
+  let { data, error } = await persist(preferColumns);
+
+  if (error && preferColumns && isMissingDurationColumnError(error)) {
+    durationColumnsAvailable = false;
+    console.warn(
+      '⚠️ [PortalCENSUP] Colunas analise_duracao_* ausentes no upsert — usando extras. Rode o SQL da migration.'
+    );
+    ({ data, error } = await persist(false));
+  } else if (!error && preferColumns) {
+    durationColumnsAvailable = true;
   }
 
-  const { data, error } = await client().from(TABLE).insert(row).select('*').single();
-  throwIfError(error, 'inserir chamado');
+  throwIfError(error, existing ? 'atualizar chamado' : 'inserir chamado');
   return rowToChamado(data);
 }

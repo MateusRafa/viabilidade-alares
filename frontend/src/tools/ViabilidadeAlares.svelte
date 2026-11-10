@@ -7,6 +7,7 @@
   let ConfigComponent = null;
   import Loading from '../Loading.svelte';
   import { getApiUrl } from '../config.js';
+  import { drawCoverageOverlays, coverageGeometryFromResponse, coveragePreviewQuery } from '../lib/coverageMap.js';
   import { theme } from '../themeStore.js';
 
   // Props do componente
@@ -16,6 +17,12 @@
   export let onSettingsRequest = null; // Callback para quando configurações são solicitadas
   /** Quando true, roda embutida (ex.: Portal CENSUP) sem tela cheia própria. */
   export let embedded = false;
+  /**
+   * Layout exclusivo do Workbench (extensão Agenda).
+   * Use sempre com embedded=true. Nunca altere o visual padrão
+   * do Viabilidade Alares fora de blocos class:workbench-mode / if workbenchMode.
+   */
+  export let workbenchMode = false;
   /** Endereço inicial para busca automática (modo embutido). */
   export let initialAddress = '';
   /** Latitude inicial (modo embutido). */
@@ -24,18 +31,640 @@
   export let initialLng = null;
   /** id do elemento do mapa — único quando embutido para não conflitar com outras tools. */
   export let mapDomId = 'map';
+  /**
+   * Workbench only: notifica o pai quando a casinha muda (busca ou drag).
+   * Payload: { source, coords: {lat,lng}, address: clientAddressData }
+   */
+  export let onClientLocationChange = null;
+  /**
+   * Workbench only: notifica prévia do mapa ({ capturing, image }).
+   */
+  export let onMapPreviewChange = null;
+  /**
+   * Workbench only: lista de equipamentos para o box fixo abaixo de Informações.
+   * Payload: { items: [{ n, nome, status, statusClass, cidade, pop }] }
+   */
+  export let onEquipamentosChange = null;
+  /** Workbench only: painel flutuante “Lista de equipamentos” (fica no CensupWorkbench). */
+  export let equipListOpen = false;
+  export let onEquipListToggle = null;
+  /**
+   * Workbench only: CTO mais próxima fora do limite de 250m.
+   * Payload: { active, nome, distancia } | { active: false }
+   */
+  export let onForaLimiteChange = null;
+  /**
+   * Workbench only: sugestão de tabulação recalculada pelo mapa (endereço atual).
+   * Payload: { tabulacaoFinal, motivoSugestao }
+   */
+  export let onTabulacaoSugeridaChange = null;
+  /**
+   * Workbench only: motivo do chamado (Agenda) para regras de tabulação automática.
+   */
+  export let workbenchMotivo = '';
+  /**
+   * Workbench only: mapa Google já inicializado (idle).
+   */
+  export let onMapReady = null;
+  /**
+   * Workbench only: tipo padrão ao abrir — 'roadmap' | 'satellite'.
+   * Vem da configuração da extensão.
+   */
+  export let preferredMapType = 'roadmap';
 
-  $: isDarkTheme = embedded && $theme === 'dark';
+  /** Workbench: chave da última localização aplicada (evita loop form↔mapa). */
+  let lastWorkbenchLocKey = '';
+  let workbenchSearchTimer = null;
+  let workbenchPreviewTimer = null;
+  let workbenchPreviewToken = 0;
+  /** Cancela abertura de InfoWindow/passos finais se outra busca começar. */
+  let clientSearchGen = 0;
+  /** Evita setIcon no meio do DROP (faz a casinha “saltar”). */
+  let clientDropInProgress = false;
+
+  function workbenchCoordKey(lat, lng) {
+    return `c:${Number(lat).toFixed(6)},${Number(lng).toFixed(6)}`;
+  }
+
+  /** Aguarda o fim real do DROP — não resolve no 1º tick (a animação ainda pode não ter iniciado). */
+  function waitForMarkerDrop(m, timeoutMs = 800) {
+    return new Promise((resolve) => {
+      if (!m || !google?.maps) {
+        resolve();
+        return;
+      }
+      let done = false;
+      let listener = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        try {
+          if (listener) google.maps.event.removeListener(listener);
+        } catch (_) {
+          /* ignore */
+        }
+        resolve();
+      };
+
+      // Dá tempo do Maps iniciar o DROP antes de checar getAnimation()
+      setTimeout(() => {
+        try {
+          if (!m.getAnimation || m.getAnimation() == null) {
+            finish();
+            return;
+          }
+          listener = google.maps.event.addListener(m, 'animation_changed', () => {
+            try {
+              if (!m.getAnimation || m.getAnimation() == null) finish();
+            } catch (_) {
+              finish();
+            }
+          });
+        } catch (_) {
+          finish();
+        }
+      }, 80);
+
+      setTimeout(finish, timeoutMs);
+    });
+  }
+
+  /** Abre o box fixo na coordenada (sem anchor no marcador = não salta com o DROP). */
+  function openClientInfoWindowStable(position) {
+    if (!clientInfoWindow || !map || !position) return;
+    try {
+      clientInfoWindow.setOptions({ disableAutoPan: true });
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      clientInfoWindow.setPosition(position);
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      clientInfoWindow.open({ map, shouldFocus: false });
+    } catch (_) {
+      try {
+        clientInfoWindow.open(map);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  $: isDarkTheme = (embedded || workbenchMode) && $theme === 'dark';
+
+  /** Controles custom do mapa (workbench) — substituem os nativos do Google. */
+  let wbMapType = 'roadmap';
+  let wbStreetViewOpen = false;
+  let wbFullscreen = false;
+  let wbStreetViewMsg = '';
+  let wbStreetViewMsgTimer = null;
+  let wbMapControlsBound = false;
+  let wbPegmanDragging = false;
+  let wbPegmanJustDragged = false;
+  let wbPegmanGhostX = 0;
+  let wbPegmanGhostY = 0;
+  let wbStreetViewCoverage = null;
+  let wbPixelOverlay = null;
+  let wbPegmanPointerId = null;
+  /** Observer que reesconde o pegman nativo se o Google recriar o DOM */
+  let wbNativeSvObserver = null;
+
+  // Estilo escuro nativo via JSON do Maps JavaScript API (sem Map ID)
+  const GOOGLE_MAP_DARK_STYLES = [
+    { elementType: 'geometry', stylers: [{ color: '#242f3e' }] },
+    { elementType: 'labels.text.stroke', stylers: [{ color: '#242f3e' }] },
+    { elementType: 'labels.text.fill', stylers: [{ color: '#746855' }] },
+    { featureType: 'administrative.locality', elementType: 'labels.text.fill', stylers: [{ color: '#d59563' }] },
+    { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#d59563' }] },
+    { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: '#263c3f' }] },
+    { featureType: 'poi.park', elementType: 'labels.text.fill', stylers: [{ color: '#6b9a76' }] },
+    { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#38414e' }] },
+    { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#212a37' }] },
+    { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#9ca5b3' }] },
+    { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#746855' }] },
+    { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#1f2835' }] },
+    { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#f3d19c' }] },
+    { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#2f3948' }] },
+    { featureType: 'transit.station', elementType: 'labels.text.fill', stylers: [{ color: '#d59563' }] },
+    { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#17263c' }] },
+    { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#515c6d' }] },
+    { featureType: 'water', elementType: 'labels.text.stroke', stylers: [{ color: '#17263c' }] }
+  ];
+
+  function applyGoogleMapTheme(dark) {
+    if (!map) return;
+    try {
+      const typeId = map.getMapTypeId?.();
+      // Hybrid/satellite: estilos JSON escondem ou atrapalham labels de lojas/cidades
+      const imagery = typeId === 'hybrid' || typeId === 'satellite';
+      map.setOptions({ styles: dark && !imagery ? GOOGLE_MAP_DARK_STYLES : [] });
+    } catch (err) {
+      console.warn('[Mapa] Falha ao aplicar tema:', err?.message || err);
+    }
+  }
+
+  $: if (map && googleMapsLoaded) {
+    void isDarkTheme;
+    applyGoogleMapTheme(isDarkTheme);
+  }
 
   function getMapElement() {
     return typeof document !== 'undefined' ? document.getElementById(mapDomId) : null;
   }
 
+  function getWorkbenchMapContainer() {
+    const mapEl = getMapElement();
+    return mapEl?.closest?.('.map-container') || null;
+  }
+
+  function flashWorkbenchStreetViewMsg(text) {
+    wbStreetViewMsg = text || '';
+    if (wbStreetViewMsgTimer) clearTimeout(wbStreetViewMsgTimer);
+    if (!text) return;
+    wbStreetViewMsgTimer = setTimeout(() => {
+      wbStreetViewMsg = '';
+      wbStreetViewMsgTimer = null;
+    }, 2200);
+  }
+
+  function ensureWbPixelOverlay() {
+    if (!map || !google?.maps) return null;
+    if (wbPixelOverlay) return wbPixelOverlay;
+    wbPixelOverlay = new google.maps.OverlayView();
+    wbPixelOverlay.onAdd = function onAdd() {};
+    wbPixelOverlay.draw = function draw() {};
+    wbPixelOverlay.onRemove = function onRemove() {};
+    wbPixelOverlay.setMap(map);
+    return wbPixelOverlay;
+  }
+
+  function clientPointToLatLng(clientX, clientY) {
+    if (!map || !google?.maps) return null;
+    const mapDiv = map.getDiv?.();
+    if (!mapDiv) return null;
+    const rect = mapDiv.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top;
+    if (x < 0 || y < 0 || x > rect.width || y > rect.height) return null;
+    const overlay = ensureWbPixelOverlay();
+    const proj = overlay?.getProjection?.();
+    if (!proj) return null;
+    try {
+      return proj.fromContainerPixelToLatLng(new google.maps.Point(x, y));
+    } catch {
+      return null;
+    }
+  }
+
+  function setStreetViewCoverageVisible(visible) {
+    if (!map || !google?.maps) return;
+    try {
+      if (visible) {
+        if (!wbStreetViewCoverage) {
+          wbStreetViewCoverage = new google.maps.StreetViewCoverageLayer();
+        }
+        wbStreetViewCoverage.setMap(map);
+      } else if (wbStreetViewCoverage) {
+        wbStreetViewCoverage.setMap(null);
+      }
+    } catch (err) {
+      console.warn('[Mapa] Coverage layer:', err?.message || err);
+    }
+  }
+
+  function openStreetViewAt(latLng) {
+    if (!map || !google?.maps || !latLng) return;
+    const sv = map.getStreetView?.();
+    if (!sv) return;
+    const service = new google.maps.StreetViewService();
+    service.getPanorama({ location: latLng, radius: 80 }, (data, status) => {
+      if (status === 'OK' && data?.location?.latLng) {
+        try {
+          sv.setOptions?.({
+            enableCloseButton: true,
+            addressControl: true,
+            panControl: true,
+            zoomControl: true,
+            fullscreenControl: true,
+            linksControl: true
+          });
+        } catch {
+          // ignore
+        }
+        sv.setPosition(data.location.latLng);
+        sv.setPov({ heading: map.getHeading?.() || 0, pitch: 0 });
+        sv.setVisible(true);
+        wbStreetViewOpen = true;
+        flashWorkbenchStreetViewMsg('');
+      } else {
+        wbStreetViewOpen = false;
+        flashWorkbenchStreetViewMsg('Street View indisponível neste local');
+      }
+    });
+  }
+
+  function closeWorkbenchStreetView() {
+    if (!map) return;
+    const sv = map.getStreetView?.();
+    if (!sv) return;
+    sv.setVisible(false);
+    wbStreetViewOpen = false;
+    flashWorkbenchStreetViewMsg('');
+  }
+
+  function onPegmanPointerMove(event) {
+    if (!wbPegmanDragging) return;
+    wbPegmanGhostX = event.clientX;
+    wbPegmanGhostY = event.clientY;
+  }
+
+  function endPegmanDrag(event) {
+    if (!wbPegmanDragging) return;
+    const clientX = event?.clientX ?? wbPegmanGhostX;
+    const clientY = event?.clientY ?? wbPegmanGhostY;
+
+    wbPegmanDragging = false;
+    wbPegmanPointerId = null;
+    wbPegmanJustDragged = true;
+    setStreetViewCoverageVisible(false);
+    try {
+      map?.setOptions?.({ draggable: true, gestureHandling: 'greedy' });
+    } catch {
+      // ignore
+    }
+
+    window.removeEventListener('pointermove', onPegmanPointerMove, true);
+    window.removeEventListener('pointerup', endPegmanDrag, true);
+    window.removeEventListener('pointercancel', cancelPegmanDrag, true);
+
+    const mapDiv = map?.getDiv?.();
+    const rect = mapDiv?.getBoundingClientRect?.();
+    const overMap =
+      rect &&
+      clientX >= rect.left &&
+      clientX <= rect.right &&
+      clientY >= rect.top &&
+      clientY <= rect.bottom;
+
+    if (!overMap) {
+      flashWorkbenchStreetViewMsg('Solte o boneco sobre uma rua azul');
+      setTimeout(() => {
+        wbPegmanJustDragged = false;
+      }, 0);
+      return;
+    }
+
+    const latLng = clientPointToLatLng(clientX, clientY);
+    if (latLng) openStreetViewAt(latLng);
+    else flashWorkbenchStreetViewMsg('Street View indisponível neste local');
+
+    setTimeout(() => {
+      wbPegmanJustDragged = false;
+    }, 0);
+  }
+
+  function cancelPegmanDrag() {
+    if (!wbPegmanDragging) return;
+    wbPegmanDragging = false;
+    wbPegmanPointerId = null;
+    setStreetViewCoverageVisible(false);
+    try {
+      map?.setOptions?.({ draggable: true, gestureHandling: 'greedy' });
+    } catch {
+      // ignore
+    }
+    window.removeEventListener('pointermove', onPegmanPointerMove, true);
+    window.removeEventListener('pointerup', endPegmanDrag, true);
+    window.removeEventListener('pointercancel', cancelPegmanDrag, true);
+  }
+
+  function startPegmanDrag(event) {
+    if (!map || !workbenchMode || !google?.maps) return;
+    if (event.button != null && event.button !== 0) return;
+    if (wbStreetViewOpen) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    ensureWbPixelOverlay();
+    wbPegmanDragging = true;
+    wbPegmanJustDragged = false;
+    wbPegmanPointerId = event.pointerId ?? null;
+    wbPegmanGhostX = event.clientX;
+    wbPegmanGhostY = event.clientY;
+    setStreetViewCoverageVisible(true);
+    try {
+      map.setOptions({ draggable: false, gestureHandling: 'none' });
+    } catch {
+      // ignore
+    }
+
+    try {
+      event.currentTarget?.setPointerCapture?.(event.pointerId);
+    } catch {
+      // ignore
+    }
+
+    window.addEventListener('pointermove', onPegmanPointerMove, true);
+    window.addEventListener('pointerup', endPegmanDrag, true);
+    window.addEventListener('pointercancel', cancelPegmanDrag, true);
+  }
+
+  function handlePegmanClick() {
+    if (wbPegmanJustDragged) {
+      wbPegmanJustDragged = false;
+      return;
+    }
+    if (wbStreetViewOpen) closeWorkbenchStreetView();
+  }
+
+  function setWorkbenchMapType(type) {
+    if (!map || !workbenchMode) return;
+    // UI "Satélite" usa hybrid para manter nomes de cidade/lojas/POIs
+    const nextUi = type === 'satellite' ? 'satellite' : 'roadmap';
+    const nextId = type === 'satellite' ? 'hybrid' : 'roadmap';
+    wbMapType = nextUi;
+    try {
+      map.setMapTypeId(nextId);
+      applyGoogleMapTheme(isDarkTheme);
+    } catch (err) {
+      console.warn('[Mapa] Falha ao trocar tipo:', err?.message || err);
+    }
+  }
+
+  /** Aplica preferência da extensão (sem exigir clique nos botões Mapa/Satélite). */
+  function applyPreferredWorkbenchMapType(type = preferredMapType) {
+    if (!workbenchMode || !map) return;
+    const next = type === 'satellite' ? 'satellite' : 'roadmap';
+    const wantId = next === 'satellite' ? 'hybrid' : 'roadmap';
+    try {
+      const currentId = map.getMapTypeId?.();
+      if (wbMapType === next && (currentId === wantId || currentId === next)) return;
+    } catch {
+      /* ignore */
+    }
+    setWorkbenchMapType(next);
+  }
+
+  $: if (workbenchMode && preferredMapType) {
+    applyPreferredWorkbenchMapType(preferredMapType);
+  }
+
+  async function toggleWorkbenchFullscreen() {
+    if (!workbenchMode) return;
+    const el = getWorkbenchMapContainer();
+    if (!el) return;
+    try {
+      if (!document.fullscreenElement) {
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      } else if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+    } catch (err) {
+      console.warn('[Mapa] Fullscreen:', err?.message || err);
+    }
+  }
+
+  function syncWorkbenchFullscreenState() {
+    if (!workbenchMode) return;
+    const el = getWorkbenchMapContainer();
+    wbFullscreen = !!(document.fullscreenElement && el && document.fullscreenElement === el);
+  }
+
+  function bindWorkbenchMapControls() {
+    if (!workbenchMode || !map || !google?.maps || wbMapControlsBound) return;
+    wbMapControlsBound = true;
+    ensureWbPixelOverlay();
+
+    try {
+      map.setOptions({
+        streetViewControl: false,
+        mapTypeControl: false,
+        fullscreenControl: false,
+        zoomControl: false,
+        cameraControl: false,
+        rotateControl: false
+      });
+    } catch {
+      // ignore
+    }
+
+    // Esconde o círculo/pegman nativo enquanto estiver no mapa/satélite
+    const hideNativeStreetViewControl = () => {
+      if (wbStreetViewOpen) return;
+      try {
+        map.setOptions?.({ streetViewControl: false, cameraControl: false });
+      } catch {
+        // ignore
+      }
+      try {
+        const root = map.getDiv?.() || getMapElement();
+        if (!root) return;
+        root.querySelectorAll?.('.gm-svpc').forEach((el) => {
+          el.style.setProperty('display', 'none', 'important');
+          el.style.setProperty('visibility', 'hidden', 'important');
+          el.style.setProperty('pointer-events', 'none', 'important');
+          el.style.setProperty('opacity', '0', 'important');
+          el.setAttribute('aria-hidden', 'true');
+          // Pai do controle (círculo branco maior)
+          const wrap = el.closest?.('.gmnoprint, .gm-bundled-control, .gm-bundled-control-on-bottom');
+          if (wrap && wrap !== root) {
+            wrap.style.setProperty('display', 'none', 'important');
+            wrap.style.setProperty('visibility', 'hidden', 'important');
+            wrap.style.setProperty('pointer-events', 'none', 'important');
+            wrap.style.setProperty('opacity', '0', 'important');
+          }
+        });
+      } catch {
+        // ignore
+      }
+    };
+    hideNativeStreetViewControl();
+    try {
+      google.maps.event.addListener(map, 'idle', hideNativeStreetViewControl);
+      google.maps.event.addListener(map, 'tilesloaded', hideNativeStreetViewControl);
+      setTimeout(hideNativeStreetViewControl, 300);
+      setTimeout(hideNativeStreetViewControl, 1000);
+      setTimeout(hideNativeStreetViewControl, 2500);
+    } catch {
+      // ignore
+    }
+
+    // Google às vezes recria o controle ao trocar mapa/satélite — observa o DOM
+    try {
+      const mapRoot = map.getDiv?.() || getMapElement();
+      if (mapRoot && typeof MutationObserver !== 'undefined') {
+        if (wbNativeSvObserver) {
+          try {
+            wbNativeSvObserver.disconnect();
+          } catch {
+            // ignore
+          }
+        }
+        let hideTimer = null;
+        wbNativeSvObserver = new MutationObserver(() => {
+          if (wbStreetViewOpen) return;
+          if (hideTimer) return;
+          hideTimer = setTimeout(() => {
+            hideTimer = null;
+            hideNativeStreetViewControl();
+          }, 80);
+        });
+        wbNativeSvObserver.observe(mapRoot, { childList: true, subtree: true });
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const typeId = map.getMapTypeId?.();
+      wbMapType = typeId === 'satellite' || typeId === 'hybrid' ? 'satellite' : 'roadmap';
+    } catch {
+      wbMapType = 'roadmap';
+    }
+
+    try {
+      google.maps.event.addListener(map, 'maptypeid_changed', () => {
+        const typeId = map.getMapTypeId?.();
+        wbMapType = typeId === 'satellite' || typeId === 'hybrid' ? 'satellite' : 'roadmap';
+        applyGoogleMapTheme(isDarkTheme);
+        hideNativeStreetViewControl();
+      });
+    } catch {
+      // ignore
+    }
+
+    try {
+      const sv = map.getStreetView?.();
+      if (sv) {
+        try {
+          sv.setOptions?.({
+            enableCloseButton: true,
+            addressControl: true,
+            panControl: true,
+            zoomControl: true,
+            fullscreenControl: true,
+            linksControl: true,
+            motionTrackingControl: true
+          });
+        } catch {
+          // ignore
+        }
+        wbStreetViewOpen = !!sv.getVisible?.();
+        google.maps.event.addListener(sv, 'visible_changed', () => {
+          const open = !!sv.getVisible?.();
+          wbStreetViewOpen = open;
+          if (open) {
+            // Street View: só controles nativos (X, bússola, fullscreen do Google)
+            try {
+              sv.setOptions?.({
+                enableCloseButton: true,
+                addressControl: true,
+                panControl: true,
+                zoomControl: true,
+                fullscreenControl: true,
+                linksControl: true
+              });
+            } catch {
+              // ignore
+            }
+          } else {
+            setTimeout(hideNativeStreetViewControl, 50);
+            setTimeout(hideNativeStreetViewControl, 400);
+          }
+        });
+      }
+    } catch {
+      // ignore
+    }
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('fullscreenchange', syncWorkbenchFullscreenState);
+      document.addEventListener('webkitfullscreenchange', syncWorkbenchFullscreenState);
+    }
+  }
+
+  function unbindWorkbenchMapControls() {
+    cancelPegmanDrag();
+    setStreetViewCoverageVisible(false);
+    if (wbNativeSvObserver) {
+      try {
+        wbNativeSvObserver.disconnect();
+      } catch {
+        // ignore
+      }
+      wbNativeSvObserver = null;
+    }
+    if (wbPixelOverlay) {
+      try {
+        wbPixelOverlay.setMap(null);
+      } catch {
+        // ignore
+      }
+      wbPixelOverlay = null;
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('fullscreenchange', syncWorkbenchFullscreenState);
+      document.removeEventListener('webkitfullscreenchange', syncWorkbenchFullscreenState);
+    }
+    if (wbStreetViewMsgTimer) {
+      clearTimeout(wbStreetViewMsgTimer);
+      wbStreetViewMsgTimer = null;
+    }
+    wbMapControlsBound = false;
+  }
+
   // Helper para URL da API - usando função do config.js
   // (getApiUrl já foi importado acima)
 
-  /** Headers para cluster (alternância de leitura por projetista). */
-  function clusterFetchHeaders() {
+  /** Headers opcionais de identidade do projetista nas buscas. */
+  function apiFetchHeaders() {
     const h = {};
     if (currentUser) h['X-Projetista'] = currentUser;
     return h;
@@ -90,6 +719,8 @@
   let markers = [];
   let clientMarker = null; // Marcador do cliente
   let clientInfoWindow = null; // InfoWindow do cliente
+  /** InfoWindows de CTOs/prédios abertos no mapa (fechados no print) */
+  let mapInfoWindows = [];
   let clientCoords = null; // Coordenadas do cliente
   let ctos = []; // CTOs encontradas
   
@@ -108,6 +739,9 @@
   
   // Filtrar apenas CTOs de rua (não prédios) para exibição nos boxes e lista
   $: ctosRua = ctos.filter(cto => !cto.is_condominio || cto.is_condominio === false);
+  /** Toggle global: mostrar/ocultar marcadores de prédio (MDU) no mapa */
+  let prediosVisibleOnMap = true;
+  $: hasPrediosOnMap = (ctos || []).some((c) => c && c.is_condominio === true);
   let routes = []; // Rotas desenhadas no mapa
   let routeData = []; // Dados das rotas (para edição) - armazena CTO associada e path original
   let editingRoutes = false; // Modo de edição de rotas (DEPRECADO - usar editingRouteIndex)
@@ -155,8 +789,9 @@
   
   // Lista de tabulações finais
   let tabulacoesList = [
-    'Aprovado Com Portas',
+    'Aprovado - Portas Disponíveis',
     'Aprovado Com Alívio de Rede/Cleanup',
+    'Aprovado / Sem Estrutura Atendimento Externo',
     'Aprovado Prédio Não Cabeado',
     'Aprovado - Endereço não Localizado',
     'Fora da Área de Cobertura'
@@ -169,6 +804,12 @@
   let showInfoPortas = false;
   let showInfoForaCobertura = false;
   let showInfoForaLimite = false;
+
+  /** Pop bloqueante: base CTOs/mancha publicada — só some com reload */
+  let showBaseReadyReloadModal = false;
+  /** undefined = ainda não capturou baseline da sessão */
+  let sessionBaseReadyAt = undefined;
+  let baseReadyPollInterval = null;
 
   // Estado de loading (apenas para esta ferramenta)
   let isLoading = false;
@@ -207,10 +848,252 @@
   
   // Função para gerar uma chave única para uma CTO
   function getCTOKey(cto) {
-    const id = cto.id_cto || cto.id || 'NO_ID';
+    const id =
+      cto.id_cto ||
+      cto.id ||
+      (cto.id_mdu != null && cto.id_mdu !== '' ? `mdu-${cto.id_mdu}` : null) ||
+      'NO_ID';
     const lat = isNaN(parseFloat(cto.latitude)) ? '0.000000' : parseFloat(cto.latitude || 0).toFixed(6);
     const lng = isNaN(parseFloat(cto.longitude)) ? '0.000000' : parseFloat(cto.longitude || 0).toFixed(6);
     return `${id}_${cto.nome || 'UNKNOWN'}_${lat}_${lng}`;
+  }
+
+  /** Anexa ctoKey no Marker/Polyline de forma estável (MVCObject + propriedade). */
+  function setMapItemCtoKey(item, ctoKey) {
+    if (!item || !ctoKey) return;
+    try {
+      item.__ctoKey = ctoKey;
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      if (typeof item.set === 'function') item.set('ctoKey', ctoKey);
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function getMapItemCtoKey(item) {
+    if (!item) return null;
+    try {
+      if (typeof item.get === 'function') {
+        const viaGet = item.get('ctoKey');
+        if (viaGet) return String(viaGet);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      if (item.__ctoKey) return String(item.__ctoKey);
+    } catch (_) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  /** SVG do ícone de prédio (mesmo usado nos marcadores MDU). */
+  function buildPredioIconSvg({ windowColor = '#6C63FF', strokeColor = '#4F46E5' } = {}) {
+    return `
+      <svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
+        <rect x="2" y="4" width="20" height="26" fill="#F5F5F5" stroke="${strokeColor}" stroke-width="1.5"/>
+        <rect x="4" y="6" width="4" height="4" fill="${windowColor}"/>
+        <rect x="10" y="6" width="4" height="4" fill="${windowColor}"/>
+        <rect x="16" y="6" width="4" height="4" fill="${windowColor}"/>
+        <rect x="4" y="11" width="4" height="4" fill="${windowColor}"/>
+        <rect x="10" y="11" width="4" height="4" fill="${windowColor}"/>
+        <rect x="16" y="11" width="4" height="4" fill="${windowColor}"/>
+        <rect x="4" y="16" width="4" height="4" fill="${windowColor}"/>
+        <rect x="10" y="16" width="4" height="4" fill="${windowColor}"/>
+        <rect x="16" y="16" width="4" height="4" fill="${windowColor}"/>
+        <rect x="4" y="21" width="4" height="4" fill="${windowColor}"/>
+        <rect x="10" y="21" width="4" height="4" fill="${windowColor}"/>
+        <rect x="16" y="21" width="4" height="4" fill="${windowColor}"/>
+        <rect x="4" y="26" width="4" height="4" fill="${windowColor}"/>
+        <rect x="10" y="26" width="4" height="4" fill="${windowColor}"/>
+        <rect x="16" y="26" width="4" height="4" fill="${windowColor}"/>
+        <path d="M 8 30 Q 12 26, 16 30" stroke="${strokeColor}" stroke-width="1.5" fill="none"/>
+        <line x1="8" y1="30" x2="16" y2="30" stroke="${strokeColor}" stroke-width="1.5"/>
+      </svg>
+    `.trim();
+  }
+
+  function applyPrediosVisibilityToMap() {
+    if (!map) return;
+    let hidden = 0;
+    let shown = 0;
+    for (const marker of markers || []) {
+      if (!marker || marker === clientMarker) continue;
+      const isPredio =
+        marker.__isPredio === true ||
+        (typeof marker.get === 'function' && marker.get('isPredio') === true);
+      if (!isPredio) continue;
+      try {
+        if (prediosVisibleOnMap) {
+          marker.setMap(map);
+          if (typeof marker.setVisible === 'function') marker.setVisible(true);
+          shown += 1;
+        } else {
+          marker.setMap(null);
+          if (typeof marker.setVisible === 'function') marker.setVisible(false);
+          hidden += 1;
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    console.log(
+      `🏢 [Mapa] Prédios ${prediosVisibleOnMap ? 'visíveis' : 'ocultos'}: shown=${shown}, hidden=${hidden}`
+    );
+  }
+
+  function togglePrediosVisibilityOnMap() {
+    prediosVisibleOnMap = !prediosVisibleOnMap;
+    applyPrediosVisibilityToMap();
+  }
+
+  /** Fecha casinha/CTO InfoWindows. Opcionalmente esconde o DOM só durante o print. */
+  function isGoogleInfoWindowNode(el) {
+    if (!el || el.nodeType !== 1) return false;
+    try {
+      if (el.closest?.('.gm-style-iw-a, .gm-style-iw-t, .gm-style-iw-tc')) return true;
+      const cls = el.classList;
+      if (!cls) return false;
+      return (
+        cls.contains('gm-style-iw') ||
+        cls.contains('gm-style-iw-a') ||
+        cls.contains('gm-style-iw-t') ||
+        cls.contains('gm-style-iw-tc') ||
+        cls.contains('gm-style-iw-c') ||
+        cls.contains('gm-style-iw-d') ||
+        cls.contains('gm-style-iw-chr')
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function closeMapInfoWindowsForCapture({ hideDom = false } = {}) {
+    if (clientInfoWindow) {
+      try {
+        clientInfoWindow.close();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    for (const iw of mapInfoWindows || []) {
+      try {
+        iw?.close?.();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    if (!hideDom) return [];
+
+    // Busca no documento inteiro: IW do Google às vezes fica fora do #map no clone
+    const roots = [];
+    const mapEl = typeof getMapElement === 'function' ? getMapElement() : null;
+    if (mapEl) roots.push(mapEl);
+    if (typeof document !== 'undefined') {
+      roots.push(document);
+      const host = mapEl?.closest?.('.map-container, .wb-map-host, .viabilidade-content');
+      if (host) roots.push(host);
+    }
+
+    const seen = new Set();
+    const hidden = [];
+    const hideEl = (el) => {
+      if (!el || seen.has(el)) return;
+      seen.add(el);
+      hidden.push({
+        el,
+        display: el.style.display,
+        visibility: el.style.visibility,
+        opacity: el.style.opacity,
+        pointerEvents: el.style.pointerEvents
+      });
+      el.style.setProperty('display', 'none', 'important');
+      el.style.setProperty('visibility', 'hidden', 'important');
+      el.style.setProperty('opacity', '0', 'important');
+      el.style.setProperty('pointer-events', 'none', 'important');
+    };
+
+    try {
+      for (const root of roots) {
+        root
+          .querySelectorAll?.(
+            '.gm-style-iw-a, .gm-style-iw-t, .gm-style-iw-tc, .gm-style-iw, .gm-style-iw-c, .gm-style-iw-d, .gm-style-iw-chr'
+          )
+          ?.forEach((el) => hideEl(el));
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    return hidden;
+  }
+
+  function restoreHiddenInfoWindowDom(hidden = []) {
+    for (const item of hidden || []) {
+      try {
+        if (!item?.el) continue;
+        if (item.display != null) item.el.style.display = item.display;
+        else item.el.style.removeProperty('display');
+        if (item.visibility != null) item.el.style.visibility = item.visibility;
+        else item.el.style.removeProperty('visibility');
+        if (item.opacity != null) item.el.style.opacity = item.opacity;
+        else item.el.style.removeProperty('opacity');
+        if (item.pointerEvents != null) item.el.style.pointerEvents = item.pointerEvents;
+        else item.el.style.removeProperty('pointer-events');
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  /** Remove do mapa todos os marcadores que não são a casinha do cliente. */
+  function clearCtoMarkersFromMap() {
+    for (const iw of mapInfoWindows || []) {
+      try {
+        iw?.close?.();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    mapInfoWindows = [];
+    const kept = [];
+    for (const marker of markers || []) {
+      if (!marker) continue;
+      if (marker === clientMarker) {
+        kept.push(marker);
+        continue;
+      }
+      try {
+        marker.setMap(null);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    markers = kept;
+  }
+
+  function findMarkerByCtoKey(ctoKey) {
+    if (!ctoKey || !markers?.length) return null;
+    return (
+      markers.find((marker) => {
+        if (!marker || marker === clientMarker) return false;
+        return getMapItemCtoKey(marker) === ctoKey;
+      }) || null
+    );
+  }
+
+  function findRouteInfoByCtoKey(ctoKey) {
+    if (!ctoKey || !routeData?.length) return null;
+    return (
+      routeData.find((rd) => {
+        if (!rd) return false;
+        if (rd.ctoKey === ctoKey) return true;
+        return getMapItemCtoKey(rd.polyline) === ctoKey;
+      }) || null
+    );
   }
 
   // Sistema de seleção de tabela
@@ -565,10 +1448,10 @@
         const dataCriacao = cto.data_criacao || cto.data_cadastro || cto.created_at || '';
         return formatDateToMMYYYY(dataCriacao);
       }
-      case 11: return (cto.vagas_total || 0).toString(); // Portas Total
-      case 12: return (cto.clientes_conectados || 0).toString(); // Ocupadas
-      case 13: return ((cto.vagas_total || 0) - (cto.clientes_conectados || 0)).toString(); // Disponíveis
-      case 14: return `${parseFloat(cto.pct_ocup || 0).toFixed(1)}%`; // Ocupação
+      case 11: return (normalizeCtoPortCounts(cto).vagas_total || 0).toString(); // Portas Total
+      case 12: return (normalizeCtoPortCounts(cto).clientes_conectados || 0).toString(); // Ocupadas
+      case 13: return ctoPortasDisponiveis(cto).toString(); // Disponíveis
+      case 14: return `${parseFloat(normalizeCtoPortCounts(cto).pct_ocup || 0).toFixed(1)}%`; // Ocupação
       case 15: return (cto.latitude || '').toString(); // Latitude
       case 16: return (cto.longitude || '').toString(); // Longitude
       default: return '';
@@ -995,11 +1878,207 @@
     return filteredPath;
   }
 
-  // Função para calcular distância REAL usando Directions API (ruas)
+  // Cache do traçado: a distância e o desenho pedem a mesma CTO→cliente.
+  const routeResultCache = new Map();
+  const routeInflight = new Map();
+  let ownRouterMode = 'unknown';
+  let ownRouterCheck = null;
+  let ownRouterOffUntil = 0;
+
+  function routeRequestKey(origin, destination, travelMode) {
+    const nums = [origin?.lat, origin?.lng, destination?.lat, destination?.lng].map(Number);
+    if (!nums.every(Number.isFinite)) return '';
+    const mode = String(travelMode || '').toUpperCase().includes('DRIV') ? 'driving' : 'walking';
+    const r = (n) => n.toFixed(5);
+    return `${mode}|${r(nums[0])},${r(nums[1])}|${r(nums[2])},${r(nums[3])}`;
+  }
+
+  function rememberRouteResult(key, value) {
+    if (!key || value?.status !== 'OK') return;
+    routeResultCache.set(key, value);
+    if (routeResultCache.size > 200) {
+      routeResultCache.delete(routeResultCache.keys().next().value);
+    }
+  }
+
+  /** Uma sondagem por minuto. Com o motor desligado, a busca não espera rota a rota. */
+  function ensureOwnRouterMode() {
+    if (ownRouterMode === 'on') return Promise.resolve(true);
+    if (ownRouterMode === 'off' && Date.now() < ownRouterOffUntil) return Promise.resolve(false);
+    if (ownRouterCheck) return ownRouterCheck;
+    ownRouterCheck = probeOwnRouter().finally(() => {
+      ownRouterCheck = null;
+    });
+    return ownRouterCheck;
+  }
+
+  async function probeOwnRouter() {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    try {
+      const res = await fetch(getApiUrl('/api/routes/status'), {
+        headers: apiFetchHeaders(),
+        signal: ctrl.signal
+      });
+      const data = await res.json().catch(() => null);
+      const available = res.ok && data?.available === true;
+      ownRouterMode = available ? 'on' : 'off';
+      ownRouterOffUntil = available ? 0 : Date.now() + 60000;
+      if (available) {
+        console.log('🛣️ [Rotas] Motor próprio ativo.');
+      } else {
+        console.warn('⚠️ [Rotas] Motor próprio indisponível. Rotas seguem no Google.');
+      }
+      return available;
+    } catch {
+      ownRouterMode = 'off';
+      ownRouterOffUntil = Date.now() + 60000;
+      console.warn('⚠️ [Rotas] Motor próprio indisponível. Rotas seguem no Google.');
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function pauseOwnRouter() {
+    ownRouterMode = 'off';
+    ownRouterOffUntil = Date.now() + 60000;
+    console.warn('⚠️ [Rotas] Motor próprio falhou. As próximas consultas usam o Google Routes por 60s.');
+  }
+
+  function toRouteCompat(path, distanceMeters) {
+    return {
+      status: 'OK',
+      result: {
+        routes: [{
+          overview_path: path.map((p) => new google.maps.LatLng(p.lat, p.lng)),
+          legs: [{ distance: { value: Number(distanceMeters) || 0 }, steps: [] }]
+        }]
+      }
+    };
+  }
+
+  async function computeOwnRoute({ origin, destination, travelMode }) {
+    const available = await ensureOwnRouterMode();
+    if (!available) return null;
+
+    const mode = String(travelMode || '').toUpperCase().includes('DRIV') ? 'driving' : 'walking';
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    try {
+      const res = await fetch(getApiUrl('/api/routes/path'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...apiFetchHeaders() },
+        body: JSON.stringify({
+          origin: { lat: Number(origin.lat), lng: Number(origin.lng) },
+          destination: { lat: Number(destination.lat), lng: Number(destination.lng) },
+          mode
+        }),
+        signal: ctrl.signal
+      });
+      const data = await res.json().catch(() => null);
+      if (data?.code === 'ROUTE_LONG' || data?.code === 'ZERO_RESULTS') {
+        return null;
+      }
+      if (data?.code === 'ROUTER_UNAVAILABLE' || res.status >= 500) {
+        pauseOwnRouter();
+        return null;
+      }
+      if (!res.ok || !data?.success || !Array.isArray(data.path) || data.path.length < 2) {
+        console.warn('⚠️ [Rotas] Motor próprio sem traçado nesta consulta. Usando Google Routes.');
+        return null;
+      }
+      return toRouteCompat(data.path, data.distanceMeters);
+    } catch {
+      pauseOwnRouter();
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function computeGoogleRouteCompat({ origin, destination, travelMode }) {
+    try {
+      const { Route } = await google.maps.importLibrary('routes');
+      const { routes } = await Route.computeRoutes({
+        origin,
+        destination,
+        travelMode,
+        region: 'BR',
+        computeAlternativeRoutes: false,
+        polylineQuality: 'HIGH_QUALITY',
+        fields: ['path', 'distanceMeters']
+      });
+
+      const route = routes && routes[0];
+      if (!route || !route.path || route.path.length === 0) {
+        return { result: null, status: 'ZERO_RESULTS' };
+      }
+
+      return {
+        status: 'OK',
+        result: {
+          routes: [{
+            overview_path: route.path.map((p) => new google.maps.LatLng(p.lat, p.lng)),
+            legs: [{ distance: { value: route.distanceMeters || 0 }, steps: [] }]
+          }]
+        }
+      };
+    } catch (err) {
+      console.error('❌ [Routes API] Erro ao calcular rota:', err);
+      const msg = String(err && err.message || err).toUpperCase();
+      let status = 'UNKNOWN_ERROR';
+      if (msg.includes('PERMISSION') || msg.includes('DENIED') || msg.includes('API KEY') || msg.includes('NOT AUTHORIZED')) {
+        status = 'REQUEST_DENIED';
+      } else if (msg.includes('QUOTA') || msg.includes('RESOURCE_EXHAUSTED')) {
+        status = 'OVER_QUERY_LIMIT';
+      } else if (msg.includes('INVALID')) {
+        status = 'INVALID_REQUEST';
+      } else if (msg.includes('NOT_FOUND')) {
+        status = 'NOT_FOUND';
+      }
+      return { result: null, status };
+    }
+  }
+
+  // Traçado no formato que o desenho já usa. Motor próprio primeiro; Google só se ele falhar.
+  async function computeRouteCompat({ origin, destination, travelMode }) {
+    const key = routeRequestKey(origin, destination, travelMode);
+    if (key) {
+      const cached = routeResultCache.get(key);
+      if (cached) return cached;
+      const pending = routeInflight.get(key);
+      if (pending) return pending;
+    }
+
+    const run = (async () => {
+      const linear = calculateGeodesicDistance(
+        Number(origin.lat),
+        Number(origin.lng),
+        Number(destination.lat),
+        Number(destination.lng)
+      );
+      // Até 1 km a rota sai do arquivo local. Acima disso, Google.
+      const own = linear <= 1000
+        ? await computeOwnRoute({ origin, destination, travelMode })
+        : null;
+      const value = own || (await computeGoogleRouteCompat({ origin, destination, travelMode }));
+      rememberRouteResult(key, value);
+      return value;
+    })();
+
+    if (!key) return run;
+    routeInflight.set(key, run);
+    try {
+      return await run;
+    } finally {
+      routeInflight.delete(key);
+    }
+  }
+
+  // Função para calcular distância REAL usando Routes API (ruas)
   function calculateRealRouteDistance(originLat, originLng, destLat, destLng) {
     return new Promise((resolve, reject) => {
-      const directionsService = new google.maps.DirectionsService();
-
       // Calcular distância linear aproximada para decidir o modo de transporte
       const linearDistance = calculateGeodesicDistance(originLat, originLng, destLat, destLng);
       
@@ -1011,17 +2090,11 @@
       
       console.log(`🚗 [Frontend] Calculando rota com modo ${travelMode === google.maps.TravelMode.DRIVING ? 'DRIVING' : 'WALKING'} (distância linear: ${linearDistance.toFixed(2)}m)`);
 
-      directionsService.route(
-        {
-          origin: { lat: originLat, lng: originLng },
-          destination: { lat: destLat, lng: destLng },
-          travelMode: travelMode, // Usar DRIVING para longas distâncias, WALKING para curtas
-          unitSystem: google.maps.UnitSystem.METRIC,
-          region: 'BR', // Melhorar resultados para o Brasil
-          provideRouteAlternatives: false, // Não calcular rotas alternativas (otimização)
-          avoidHighways: travelMode === google.maps.TravelMode.WALKING // Evitar rodovias apenas no modo caminhada
-        },
-        (result, status) => {
+      computeRouteCompat({
+        origin: { lat: originLat, lng: originLng },
+        destination: { lat: destLat, lng: destLng },
+        travelMode: travelMode // Usar DRIVING para longas distâncias, WALKING para curtas
+      }).then(({ result, status }) => {
           if (status === 'OK' && result.routes && result.routes.length > 0) {
             const route = result.routes[0];
             let totalDistance = 0;
@@ -1122,8 +2195,8 @@
       // Verificar se o Supabase está disponível fazendo uma busca simples
       const testLat = -23.5505; // Coordenada de teste (São Paulo)
       const testLng = -46.6333;
-      const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${testLat}&lng=${testLng}&radius=1000`), {
-        headers: clusterFetchHeaders()
+      const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${testLat}&lng=${testLng}&radius=1000&probe=1`), {
+        headers: apiFetchHeaders()
       });
       if (response.ok) {
         baseDataExists = true;
@@ -1162,9 +2235,228 @@
       reportForm.numeroEndereco = clientAddressData.numero;
       reportForm.cep = clientAddressData.cep;
     }
+
+    emitClientLocationChange('geocode');
+  }
+
+  /** Workbench: avisa o formulário Informações (endereço/CEP/coords). */
+  function emitClientLocationChange(source = 'update') {
+    if (!workbenchMode) return;
+    if (typeof onClientLocationChange !== 'function') return;
+    if (!clientCoords || clientCoords.lat == null || clientCoords.lng == null) return;
+
+    // Evita o sync reativo do Workbench re-buscar a mesma posição
+    lastWorkbenchLocKey = workbenchCoordKey(clientCoords.lat, clientCoords.lng);
+
+    try {
+      onClientLocationChange({
+        source,
+        coords: {
+          lat: Number(clientCoords.lat),
+          lng: Number(clientCoords.lng)
+        },
+        address: { ...clientAddressData }
+      });
+    } catch (err) {
+      console.warn('[Workbench] onClientLocationChange:', err);
+    }
+  }
+
+  function emitEquipamentosChange() {
+    if (!workbenchMode || typeof onEquipamentosChange !== 'function') return;
+    try {
+      const items = (ctosRua || []).map((cto) => {
+        const statusCto = getStatusCTO(cto) || 'N/A';
+        const statusUpper = String(statusCto).toUpperCase();
+        let statusClass = '';
+        if (statusUpper.includes('ATIVADO')) statusClass = 'ativado';
+        else if (statusUpper.includes('DESATIVADO') || statusUpper.includes('INATIVO')) statusClass = 'desativado';
+        const ctoKey = getCTOKey(cto);
+        return {
+          ctoKey,
+          visible: ctoVisibility.get(ctoKey) !== false,
+          // Igual à tabela oficial: desmarcado → "-" (só visíveis entram na numeração 1..N)
+          n: ctoNumbers.get(cto) || '-',
+          nome: cto.nome || '',
+          status: statusCto,
+          statusClass,
+          cidade: cto.cidade || 'N/A',
+          pop: cto.pop || 'N/A'
+        };
+      });
+      onEquipamentosChange({ items });
+    } catch (err) {
+      console.warn('[Workbench] onEquipamentosChange:', err);
+    }
+  }
+
+  /** WORKBENCH — marca/desmarca CTO no mapa a partir da tabela espelho. */
+  export async function setWorkbenchCtoVisible(ctoKey, visible) {
+    if (!workbenchMode || !ctoKey) return;
+    ctoVisibility.set(String(ctoKey), !!visible);
+    ctoVisibility = ctoVisibility;
+    ctoNumbersVersion++;
+    await tick();
+    await updateMapVisibility();
+    emitEquipamentosChange();
+  }
+
+  /** WORKBENCH — marca/desmarca todas as CTOs no mapa. */
+  export async function setAllWorkbenchCtosVisible(visible) {
+    if (!workbenchMode) return;
+    const on = !!visible;
+    (ctosRua || []).forEach((cto) => {
+      ctoVisibility.set(getCTOKey(cto), on);
+    });
+    ctoVisibility = ctoVisibility;
+    ctoNumbersVersion++;
+    await tick();
+    await updateMapVisibility();
+    emitEquipamentosChange();
+  }
+
+  $: if (workbenchMode) {
+    void ctosRua;
+    void ctosRua?.length;
+    void ctoNumbersVersion;
+    emitEquipamentosChange();
+  }
+
+  const FORA_LIMITE_METROS = 250;
+
+  function ctoRouteDistanceMeters(cto) {
+    if (!cto) return 0;
+    const raw = Number(cto.distancia_real ?? cto.distancia_metros ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }
+
+  /**
+   * CTO que dispara o box "Fora do Limite":
+   * a mais próxima (rua) com rota/distância acima de 250m —
+   * independente de estar dentro da área de cobertura.
+   */
+  function resolveForaLimiteCto() {
+    if (nearestCTOOutsideLimit) {
+      const d = ctoRouteDistanceMeters(nearestCTOOutsideLimit);
+      if (d > FORA_LIMITE_METROS) return nearestCTOOutsideLimit;
+    }
+
+    const flagged = [...(ctosRua || []), ...(ctos || [])].find((cto) => {
+      if (!cto || cto.is_condominio) return false;
+      if (!cto.is_out_of_limit) return false;
+      return ctoRouteDistanceMeters(cto) > FORA_LIMITE_METROS;
+    });
+    if (flagged) return flagged;
+
+    // Fallback: menor distância real entre CTOs de rua; se > 250m → fora do limite
+    const street = (ctosRua || []).filter((cto) => cto && !cto.is_condominio);
+    if (!street.length) return null;
+    const sorted = [...street].sort(
+      (a, b) => ctoRouteDistanceMeters(a) - ctoRouteDistanceMeters(b)
+    );
+    const nearest = sorted[0];
+    return ctoRouteDistanceMeters(nearest) > FORA_LIMITE_METROS ? nearest : null;
+  }
+
+  function buildForaLimitePayload() {
+    const cto = resolveForaLimiteCto();
+    const dist = ctoRouteDistanceMeters(cto);
+    if (!cto || !(dist > FORA_LIMITE_METROS)) {
+      return { active: false };
+    }
+    return {
+      active: true,
+      nome: cto.nome || 'N/A',
+      distancia: dist
+    };
+  }
+
+  function emitForaLimiteChange() {
+    if (!workbenchMode || typeof onForaLimiteChange !== 'function') return;
+    try {
+      onForaLimiteChange(buildForaLimitePayload());
+    } catch (err) {
+      console.warn('[Workbench] onForaLimiteChange:', err);
+    }
+  }
+
+  /** Workbench: leitura síncrona do estado Fora do Limite (após busca). */
+  export function getWorkbenchForaLimiteInfo() {
+    return buildForaLimitePayload();
+  }
+
+  $: if (workbenchMode) {
+    void nearestCTOOutsideLimit;
+    void nearestCTOOutsideLimit?.nome;
+    void nearestCTOOutsideLimit?.distancia_real;
+    void nearestCTOOutsideLimit?.distancia_metros;
+    void ctos;
+    void ctos?.length;
+    void ctosRua;
+    void ctosRua?.length;
+    void (ctosRua || []).map((c) => `${c?.nome}:${c?.is_out_of_limit}:${c?.distancia_real || c?.distancia_metros || 0}`).join('|');
+    emitForaLimiteChange();
   }
 
   // Função para determinar a cor do marcador baseada na porcentagem de ocupação (pct_ocup)
+  /**
+   * Corrige inconsistência da base: total de portas < conectadas (ex.: 0 e 8)
+   * → total passa a ser igual às conectadas; disponíveis nunca ficam negativos.
+   * Também usa `livre` quando portas vem 0/vazio.
+   * Sem capacidade (0/0) → pct 100% para o marcador ficar vermelho (não verde).
+   */
+  function normalizeCtoPortCounts(cto) {
+    if (!cto || typeof cto !== 'object') return cto;
+    let conectadas = Math.max(
+      0,
+      Number(cto.clientes_conectados ?? cto.ocupado ?? cto.portasConectadas) || 0
+    );
+    let total = Math.max(
+      0,
+      Number(cto.vagas_total ?? cto.portas ?? cto.totalPortas) || 0
+    );
+    const livreRaw = cto.livre ?? cto.portas_livres;
+    const livresFromField =
+      livreRaw !== null && livreRaw !== undefined && livreRaw !== ''
+        ? Math.max(0, Number(livreRaw) || 0)
+        : null;
+
+    if (total === 0 && livresFromField != null) {
+      total = livresFromField + conectadas;
+    } else if (
+      total > 0 &&
+      (cto.clientes_conectados == null || cto.clientes_conectados === '') &&
+      livresFromField != null
+    ) {
+      conectadas = Math.max(0, total - livresFromField);
+    }
+    if (total < conectadas) total = conectadas;
+
+    const disponiveis = Math.max(0, total - conectadas);
+    const prevTotal = Math.max(0, Number(cto.vagas_total) || 0);
+    let pctOcup = parseFloat(cto.pct_ocup);
+
+    // Sem portas cadastradas ou sem livres: não usar 0% (virava verde).
+    if (total === 0 || disponiveis === 0) {
+      pctOcup = 100;
+    } else if (!Number.isFinite(pctOcup) || total !== prevTotal) {
+      pctOcup = (conectadas / total) * 100;
+    }
+
+    return {
+      ...cto,
+      vagas_total: total,
+      clientes_conectados: conectadas,
+      portas_disponiveis: disponiveis,
+      pct_ocup: pctOcup
+    };
+  }
+
+  function ctoPortasDisponiveis(cto) {
+    const n = normalizeCtoPortCounts(cto);
+    return Math.max(0, (n?.vagas_total || 0) - (n?.clientes_conectados || 0));
+  }
+
   function getCTOColor(pctOcup) {
     // Converter para número e tratar valores inválidos
     const porcentagem = parseFloat(pctOcup) || 0;
@@ -1186,6 +2478,369 @@
     else {
       return '#F44336'; // Vermelho
     }
+  }
+
+  /** Cor do marcador a partir da CTO (sempre normaliza portas antes). */
+  function getCTOMarkerColor(cto) {
+    if (!cto) return '#F44336';
+    if (cto.is_out_of_limit) return '#FF9800';
+    const n = normalizeCtoPortCounts(cto);
+    // Sem capacidade ou sem portas livres → vermelho (nunca verde “falso”)
+    if ((n.vagas_total || 0) <= 0 || (n.portas_disponiveis || 0) <= 0) {
+      return '#F44336';
+    }
+    return getCTOColor(n.pct_ocup);
+  }
+
+  /** Classifica cor de ocupação igual ao marcador do mapa: green | orange | red */
+  function getCTOOccupancyBand(cto) {
+    const n = normalizeCtoPortCounts(cto);
+    if ((n.vagas_total || 0) <= 0) return 'red';
+    if ((n.portas_disponiveis || 0) <= 0) return 'red';
+    const color = String(getCTOColor(n.pct_ocup) || '').toUpperCase();
+    if (color === '#F44336' || color === COLOR_CTO_RED.toUpperCase()) return 'red';
+    if (color === '#FF9800' || color === COLOR_CTO_ORANGE.toUpperCase()) return 'orange';
+    return 'green';
+  }
+
+  /** Soma portas das CTOs internas de um MDU (mesma regra de ocupação das CTOs de rua). */
+  function aggregateMduPortsFromInternas(ctosInternas) {
+    const list = Array.isArray(ctosInternas) ? ctosInternas : [];
+    let total = 0;
+    let conectadas = 0;
+    for (const c of list) {
+      const n = normalizeCtoPortCounts(c);
+      total += n.vagas_total || 0;
+      conectadas += n.clientes_conectados || 0;
+    }
+    if (total < conectadas) total = conectadas;
+    const disponiveis = Math.max(0, total - conectadas);
+    const pct_ocup = total === 0 || disponiveis === 0 ? 100 : (conectadas / total) * 100;
+    return {
+      vagas_total: total,
+      clientes_conectados: conectadas,
+      portas_disponiveis: disponiveis,
+      pct_ocup
+    };
+  }
+
+  function getPredioStrokeForFill(fillColor) {
+    const f = String(fillColor || '').toUpperCase();
+    if (f === COLOR_CTO_GREEN.toUpperCase() || f === '#28A745') return '#2E7D32';
+    if (f === COLOR_CTO_ORANGE.toUpperCase()) return '#EF6C00';
+    if (f === COLOR_CTO_RED.toUpperCase() || f === '#DC3545') return '#C62828';
+    if (f === '#95A5A6') return '#7F8C8D';
+    if (f === '#6C63FF') return '#4F46E5';
+    return '#333333';
+  }
+
+  function getOccupancySoftBg(fillColor) {
+    const f = String(fillColor || '').toUpperCase();
+    if (f === COLOR_CTO_GREEN.toUpperCase() || f === '#28A745') return '#f1f8e9';
+    if (f === COLOR_CTO_ORANGE.toUpperCase()) return '#fff8e1';
+    if (f === COLOR_CTO_RED.toUpperCase() || f === '#DC3545') return '#fff5f5';
+    return '#f8f9fa';
+  }
+
+  /** Cores do ícone de prédio: MDU por ocupação agregada; sem equipamentos internos = cinza; legacy por ATIVADO. */
+  function getPredioMarkerColors(cto) {
+    const isMdu = cto?.fonte_condominio === 'mdu' || cto?.condominio_data?.fonte === 'mdu';
+    if (isMdu) {
+      const internas = cto.ctos_internas || cto.condominio_data?.ctos_internas || [];
+      const nomesRaw = cto.nomes_cto ?? cto.condominio_data?.nomes_cto ?? null;
+      const hasNomesCto =
+        (Array.isArray(nomesRaw) && nomesRaw.some((n) => String(n || '').trim())) ||
+        (typeof nomesRaw === 'string' &&
+          String(nomesRaw)
+            .split(/[,;|/]+/)
+            .some((s) => s.trim()));
+      const hasEquipamentosInternos =
+        (Array.isArray(internas) && internas.length > 0) || hasNomesCto;
+
+      // Sem CTO/equipamento interno na planilha MDU → cinza
+      if (!hasEquipamentosInternos) {
+        const windowColor = '#95A5A6';
+        return {
+          windowColor,
+          strokeColor: getPredioStrokeForFill(windowColor),
+          fillColor: windowColor,
+          ports: {
+            vagas_total: 0,
+            clientes_conectados: 0,
+            portas_disponiveis: 0,
+            pct_ocup: null
+          },
+          semEquipamentoInterno: true
+        };
+      }
+
+      const ports =
+        Array.isArray(internas) && internas.length > 0
+          ? aggregateMduPortsFromInternas(internas)
+          : normalizeCtoPortCounts(cto);
+      const windowColor = getCTOMarkerColor(ports);
+      return {
+        windowColor,
+        strokeColor: getPredioStrokeForFill(windowColor),
+        fillColor: windowColor,
+        ports,
+        semEquipamentoInterno: false
+      };
+    }
+    const statusCto = cto?.status_cto_condominio || cto?.condominio_data?.status_cto || '';
+    const isAtivado = !!(statusCto && statusCto.toUpperCase().trim() === 'ATIVADO');
+    const windowColor = isAtivado ? '#28A745' : '#95A5A6';
+    return {
+      windowColor,
+      strokeColor: getPredioStrokeForFill(windowColor),
+      fillColor: windowColor,
+      ports: null,
+      semEquipamentoInterno: false
+    };
+  }
+
+  function normalizeMotivoTabulacao(value) {
+    return String(value || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  /** Nome de CTO normalizado (MDU ↔ rua). */
+  function normalizeCtoNameKeyFront(name) {
+    return String(name || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  }
+
+  function compactCtoNameKeyFront(name) {
+    return normalizeCtoNameKeyFront(name).replace(/[^A-Z0-9]/g, '');
+  }
+
+  function splitNomesCtoFieldFront(value) {
+    if (value == null || value === '') return [];
+    if (Array.isArray(value)) {
+      return value.map((v) => String(v || '').trim()).filter(Boolean);
+    }
+    return String(value)
+      .split(/[,;|/]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  /**
+   * Índice dos equipamentos internos dos MDUs já carregados —
+   * evita desenhar/criar rota para a mesma CTO como se fosse de rua.
+   * Só por nome/id — CTO com nome diferente perto do MDU continua na rua.
+   */
+  function buildMduInternalEquipmentIndex(prediosList) {
+    const nameKeys = new Set();
+    const compactKeys = new Set();
+    const ids = new Set();
+
+    for (const p of prediosList || []) {
+      if (!p || !p.is_condominio) continue;
+      const nomesRaw = p.nomes_cto ?? p.condominio_data?.nomes_cto ?? null;
+      const nomes = splitNomesCtoFieldFront(nomesRaw);
+      const internas = Array.isArray(p.ctos_internas)
+        ? p.ctos_internas
+        : Array.isArray(p.condominio_data?.ctos_internas)
+          ? p.condominio_data.ctos_internas
+          : [];
+
+      for (const nome of nomes) {
+        const k = normalizeCtoNameKeyFront(nome);
+        if (k) nameKeys.add(k);
+        const c = compactCtoNameKeyFront(nome);
+        if (c) compactKeys.add(c);
+      }
+      for (const interna of internas) {
+        const k = normalizeCtoNameKeyFront(interna?.nome);
+        if (k) nameKeys.add(k);
+        const c = compactCtoNameKeyFront(interna?.nome);
+        if (c) compactKeys.add(c);
+        const id = interna?.id != null && interna.id !== '' ? String(interna.id) : '';
+        if (id) ids.add(id);
+      }
+    }
+
+    return { nameKeys, compactKeys, ids };
+  }
+
+  function isStreetCtoInternalToMdu(cto, index) {
+    if (!cto || cto.is_condominio || !index) return false;
+    const id =
+      cto.id_cto != null && cto.id_cto !== ''
+        ? String(cto.id_cto)
+        : cto.id != null
+          ? String(cto.id)
+          : '';
+    if (id && index.ids.has(id)) return true;
+
+    const nome = cto.nome || cto.cto || '';
+    const key = normalizeCtoNameKeyFront(nome);
+    if (key && index.nameKeys.has(key)) return true;
+    const compact = compactCtoNameKeyFront(nome);
+    if (compact && index.compactKeys.has(compact)) return true;
+    return false;
+  }
+
+  function filterStreetCtosAgainstMdu(streetCtos, prediosList) {
+    const index = buildMduInternalEquipmentIndex(prediosList);
+    if (!index.nameKeys.size && !index.compactKeys.size && !index.ids.size) {
+      return streetCtos || [];
+    }
+    const before = (streetCtos || []).length;
+    const filtered = (streetCtos || []).filter((cto) => !isStreetCtoInternalToMdu(cto, index));
+    const removed = before - filtered.length;
+    if (removed > 0) {
+      console.log(
+        `🏢 [Frontend] Ocultando ${removed} CTO(s) de rua que já estão como equipamento interno de MDU`
+      );
+    }
+    return filtered;
+  }
+
+  function isMotivoAnaliseComplemento(motivo) {
+    const m = normalizeMotivoTabulacao(motivo);
+    return m.includes('analise de complemento') || m.includes('analise complemento');
+  }
+
+  /**
+   * Tabulação automática pelo estado atual do mapa (sempre relativa ao endereço).
+   * 2.2 fora cobertura / além 250m → Fora da Área de Cobertura
+   * 2.4 Análise de complemento + equipamentos válidos → Atendimento Externo
+   * 2.3 1 CTO ou todas vermelhas → Alívio; 2+ com ao menos 1 verde/laranja → Portas Disponíveis
+   */
+  function computeTabulacaoSugeridaFromMap(motivoRaw = workbenchMotivo) {
+    const TAB_FORA = 'Fora da Área de Cobertura';
+    const TAB_PORTAS = 'Aprovado - Portas Disponíveis';
+    const TAB_ALIVIO = 'Aprovado Com Alívio de Rede/Cleanup';
+    const TAB_EXTERNO = 'Aprovado / Sem Estrutura Atendimento Externo';
+
+    // Ainda buscando CTOs — não sugere "Fora" prematuro
+    if (loading) return null;
+
+    const foraLimiteCto = resolveForaLimiteCto();
+    const street = (ctosRua || []).filter((c) => c && !c.is_condominio);
+    const withinLimit = street.filter((c) => {
+      if (c.is_out_of_limit) return false;
+      return ctoRouteDistanceMeters(c) <= FORA_LIMITE_METROS;
+    });
+
+    // 2.2 — fora da mancha ou sem equipamento dentro de 250m
+    if (isClientCovered === false) {
+      return {
+        tabulacaoFinal: TAB_FORA,
+        motivoSugestao: 'Endereço fora da área de cobertura da rede.'
+      };
+    }
+    if (foraLimiteCto || withinLimit.length === 0) {
+      if (!clientCoords) return null;
+      const nome = foraLimiteCto?.nome || 'N/A';
+      const dist = foraLimiteCto ? ctoRouteDistanceMeters(foraLimiteCto) : null;
+      return {
+        tabulacaoFinal: TAB_FORA,
+        motivoSugestao:
+          dist != null
+            ? `Equipamento mais próximo (${nome}) além de 250m (${Math.round(dist)} m).`
+            : 'Nenhum equipamento encontrado dentro do limite de 250m.'
+      };
+    }
+
+    // 2.4 — Análise de complemento (antes de Portas/Alívio)
+    if (isMotivoAnaliseComplemento(motivoRaw)) {
+      return {
+        tabulacaoFinal: TAB_EXTERNO,
+        motivoSugestao:
+          'Motivo Análise de complemento com equipamento(s) válido(s) no endereço — Atendimento Externo.'
+      };
+    }
+
+    // 2.3 — mesma cor do marcador no mapa (normalize + getCTOColor)
+    const bands = withinLimit.map((c) => getCTOOccupancyBand(c));
+    const onlyOne = withinLimit.length === 1;
+    const allRed = bands.length > 0 && bands.every((b) => b === 'red');
+    const hasGreenOrOrange = bands.some((b) => b === 'green' || b === 'orange');
+
+    // Portas só se houver 2+ CTOs e pelo menos uma verde/laranja
+    let tab = TAB_ALIVIO;
+    let motivoSugestao =
+      'Equipamentos dentro de 250m sem margem verde/laranja — Alívio de Rede/Cleanup.';
+    if (onlyOne) {
+      tab = TAB_ALIVIO;
+      motivoSugestao = 'Apenas um equipamento dentro de 250m — Alívio de Rede/Cleanup.';
+    } else if (allRed) {
+      tab = TAB_ALIVIO;
+      motivoSugestao =
+        'Todos os equipamentos dentro de 250m estão vermelhos (ocupação alta) — Alívio de Rede/Cleanup.';
+    } else if (hasGreenOrOrange) {
+      tab = TAB_PORTAS;
+      motivoSugestao =
+        'Há equipamento(s) verde(s) ou laranja(s) dentro de 250m — Aprovado - Portas Disponíveis.';
+    }
+
+    return { tabulacaoFinal: tab, motivoSugestao, debugBands: bands };
+  }
+
+  let tabulacaoSugeridaEmitTimer = null;
+  let lastTabulacaoSugeridaEmit = '';
+
+  function emitTabulacaoSugeridaChange() {
+    if (!workbenchMode || typeof onTabulacaoSugeridaChange !== 'function') return;
+    if (!clientCoords) return;
+    if (tabulacaoSugeridaEmitTimer) clearTimeout(tabulacaoSugeridaEmitTimer);
+    tabulacaoSugeridaEmitTimer = setTimeout(() => {
+      try {
+        const suggestion = computeTabulacaoSugeridaFromMap(workbenchMotivo);
+        if (!suggestion?.tabulacaoFinal) return;
+        const key = `${suggestion.tabulacaoFinal}|${clientCoords.lat},${clientCoords.lng}|${workbenchMotivo}`;
+        if (key === lastTabulacaoSugeridaEmit) return;
+        lastTabulacaoSugeridaEmit = key;
+        onTabulacaoSugeridaChange({
+          ...suggestion,
+          coords: { ...clientCoords },
+          isClientCovered,
+          motivo: workbenchMotivo || null
+        });
+      } catch (err) {
+        console.warn('[Workbench] onTabulacaoSugeridaChange:', err);
+      }
+    }, 250);
+  }
+
+  /** WORKBENCH — lê sugestão atual (ex.: ao abrir Gerar Relatório). */
+  export function getWorkbenchTabulacaoSugerida(motivoOverride = null) {
+    if (!workbenchMode) return null;
+    // Força novo emit na próxima mudança (evita ficar preso em sugestão antiga)
+    lastTabulacaoSugeridaEmit = '';
+    return computeTabulacaoSugeridaFromMap(
+      motivoOverride != null ? motivoOverride : workbenchMotivo
+    );
+  }
+
+  $: if (workbenchMode) {
+    void ctosRua;
+    void ctosRua?.length;
+    void nearestCTOOutsideLimit;
+    void isClientCovered;
+    void clientCoords;
+    void workbenchMotivo;
+    void ctoNumbersVersion;
+    void loading;
+    // Recalcula quando ocupação/cor das CTOs mudar (mesmo array)
+    void (ctosRua || [])
+      .map((c) => {
+        const n = normalizeCtoPortCounts(c);
+        return `${c?.nome}:${n.pct_ocup}:${n.vagas_total}:${n.clientes_conectados}:${c?.is_out_of_limit}`;
+      })
+      .join('|');
+    emitTabulacaoSugeridaChange();
   }
 
   // Função para iniciar heartbeat (manter usuário online)
@@ -1218,6 +2873,55 @@
     if (heartbeatInterval) {
       clearInterval(heartbeatInterval);
       heartbeatInterval = null;
+    }
+  }
+
+  function forceReloadForNewBase() {
+    try {
+      window.location.reload();
+    } catch {
+      window.location.href = String(window.location.href || '');
+    }
+  }
+
+  function applyBaseReadyToken(token, { inProgress = false } = {}) {
+    const readyAt = token != null ? String(token).trim() : '';
+    if (sessionBaseReadyAt === null || sessionBaseReadyAt === undefined) {
+      // Baseline da sessão (pode ser '' se o servidor ainda não publicou nesta vida)
+      sessionBaseReadyAt = readyAt;
+      return;
+    }
+    if (inProgress) return;
+    if (readyAt && readyAt !== sessionBaseReadyAt) {
+      sessionBaseReadyAt = readyAt;
+      showBaseReadyReloadModal = true;
+    }
+  }
+
+  async function pollBaseReadySignal() {
+    if (typeof document !== 'undefined' && document.hidden) return;
+    try {
+      const res = await fetch(getApiUrl('/api/upload-progress'), { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json().catch(() => ({}));
+      applyBaseReadyToken(data?.baseReadyAt, { inProgress: data?.inProgress === true });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function startBaseReadyPolling() {
+    stopBaseReadyPolling();
+    pollBaseReadySignal().catch(() => {});
+    baseReadyPollInterval = setInterval(() => {
+      pollBaseReadySignal().catch(() => {});
+    }, 3000);
+  }
+
+  function stopBaseReadyPolling() {
+    if (baseReadyPollInterval) {
+      clearInterval(baseReadyPollInterval);
+      baseReadyPollInterval = null;
     }
   }
 
@@ -1413,6 +3117,53 @@
       // Mostrar loading enquanto carrega a ferramenta
       isLoading = true;
       const bootPause = (ms) => (embedded ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms)));
+
+      // Workbench: boot rápido — só Google Maps + initMap (resto em background)
+      if (workbenchMode) {
+        try {
+          loadingMessage = 'Carregando Mapa';
+          await loadGoogleMaps();
+          checkBaseAvailable()
+            .then(() => {
+              baseDataExists = true;
+            })
+            .catch(() => {
+              baseDataExists = false;
+            });
+          // Mesma pré-carga da data da base usada no PDF da Viabilidade
+          fetch(getApiUrl('/api/base-last-modified'))
+            .then((r) => r.json())
+            .then((data) => {
+              if (data?.success && data.lastModified) {
+                try {
+                  localStorage.setItem('baseLastModified', data.lastModified);
+                } catch {
+                  // ignore
+                }
+              }
+            })
+            .catch(() => {});
+          try {
+            loadProjetistas();
+          } catch {
+            /* ignore */
+          }
+          loadTabulacoes().catch(() => {});
+          isLoading = false;
+          await tick();
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          initMap();
+          startHeartbeat();
+          await applyInitialSearchIfAny();
+        } catch (err) {
+          console.error('Erro ao inicializar ferramenta (workbench):', err);
+          error = 'Erro ao inicializar ferramenta: ' + err.message;
+          isLoading = false;
+          await tick();
+          initMap();
+        }
+        return;
+      }
       
       try {
       // Etapa 1: Carregando Mapa
@@ -1543,6 +3294,10 @@
 
     if (!hasCoords && !hasAddress) return;
 
+    lastWorkbenchLocKey = hasCoords
+      ? workbenchCoordKey(initialLat, initialLng)
+      : `a:${(initialAddress || '').trim().toLowerCase()}`;
+
     if (hasCoords) {
       searchMode = 'coordinates';
       coordinatesInput = `${Number(initialLat)}, ${Number(initialLng)}`;
@@ -1557,6 +3312,67 @@
     } catch (err) {
       console.warn('Pré-busca inicial falhou:', err);
     }
+  }
+
+  /** Workbench: só recentra/busca quando mudam as coordenadas (não ao digitar endereço). */
+  function scheduleWorkbenchLocationSync() {
+    if (!workbenchMode) return;
+    if (workbenchSearchTimer) clearTimeout(workbenchSearchTimer);
+    // Debounce curto: ao sync do chamado o pin/CTOs aparecem quase na hora
+    workbenchSearchTimer = setTimeout(() => {
+      void syncWorkbenchLocationFromProps();
+    }, 60);
+  }
+
+  async function syncWorkbenchLocationFromProps() {
+    if (!workbenchMode || isLoading) return;
+    if (!map || !googleMapsLoaded) return;
+
+    const hasCoords =
+      initialLat != null &&
+      initialLng != null &&
+      !Number.isNaN(Number(initialLat)) &&
+      !Number.isNaN(Number(initialLng));
+
+    // Digitação de endereço no overlay NÃO dispara busca — só o botão Localizar
+    // (searchWorkbenchAddress) ou a pré-busca inicial com coords do chamado.
+    if (!hasCoords) return;
+
+    const key = workbenchCoordKey(initialLat, initialLng);
+    if (key === lastWorkbenchLocKey) return;
+    lastWorkbenchLocKey = key;
+
+    searchMode = 'coordinates';
+    coordinatesInput = `${Number(initialLat)}, ${Number(initialLng)}`;
+
+    await tick();
+    try {
+      await searchClientLocation();
+      emitForaLimiteChange();
+    } catch (err) {
+      console.warn('[Workbench] Atualização de localização falhou:', err);
+    }
+  }
+
+  /** WORKBENCH — reexecuta sync de coords (ex.: MAP_READY após seed chegar cedo). */
+  export async function forceWorkbenchLocationSync() {
+    if (!workbenchMode) return false;
+    lastWorkbenchLocKey = '';
+    // Aguarda mapa se ainda estiver subindo
+    const start = Date.now();
+    while ((!map || !googleMapsLoaded) && Date.now() - start < 8000) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    if (!map || !googleMapsLoaded) return false;
+    await syncWorkbenchLocationFromProps();
+    return !!clientCoords;
+  }
+
+  $: if (workbenchMode) {
+    // Só reage a coords — endereço digitado não pesquisa sozinho
+    void initialLat;
+    void initialLng;
+    scheduleWorkbenchLocationSync();
   }
 
   // Função para limpar estado da ferramenta
@@ -1739,8 +3555,23 @@
   // Inicializar ferramenta quando o componente é montado
   onMount(async () => {
     try {
+      void ensureOwnRouterMode();
+      // Workbench (extensão): só mapa + tabela — sem painel de busca
+      if (workbenchMode) {
+        isSearchPanelMinimized = true;
+        isMapMinimized = false;
+        isListMinimized = false;
+      }
+
       // Carregar preferências de redimensionamento
       loadResizePreferences();
+
+      // Preferências locais não podem quebrar o layout do Workbench
+      if (workbenchMode) {
+        isSearchPanelMinimized = true;
+        isMapMinimized = false;
+        isListMinimized = false;
+      }
       
       // Adicionar handler para Ctrl+C
       document.addEventListener('keydown', handleCopyKeydown);
@@ -1758,6 +3589,10 @@
         onSettingsHover(preloadSettingsData);
       }
       await initializeTool();
+      // No workbench da extensão o pop fica só no painel (evita duplicar no iframe)
+      if (!workbenchMode) {
+        startBaseReadyPolling();
+      }
     } catch (err) {
       console.error('Erro ao inicializar ferramenta:', err);
       error = 'Erro ao inicializar ferramenta: ' + err.message;
@@ -1775,6 +3610,16 @@
       clearInterval(loadingDotsInterval);
       loadingDotsInterval = null;
     }
+    if (workbenchSearchTimer) {
+      clearTimeout(workbenchSearchTimer);
+      workbenchSearchTimer = null;
+    }
+    if (workbenchPreviewTimer) {
+      clearTimeout(workbenchPreviewTimer);
+      workbenchPreviewTimer = null;
+    }
+    stopBaseReadyPolling();
+    unbindWorkbenchMapControls();
     cleanup();
   });
 
@@ -1869,13 +3714,13 @@
   // Função para carregar tabulações da API ou localStorage
   async function loadTabulacoes() {
     try {
-      const response = await fetch(getApiUrl('/api/tabulacoes'));
+      const response = await fetch(getApiUrl('/api/tabulacoes'), { cache: 'no-store' });
       if (response.ok) {
         const text = await response.text();
         if (text && text.trim() !== '') {
           const data = JSON.parse(text);
-          if (data.success) {
-            tabulacoesList = data.tabulacoes || tabulacoesList;
+          if (data.success && Array.isArray(data.tabulacoes) && data.tabulacoes.length > 0) {
+            tabulacoesList = data.tabulacoes;
             // Sincronizar com localStorage
             try {
               localStorage.setItem('tabulacoesList', JSON.stringify(tabulacoesList));
@@ -1898,6 +3743,16 @@
     } catch (localErr) {
       console.error('Erro ao carregar do localStorage:', localErr);
     }
+  }
+
+  /** WORKBENCH — lista atualizada das tabulações (mesma fonte do oficial). */
+  export async function refreshTabulacoesList() {
+    await loadTabulacoes();
+    return Array.isArray(tabulacoesList) ? [...tabulacoesList] : [];
+  }
+
+  export function getTabulacoesList() {
+    return Array.isArray(tabulacoesList) ? [...tabulacoesList] : [];
   }
 
   // Função para abrir modal de adicionar tabulação
@@ -2094,15 +3949,40 @@
     map = new google.maps.Map(mapElement, {
       center: { lat: -23.5505, lng: -46.6333 }, // São Paulo como padrão
       zoom: 13,
-      mapTypeControl: true,
-      streetViewControl: true,
-      fullscreenControl: true,
+      // Workbench: controles nativos ocultos — UI própria abaixo
+      mapTypeControl: !workbenchMode,
+      streetViewControl: !workbenchMode,
+      fullscreenControl: !workbenchMode,
+      zoomControl: !workbenchMode,
       scrollwheel: true, // Permite zoom com scroll do mouse
-      gestureHandling: 'greedy' // Permite zoom direto com scroll, sem precisar Ctrl
+      gestureHandling: 'greedy', // Permite zoom direto com scroll, sem precisar Ctrl
+      styles: isDarkTheme ? GOOGLE_MAP_DARK_STYLES : [],
+      mapTypeId:
+        workbenchMode && preferredMapType === 'satellite' ? 'hybrid' : 'roadmap'
     });
-    
+
+    // Workbench: força off o pegman/círculo padrão (fica por trás do botão custom)
+    if (workbenchMode) {
+      try {
+        map.setOptions({
+          streetViewControl: false,
+          mapTypeControl: false,
+          fullscreenControl: false,
+          zoomControl: false,
+          cameraControl: false,
+          rotateControl: false
+        });
+      } catch (_) {
+        /* ignore */
+      }
+    }
     // Carregar mancha de cobertura após inicializar o mapa
     if (map) {
+      if (workbenchMode) {
+        wbMapType = preferredMapType === 'satellite' ? 'satellite' : 'roadmap';
+      }
+      applyGoogleMapTheme(isDarkTheme);
+      if (workbenchMode) bindWorkbenchMapControls();
       loadCoveragePolygon().then(loaded => {
         if (loaded && coveragePolygonGeoJSON) {
           drawCoverageArea();
@@ -2110,6 +3990,27 @@
       }).catch(err => {
         console.warn('⚠️ Erro ao carregar mancha de cobertura:', err);
       });
+
+      if (workbenchMode) {
+        let notified = false;
+        const notify = () => {
+          if (notified) return;
+          notified = true;
+          if (typeof onMapReady === 'function') {
+            try {
+              onMapReady();
+            } catch {
+              // ignore
+            }
+          }
+        };
+        try {
+          google.maps.event.addListenerOnce(map, 'idle', notify);
+        } catch {
+          // ignore
+        }
+        setTimeout(notify, 2500);
+      }
     }
   }
 
@@ -2125,8 +4026,8 @@
     }
     
     try {
-      const coverageCheckResponse = await fetch(getApiUrl(`/api/coverage/check-point?lat=${lat}&lng=${lng}`), {
-        headers: clusterFetchHeaders()
+      const coverageCheckResponse = await fetch(getApiUrl(`/api/coverage/check-point?lat=${lat}&lng=${lng}${coveragePreviewQuery()}`), {
+        headers: apiFetchHeaders()
       });
       if (coverageCheckResponse.ok) {
         const coverageCheckData = await coverageCheckResponse.json();
@@ -2193,6 +4094,8 @@
   // Função para atualizar a cor do marcador do cliente baseado no status de cobertura
   function updateClientMarkerColor() {
     if (!clientMarker) return;
+    // Não trocar o ícone durante o DROP — reinicia/glitcha a animação
+    if (clientDropInProgress) return;
     
     // Path de uma casa: triângulo (telhado) + retângulo (base)
     const housePath = 'M12 2L2 7v13h6v-6h8v6h6V7L12 2z';
@@ -2240,8 +4143,8 @@
     try {
       console.log('📥 [ViabilidadeAlares] Carregando polígono de cobertura do backend...');
       
-      const response = await fetch(getApiUrl('/api/coverage/polygon?simplified=true'), {
-        headers: clusterFetchHeaders()
+      const response = await fetch(getApiUrl(`/api/coverage/polygon?simplified=true${coveragePreviewQuery()}`), {
+        headers: apiFetchHeaders()
       });
       
       if (!response.ok) {
@@ -2257,7 +4160,7 @@
       }
       
       coverageData = data;
-      coveragePolygonGeoJSON = data.geometry;
+      coveragePolygonGeoJSON = coverageGeometryFromResponse(data);
       
       console.log(`✅ [ViabilidadeAlares] Polígono de cobertura carregado: ${data.total_ctos} CTOs, ${data.area_km2?.toFixed(2)} km²`);
       
@@ -2312,57 +4215,23 @@
 
     // Converter GeoJSON para formato do Google Maps
     try {
-      // GeoJSON pode ter múltiplos polígonos (MultiPolygon) ou um único Polygon
-      let polygonsToRender = [];
-      
-      if (coveragePolygonGeoJSON.type === 'Polygon') {
-        // Polígono simples
-        polygonsToRender = [coveragePolygonGeoJSON];
-      } else if (coveragePolygonGeoJSON.type === 'MultiPolygon') {
-        // Múltiplos polígonos - converter para array de polígonos
-        polygonsToRender = coveragePolygonGeoJSON.coordinates.map(coords => ({
-          type: 'Polygon',
-          coordinates: coords
-        }));
-      } else {
+      if (!['Polygon', 'MultiPolygon', 'FeatureCollection'].includes(coveragePolygonGeoJSON.type)) {
         console.error('❌ [ViabilidadeAlares] Formato GeoJSON não suportado:', coveragePolygonGeoJSON.type);
         return;
       }
       
-      console.log(`🎨 [ViabilidadeAlares] Renderizando ${polygonsToRender.length} polígono(s) de cobertura...`);
-      
       // Limpar polígonos anteriores se existirem
       clearCoveragePolygons();
       
-      // Renderizar cada polígono
-      for (const geoJsonPolygon of polygonsToRender) {
-        // Converter coordenadas GeoJSON para formato do Google Maps
-        const paths = geoJsonPolygon.coordinates[0].map(coord => ({
-          lat: coord[1], // GeoJSON usa [lng, lat], Google Maps usa {lat, lng}
-          lng: coord[0]
-        }));
-        
-        // Criar polígono no Google Maps
-        const polygon = new google.maps.Polygon({
-          paths: paths,
-          strokeColor: '#8B7AE8',
-          strokeOpacity: 0.8,
-          strokeWeight: 1.2,
-          fillColor: '#6B8DD6',
-          fillOpacity: coverageOpacity,
-          map: map,
-          zIndex: 1, // Colocar atrás dos marcadores (zIndex padrão de marcadores é maior)
-          geodesic: true
-        });
-        
-        coveragePolygons.push(polygon);
-        
-        // Adicionar ao bounds para ajustar zoom (opcional - não vamos ajustar automaticamente)
-        // para não interferir com a visualização do usuário
-        for (const path of paths) {
-          bounds.extend(path);
-        }
-      }
+      // zIndex 1: atrás dos marcadores
+      coveragePolygons = drawCoverageOverlays({
+        google,
+        map,
+        geometry: coveragePolygonGeoJSON,
+        fillOpacity: coverageOpacity,
+        zIndex: 1,
+        bounds
+      });
       
       console.log(`✅ [ViabilidadeAlares] ${coveragePolygons.length} polígono(s) renderizado(s) com sucesso!`);
       
@@ -2468,6 +4337,28 @@
     });
   }
 
+  /**
+   * Endereço/CEP a partir do pin no mapa (reverse geocode), não do texto usado na busca.
+   * Workbench e relatório usam isso para preencher o formulário.
+   */
+  async function resolveClientAddressFromPin(lat = null, lng = null) {
+    const pinLat = lat != null ? Number(lat) : Number(clientCoords?.lat);
+    const pinLng = lng != null ? Number(lng) : Number(clientCoords?.lng);
+    if (!Number.isFinite(pinLat) || !Number.isFinite(pinLng)) return null;
+
+    try {
+      const result = await reverseGeocode(pinLat, pinLng);
+      if (result?.results?.length > 0) {
+        extractAddressComponents(result.results[0]);
+        return { ...clientAddressData };
+      }
+    } catch (err) {
+      console.warn('[Mapa] Reverse geocode do pin:', err);
+      if (workbenchMode) emitClientLocationChange('geocode');
+    }
+    return clientAddressData?.enderecoCompleto ? { ...clientAddressData } : null;
+  }
+
   async function searchClientLocation() {
     loading = true;
     error = null;
@@ -2539,8 +4430,11 @@
           lng: location.lng()
         };
 
-        // Extrair componentes do endereço
-        extractAddressComponents(bestResult);
+        // Workbench: não grava o texto da busca/Agenda no formulário —
+        // o endereço definitivo vem do reverse geocode do pin (mais abaixo).
+        if (!workbenchMode) {
+          extractAddressComponents(bestResult);
+        }
       } else {
         // Parse coordenadas do formato "lat, lng"
         if (!coordinatesInput.trim()) {
@@ -2579,8 +4473,13 @@
       map.setCenter(clientCoords);
       map.setZoom(18); // Zoom maior para mostrar localização exata
 
-      // Verificar cobertura ANTES de criar o marcador
-      await checkClientCoverage(clientCoords.lat, clientCoords.lng);
+      // Workbench: não bloqueia o pin — cobertura atualiza a cor em background
+      // Standalone: aguarda para já criar a casinha na cor certa
+      if (workbenchMode) {
+        void checkClientCoverage(clientCoords.lat, clientCoords.lng);
+      } else {
+        await checkClientCoverage(clientCoords.lat, clientCoords.lng);
+      }
 
       // Criar ícone de casinha usando path SVG
       // Path de uma casa: triângulo (telhado) + retângulo (base)
@@ -2615,7 +4514,8 @@
         markerTitle += ` - FORA da área de cobertura (${distanceKm} km)`;
       }
 
-      // Adicionar marcador (ícone de casinha) - ARRASTÁVEL
+      // DROP; fitBounds/InfoWindow só DEPOIS da animação (evita salto)
+      clientDropInProgress = true;
       const marker = new google.maps.Marker({
         position: clientCoords,
         map: map,
@@ -2624,12 +4524,16 @@
         animation: google.maps.Animation.DROP,
         zIndex: 1000,
         optimized: false,
-        draggable: true, // Permite arrastar o marcador
-        cursor: 'move' // Cursor muda para "move" ao passar sobre o marcador
+        draggable: true,
+        cursor: 'move'
       });
 
       clientMarker = marker;
       markers.push(marker);
+      const searchGen = ++clientSearchGen;
+      if (workbenchMode && clientCoords) {
+        lastWorkbenchLocKey = workbenchCoordKey(clientCoords.lat, clientCoords.lng);
+      }
 
       async function getAddressFromCoords(lat, lng) {
         try {
@@ -2646,39 +4550,76 @@
         }
       }
 
-      // Função para criar conteúdo do InfoWindow
-      async function createInfoWindowContent(lat, lng, isManual = false) {
-        const address = await getAddressFromCoords(lat, lng);
+      /** Conteúdo do body do InfoWindow (título vai no headerContent, alinhado ao X). */
+      async function createInfoWindowContent(lat, lng, isManual = false, knownAddress = null) {
+        let address = knownAddress || null;
+        if (!address) {
+          if (!workbenchMode && clientAddressData?.enderecoCompleto) {
+            address = clientAddressData.enderecoCompleto;
+          } else {
+            address = await getAddressFromCoords(lat, lng);
+          }
+        }
+        const wrap =
+          'padding:2px 4px 6px 0;max-width:280px;color:#1f2937;font-family:Inter,system-ui,sans-serif;font-size:13px;line-height:1.45;';
+        const label = 'color:#374151;';
+        const muted = 'color:#6b7280;font-size:12px;';
 
-        let content = '<div style="padding: 8px;">';
-        content += '<strong>Localização do Cliente</strong><br><br>';
+        let content = `<div class="wb-client-iw" style="${wrap}">`;
 
         if (address) {
-          content += `<strong>Endereço:</strong><br>${address}<br><br>`;
+          content += `<strong style="${label}">Endereço:</strong><br><span style="${label}">${address}</span><br><br>`;
         }
 
-        content += `<strong>Latitude/Longitude:</strong><br>${(lat || 0).toFixed(10)}, ${(lng || 0).toFixed(10)}<br><br>`;
+        content += `<strong style="${label}">Latitude/Longitude:</strong><br><span style="${label}">${(lat || 0).toFixed(10)}, ${(lng || 0).toFixed(10)}</span><br><br>`;
 
         if (isManual) {
-          content += '<small>Posição ajustada manualmente</small>';
+          content += `<small style="${muted}">Posição ajustada manualmente</small>`;
         } else {
-          content += '<small>Arraste para ajustar a posição</small>';
+          content += `<small style="${muted}">Arraste para ajustar a posição</small>`;
         }
 
         content += '</div>';
         return content;
       }
 
-      // Criar InfoWindow inicial e salvar referência global
-      clientInfoWindow = new google.maps.InfoWindow();
+      function buildClientIwHeader() {
+        const el = document.createElement('div');
+        el.className = 'wb-client-iw-header';
+        el.textContent = 'Localização do Cliente';
+        return el;
+      }
 
-      // Carregar conteúdo inicial do InfoWindow
-      createInfoWindowContent(clientCoords.lat, clientCoords.lng, false).then(content => {
-        if (clientInfoWindow) {
-          clientInfoWindow.setContent(content);
-          clientInfoWindow.open(map, marker);
+      function applyClientIwHeader(iw) {
+        if (!iw) return;
+        try {
+          if (typeof iw.setHeaderContent === 'function') {
+            iw.setHeaderContent(buildClientIwHeader());
+            return;
+          }
+        } catch (_) {
+          /* ignore */
         }
-      });
+      }
+
+      // InfoWindow: header alinhado ao botão fechar; sem autoPan (evita salto)
+      if (clientInfoWindow) {
+        try {
+          clientInfoWindow.close();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      const iwOpts = {
+        disableAutoPan: true,
+        maxWidth: 320
+      };
+      try {
+        iwOpts.headerContent = buildClientIwHeader();
+      } catch (_) {
+        /* ignore */
+      }
+      clientInfoWindow = new google.maps.InfoWindow(iwOpts);
 
       // Atualizar InfoWindow quando o marcador for arrastado
       marker.addListener('dragend', async (event) => {
@@ -2687,18 +4628,13 @@
           lng: event.latLng.lng()
         };
 
-        // Atualizar coordenadas globais do cliente
         clientCoords = newPosition;
-
-        // Verificar cobertura na nova posição
         await checkClientCoverage(newPosition.lat, newPosition.lng);
 
-        // Atualizar coordenadas no input se estiver no modo coordenadas
         if (searchMode === 'coordinates' && newPosition && newPosition.lat !== undefined && newPosition.lng !== undefined) {
           coordinatesInput = `${(newPosition.lat || 0).toFixed(10)}, ${(newPosition.lng || 0).toFixed(10)}`;
         }
 
-        // Atualizar endereço usando reverse geocoding
         try {
           const result = await reverseGeocode(newPosition.lat, newPosition.lng);
 
@@ -2706,32 +4642,104 @@
             const bestResult = result.results[0];
             extractAddressComponents(bestResult);
 
-            // Atualizar o campo de endereço se estiver no modo endereço
             if (searchMode === 'address') {
               addressInput = bestResult.formatted_address || '';
             }
+          } else if (workbenchMode) {
+            emitClientLocationChange('drag');
           }
         } catch (err) {
           console.error('Erro ao atualizar endereço:', err);
+          if (workbenchMode) emitClientLocationChange('drag');
         }
 
-        // Limpar CTOs e rotas anteriores quando o cliente move o marcador
         clearCTOs();
 
-        // Atualizar conteúdo do InfoWindow com endereço e coordenadas
+        if (workbenchMode) {
+          try {
+            await searchCTOs();
+          } catch (ctoErr) {
+            console.warn('[Workbench] Rebusca de CTOs após drag:', ctoErr);
+          }
+        }
+
         if (clientInfoWindow) {
           const content = await createInfoWindowContent(newPosition.lat, newPosition.lng, true);
+          applyClientIwHeader(clientInfoWindow);
           clientInfoWindow.setContent(content);
-          clientInfoWindow.open(map, marker);
+          if (!clientInfoWindow.getMap()) {
+            openClientInfoWindowStable(newPosition);
+          } else {
+            try {
+              clientInfoWindow.setPosition(newPosition);
+            } catch (_) {
+              /* ignore */
+            }
+          }
         }
       });
 
       marker.addListener('click', () => {
-        clientInfoWindow.open(map, marker);
+        for (const iw of mapInfoWindows || []) {
+          try {
+            iw?.close?.();
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        if (clientInfoWindow) {
+          openClientInfoWindowStable(marker.getPosition?.() || clientCoords);
+        }
       });
 
-      // Buscar CTOs automaticamente após localizar o cliente
+      // 1) DROP completo → 2) CTOs/fitBounds → 3) idle → 4) InfoWindow por posição (sem anchor)
+      await waitForMarkerDrop(marker);
+      clientDropInProgress = false;
+      try {
+        marker.setAnimation(null);
+      } catch (_) {
+        /* ignore */
+      }
+      updateClientMarkerColor();
+      if (searchGen !== clientSearchGen || clientMarker !== marker) return;
       await searchCTOs();
+      if (searchGen !== clientSearchGen || clientMarker !== marker) return;
+
+      if (workbenchMode) {
+        await waitMapIdleWorkbench(500);
+        if (searchGen !== clientSearchGen || clientMarker !== marker) return;
+        // Sempre endereço do PIN (reverse geocode), nunca o texto da Agenda/busca
+        await resolveClientAddressFromPin(clientCoords.lat, clientCoords.lng);
+      }
+
+      try {
+        // Workbench: só o endereço do pin (já resolvido acima). Nunca o texto da Agenda.
+        const initialAddress = workbenchMode
+          ? clientAddressData?.enderecoCompleto || null
+          : clientAddressData?.enderecoCompleto ||
+            (searchMode === 'address' ? String(addressInput || '').trim() : '') ||
+            null;
+        const content = await createInfoWindowContent(
+          clientCoords.lat,
+          clientCoords.lng,
+          false,
+          initialAddress
+        );
+        if (searchGen !== clientSearchGen || clientMarker !== marker) return;
+        if (clientInfoWindow && clientMarker === marker) {
+          applyClientIwHeader(clientInfoWindow);
+          clientInfoWindow.setContent(content);
+          await new Promise((r) => requestAnimationFrame(r));
+          if (searchGen !== clientSearchGen || clientMarker !== marker) return;
+          openClientInfoWindowStable(clientCoords);
+        }
+      } catch (iwErr) {
+        console.warn('InfoWindow do cliente:', iwErr);
+      } finally {
+        clientDropInProgress = false;
+      }
+
+      // Workbench: prévia/print só no clique em Gerar Relatório (igual standalone)
 
     } catch (err) {
       console.error('❌ Erro completo:', err);
@@ -2760,11 +4768,10 @@
         error = `Erro ao localizar endereço: ${err.message || 'Erro desconhecido'}. Tente novamente.`;
       }
     } finally {
+      clientDropInProgress = false;
       loading = false;
     }
   }
-
-  // Animação dos pontos em "Localizando..."
   $: if (loading) {
     // Iniciar animação dos pontos
     if (loadingDotsInterval) {
@@ -2789,6 +4796,7 @@
   }
 
   function clearMap() {
+    clientDropInProgress = false;
     // Fechar InfoWindow do cliente se estiver aberto
     if (clientInfoWindow) {
       clientInfoWindow.close();
@@ -2868,51 +4876,72 @@
     // Limpar CTOs anteriores ANTES de buscar novas
     clearCTOs();
 
-    // Pequeno delay para garantir que a limpeza visual foi feita
-    await new Promise(resolve => setTimeout(resolve, 50));
-
     try {
+      const lat = clientCoords.lat;
+      const lng = clientCoords.lng;
+      const headers = apiFetchHeaders();
+
       // ============================================
-      // ETAPA 1: Buscar PRÉDIOS dentro de 100m (OTIMIZAÇÃO: reduzido de 250m para melhor performance)
+      // ETAPA 1+2 em paralelo: PRÉDIOS MDU + CTOs (250m)
+      // DROP da casinha já terminou antes de searchCTOs — animação intacta.
       // ============================================
-      console.log(`🏢 [Frontend] ETAPA 1: Buscando PRÉDIOS próximos de (${clientCoords.lat}, ${clientCoords.lng}) dentro de 100m...`);
-      
-      const prediosResponse = await fetch(getApiUrl(`/api/condominios/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=100`), {
-        headers: clusterFetchHeaders()
-      });
-      
+      console.log(
+        `🏢 [Frontend] Buscando PRÉDIOS + CTOs em paralelo perto de (${lat}, ${lng}) dentro de 250m...`
+      );
+
+      const prediosFetch = fetch(
+        getApiUrl(`/api/condominios/nearby?lat=${lat}&lng=${lng}&radius=250`),
+        { headers }
+      );
+      // Fora da cobertura: não gasta o nearby 250m (vai direto à busca progressiva)
+      const ctosFetch =
+        isClientCovered === false
+          ? Promise.resolve(null)
+          : fetch(getApiUrl(`/api/ctos/nearby?lat=${lat}&lng=${lng}&radius=250`), { headers });
+
+      // Processa MDU assim que chegar (CTOs seguem em paralelo)
+      const prediosResponse = await prediosFetch;
+
       let predios = [];
-      if (prediosResponse.ok) {
+      if (prediosResponse?.ok) {
         const prediosData = await prediosResponse.json();
         if (prediosData.success && prediosData.condominios) {
           predios = prediosData.condominios
-            .filter(p => p.distancia_metros <= 100)
-            .map(p => ({
-              nome: p.nome_predio || 'Prédio',
+            .filter(p => p.distancia_metros <= 250)
+            .map(p => {
+              const internas = Array.isArray(p.ctos_internas) ? p.ctos_internas : [];
+              const ports = aggregateMduPortsFromInternas(internas);
+              return {
+              nome: p.nome_predio || p.descricao || 'Condomínio',
               latitude: parseFloat(p.latitude),
               longitude: parseFloat(p.longitude),
               is_condominio: true,
+              fonte_condominio: p.fonte || prediosData.source || 'mdu',
               condominio_data: p,
-              status_cto_condominio: p.status_cto || null,
-              ctos_internas: p.ctos_internas || [], // CTOs internas do prédio
+              status_cto_condominio: p.situacao_cto || p.tipo || p.status_cto || null,
+              ctos_internas: internas,
+              endereco_completo: p.endereco_completo || '',
+              id_mdu: p.id_mdu ?? null,
+              tipo_mdu: p.tipo || null,
               distancia_metros: p.distancia_metros,
               distancia_km: Math.round((p.distancia_metros / 1000) * 1000) / 1000,
               distancia_real: p.distancia_metros,
-              // Campos vazios para prédios (não são CTOs)
-              vagas_total: 0,
-              clientes_conectados: 0,
-              pct_ocup: 0,
-              cidade: '',
+              vagas_total: ports.vagas_total,
+              clientes_conectados: ports.clientes_conectados,
+              portas_disponiveis: ports.portas_disponiveis,
+              pct_ocup: ports.pct_ocup,
+              cidade: p.nome_cidade || '',
               pop: '',
-              id: ''
-            }));
+              id: p.id_mdu != null ? `mdu-${p.id_mdu}` : `mdu-${p.latitude},${p.longitude}`
+            };
+            });
           
-          console.log(`✅ [Frontend] ${predios.length} prédios encontrados dentro de 100m`);
+          console.log(`✅ [Frontend] ${predios.length} condomínios MDU encontrados dentro de 250m`);
           
           // Adicionar prédios imediatamente ao array (sem calcular rotas)
           if (predios.length > 0) {
-            ctos = [...predios];
-            // Desenhar prédios IMEDIATAMENTE (sem esperar CTOs)
+            ctos = [...predios].map(normalizeCtoPortCounts);
+            // Desenhar prédios IMEDIATAMENTE (sem esperar processamento das CTOs)
             await drawRoutesAndMarkers();
           }
         }
@@ -2934,14 +4963,14 @@
         // Continuar para ETAPA 5 (busca progressiva) abaixo
       } else {
         // ============================================
-        // ETAPA 2: Buscar CTOs dentro de 250m (apenas se DENTRO da área de cobertura)
+        // ETAPA 2: processar CTOs (fetch já disparado em paralelo com MDU)
         // ============================================
-        console.log(`🔍 [Frontend] ETAPA 2: Buscando CTOs próximas de (${clientCoords.lat}, ${clientCoords.lng})...`);
+        console.log(`🔍 [Frontend] ETAPA 2: Processando CTOs próximas de (${lat}, ${lng})...`);
         
-        const response = await fetch(getApiUrl(`/api/ctos/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=250`), {
-          headers: clusterFetchHeaders()
-        });
-        
+        const response = await ctosFetch;
+        if (!response) {
+          throw new Error('Resposta vazia da API de CTOs');
+        }
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
           throw new Error(errorData.error || `Erro HTTP ${response.status}`);
@@ -2950,18 +4979,13 @@
         const data = await response.json();
         
         if (!data.success || !data.ctos || data.ctos.length === 0) {
-          // Se não há CTOs mas há prédios, está OK - não precisa buscar mais
-          if (predios.length > 0) {
-            loadingCTOs = false;
-            return;
-          }
-          // Se não há CTOs dentro de 250m, continuar para buscar progressivamente (500m, 700m, 900m, 1200m)
-          // Não mostrar erro ainda - só mostrar se não encontrar até 1200m
+          // Sem CTOs no raio de 250m → seguir para busca progressiva
+          // (mesmo se houver prédios próximos — o box Fora do Limite depende disso)
           console.log(`⚠️ [Frontend] Nenhuma CTO retornada pela API dentro de 250m. Continuando busca progressiva...`);
         }
         
         // Filtrar apenas CTOs dentro de 250m
-        const validCTOs = data.ctos
+        const validCTOs = (data.success && Array.isArray(data.ctos) ? data.ctos : [])
           .filter(cto => cto.distancia_metros <= 250)
           .map(cto => ({
             ...cto,
@@ -2969,13 +4993,6 @@
           }));
         
         if (validCTOs.length === 0) {
-          // Se não há CTOs mas há prédios, está OK - não precisa buscar mais
-          if (predios.length > 0) {
-            loadingCTOs = false;
-            return;
-          }
-          // Se não há CTOs dentro de 250m, continuar para buscar progressivamente (500m, 700m, 900m, 1200m)
-          // Não mostrar erro ainda - só mostrar se não encontrar até 1200m
           console.log(`⚠️ [Frontend] Nenhuma CTO encontrada dentro de 250m. Continuando busca progressiva...`);
         }
         
@@ -2984,7 +5001,9 @@
         // ============================================
         // ETAPA 3: Filtrar CTOs que NÃO estão em prédios
         // ============================================
-        const ctosNormais = validCTOs.filter(cto => !cto.is_condominio || cto.is_condominio === false);
+        let ctosNormais = validCTOs.filter(cto => !cto.is_condominio || cto.is_condominio === false);
+        // Evitar duplicata: equipamento já listado dentro do MDU não vira marcador/rota de rua
+        ctosNormais = filterStreetCtosAgainstMdu(ctosNormais, predios);
         
         if (ctosNormais.length === 0) {
           console.log(`ℹ️ [Frontend] Todas as CTOs encontradas dentro de 250m são de prédios`);
@@ -3090,7 +5109,7 @@
                 grupoRaios.map(async (raio) => {
                   try {
                     const searchResponse = await fetch(getApiUrl(`/api/ctos/nearby?lat=${clientCoords.lat}&lng=${clientCoords.lng}&radius=${raio}`), {
-                      headers: clusterFetchHeaders()
+                      headers: apiFetchHeaders()
                     });
                     
                     if (!searchResponse.ok) {
@@ -3130,9 +5149,11 @@
               
               console.log(`📦 [Frontend] API retornou ${searchData.ctos.length} CTO(s) no raio LINEAR de ${raioEncontrado}m`);
               
-              // Filtrar apenas CTOs normais (não prédios)
-              const allCTOsNormais = searchData.ctos
-                .filter(cto => !cto.is_condominio || cto.is_condominio === false);
+              // Filtrar apenas CTOs normais (não prédios) e não internas de MDU
+              const allCTOsNormais = filterStreetCtosAgainstMdu(
+                searchData.ctos.filter(cto => !cto.is_condominio || cto.is_condominio === false),
+                predios
+              );
               
               console.log(`📦 [Frontend] Após filtrar prédios: ${allCTOsNormais.length} CTO(s) normal(is)`);
               
@@ -3365,20 +5386,36 @@
       console.log(`   - CTOs normais dentro de 250m: ${ctosNormaisLimitadas.length}`);
       console.log(`   - CTO mais próxima fora do limite: ${nearestCTOOutsideLimit ? nearestCTOOutsideLimit.nome : 'nenhuma'}`);
       
-      const todasCTOs = [...predios, ...ctosNormaisLimitadas];
+      const ctosRuaFiltradas = filterStreetCtosAgainstMdu(ctosNormaisLimitadas, predios);
+      const nearestFiltrada =
+        nearestCTOOutsideLimit &&
+        !isStreetCtoInternalToMdu(
+          nearestCTOOutsideLimit,
+          buildMduInternalEquipmentIndex(predios)
+        )
+          ? nearestCTOOutsideLimit
+          : null;
+      if (nearestCTOOutsideLimit && !nearestFiltrada) {
+        console.log(
+          `🏢 [Frontend] CTO fora do limite "${nearestCTOOutsideLimit.nome}" é interna de MDU — ignorando`
+        );
+        nearestCTOOutsideLimit = null;
+      }
+
+      const todasCTOs = [...predios, ...ctosRuaFiltradas];
       
       // Se não encontrou nenhuma CTO dentro de 250m, adicionar a mais próxima (fora do limite)
       // IMPORTANTE: Adicionar mesmo se houver prédios (a busca detalhada sempre acontece)
-      if (ctosNormaisLimitadas.length === 0 && nearestCTOOutsideLimit) {
-        todasCTOs.push(nearestCTOOutsideLimit);
-        console.log(`✅ [Frontend] CTO mais próxima adicionada ao array: ${nearestCTOOutsideLimit.nome}`);
+      if (ctosRuaFiltradas.length === 0 && nearestFiltrada) {
+        todasCTOs.push(nearestFiltrada);
+        console.log(`✅ [Frontend] CTO mais próxima adicionada ao array: ${nearestFiltrada.nome}`);
         console.log(`   📋 Detalhes da CTO:`, {
-          nome: nearestCTOOutsideLimit.nome,
-          distancia_real: nearestCTOOutsideLimit.distancia_real,
-          distancia_metros: nearestCTOOutsideLimit.distancia_metros,
-          is_out_of_limit: nearestCTOOutsideLimit.is_out_of_limit
+          nome: nearestFiltrada.nome,
+          distancia_real: nearestFiltrada.distancia_real,
+          distancia_metros: nearestFiltrada.distancia_metros,
+          is_out_of_limit: nearestFiltrada.is_out_of_limit
         });
-      } else if (ctosNormaisLimitadas.length > 0) {
+      } else if (ctosRuaFiltradas.length > 0) {
         // Limpar referência se encontrou CTOs dentro do limite
         console.log(`ℹ️ [Frontend] CTOs encontradas dentro do limite, não usando nearestCTOOutsideLimit`);
         nearestCTOOutsideLimit = null;
@@ -3408,7 +5445,10 @@
       });
 
       // Atribuir ao array final (prédios + até 5 CTOs de rua)
-      ctos = todasCTOs;
+      ctos = todasCTOs.map(normalizeCtoPortCounts);
+      if (nearestCTOOutsideLimit) {
+        nearestCTOOutsideLimit = normalizeCtoPortCounts(nearestCTOOutsideLimit);
+      }
       
       console.log(`✅ [Frontend] Total de ${ctos.length} CTO(s) encontrada(s) (${predios.length} prédio(s) + ${ctos.length - predios.length} CTO(s) normal(is))`);
       
@@ -3464,6 +5504,15 @@
       // GARANTIR que loadingCTOs seja sempre desativado, mesmo em caso de erro
       loadingCTOs = false;
       console.log(`✅ [Frontend] Loading desativado. Busca de CTOs finalizada.`);
+
+      // Workbench: notificar box "Fora do Limite" após a busca (não depender só do $:)
+      if (workbenchMode) {
+        try {
+          emitForaLimiteChange();
+        } catch {
+          /* ignore */
+        }
+      }
       
       // IMPORTANTE: Se searchCTOs foi chamado de searchClientLocation, garantir que loading também seja desativado
       // Isso evita que o botão fique travado em "Localizando.."
@@ -3474,11 +5523,10 @@
     }
   }
 
-  // Função para desenhar rota REAL usando Directions API
+  // Função para desenhar rota REAL usando Routes API
   // A rota parte da CTO até o cliente, seguindo exatamente as ruas
   async function drawRealRoute(cto, index) {
     return new Promise((resolve, reject) => {
-      const directionsService = new google.maps.DirectionsService();
       const ctoKey = getCTOKey(cto);
 
       // Parsear coordenadas da CTO com precisão (garantir que são números válidos)
@@ -3507,17 +5555,11 @@
 
       // Calcular rota da CTO até o cliente (partindo da CTO)
       // IMPORTANTE: Usar coordenadas parseadas para garantir que sejam exatamente as mesmas do marcador
-      directionsService.route(
-        {
-          origin: { lat: ctoLat, lng: ctoLng }, // Origem: CTO (coordenadas parseadas)
-          destination: { lat: clientCoords.lat, lng: clientCoords.lng }, // Destino: Cliente
-          travelMode: travelMode, // Usar DRIVING para longas distâncias, WALKING para curtas
-          unitSystem: google.maps.UnitSystem.METRIC,
-          region: 'BR', // Melhorar resultados para o Brasil
-          provideRouteAlternatives: false, // Não calcular rotas alternativas (otimização)
-          avoidHighways: travelMode === google.maps.TravelMode.WALKING // Evitar rodovias apenas no modo caminhada
-        },
-        (result, status) => {
+      computeRouteCompat({
+        origin: { lat: ctoLat, lng: ctoLng }, // Origem: CTO (coordenadas parseadas)
+        destination: { lat: clientCoords.lat, lng: clientCoords.lng }, // Destino: Cliente
+        travelMode: travelMode // Usar DRIVING para longas distâncias, WALKING para curtas
+      }).then(({ result, status }) => {
           if (status === 'OK' && result.routes && result.routes.length > 0) {
             const route = result.routes[0];
             const path = [];
@@ -3599,9 +5641,7 @@
               console.warn(`⚠️ Rota para ${cto.nome} não retornou pontos válidos. Usando fallback.`);
               // Calcular cor da rota baseada na cor da CTO
               // Se estiver fora do limite, usar cor laranja/amarela
-              const routeColor = cto.is_out_of_limit 
-                ? '#FF9800' // Laranja para CTO fora do limite
-                : getCTOColor(cto.pct_ocup || 0);
+              const routeColor = getCTOMarkerColor(cto);
               
               // Fallback: desenhar linha reta conectando os marcadores
               // Usar coordenadas parseadas para garantir alinhamento
@@ -3645,7 +5685,7 @@
               // Anexar chave da CTO na polyline (para controle por chave, sem depender de coordenadas)
               // CRÍTICO: Cada CTO tem sua própria rota única, identificada por ctoKey (não coordenadas)
               try { 
-                routePolyline.__ctoKey = ctoKey;
+                setMapItemCtoKey(routePolyline, ctoKey);
                 console.log(`🔑 ctoKey ${ctoKey} anexado à rota fallback ${actualRouteIndex} para CTO ${cto.nome}`);
               } catch (e) {
                 console.error(`❌ Erro ao anexar ctoKey à rota fallback:`, e);
@@ -3658,7 +5698,8 @@
                 routeIndex: actualRouteIndex,
                 ctoKey, // Chave única da CTO (baseada em ID, não coordenadas)
                 cto: cto,
-                originalPath: [...fallbackPath]
+                originalPath: [...fallbackPath],
+                wasOutOfLimit: !!cto.is_out_of_limit
               });
               console.log(`📝 RouteData criado (fallback): ctoKey=${ctoKey}, ctoNome=${cto.nome}, routeIndex=${actualRouteIndex}`);
 
@@ -3705,9 +5746,7 @@
 
             // Calcular cor da rota baseada na cor da CTO
             // Se estiver fora do limite, usar cor laranja/amarela
-            const routeColor = cto.is_out_of_limit 
-              ? '#FF9800' // Laranja para CTO fora do limite
-              : getCTOColor(cto.pct_ocup || 0);
+            const routeColor = getCTOMarkerColor(cto);
             
             let routePolyline;
             
@@ -3766,7 +5805,7 @@
             // Anexar chave da CTO na polyline (para controle por chave, sem depender de coordenadas)
             // CRÍTICO: Cada CTO tem sua própria rota única, identificada por ctoKey (não coordenadas)
             try { 
-              routePolyline.__ctoKey = ctoKey;
+              setMapItemCtoKey(routePolyline, ctoKey);
               console.log(`🔑 ctoKey ${ctoKey} anexado à rota ${actualRouteIndex} para CTO ${cto.nome}`);
             } catch (e) {
               console.error(`❌ Erro ao anexar ctoKey à rota:`, e);
@@ -3779,7 +5818,8 @@
               routeIndex: actualRouteIndex, // Índice da rota no array routes
               ctoKey, // Chave única da CTO (baseada em ID, não coordenadas)
               cto: cto,
-              originalPath: [...filteredPath] // Cópia do path original
+              originalPath: [...filteredPath], // Cópia do path original
+              wasOutOfLimit: !!cto.is_out_of_limit
             });
             console.log(`📝 RouteData criado: ctoKey=${ctoKey}, ctoNome=${cto.nome}, routeIndex=${actualRouteIndex}`);
 
@@ -3838,9 +5878,7 @@
             
             // Calcular cor da rota baseada na cor da CTO
             // Se estiver fora do limite, usar cor laranja/amarela
-            const routeColor = cto.is_out_of_limit 
-              ? '#FF9800' // Laranja para CTO fora do limite
-              : getCTOColor(cto.pct_ocup || 0);
+            const routeColor = getCTOMarkerColor(cto);
             
             // Fallback: desenhar linha reta conectando exatamente os marcadores
             const fallbackPath = [
@@ -3899,7 +5937,7 @@
 
             // CRÍTICO: Cada CTO tem sua própria rota única, identificada por ctoKey (não coordenadas)
             try { 
-              routePolyline.__ctoKey = ctoKey;
+              setMapItemCtoKey(routePolyline, ctoKey);
               console.log(`🔑 ctoKey ${ctoKey} anexado à rota fallback 2 ${actualRouteIndex} para CTO ${cto.nome}`);
             } catch (e) {
               console.error(`❌ Erro ao anexar ctoKey à rota fallback 2:`, e);
@@ -3912,7 +5950,8 @@
               routeIndex: actualRouteIndex,
               ctoKey, // Chave única da CTO (baseada em ID, não coordenadas)
               cto: cto,
-              originalPath: [...fallbackPath]
+              originalPath: [...fallbackPath],
+              wasOutOfLimit: !!cto.is_out_of_limit
             });
             console.log(`📝 RouteData criado (fallback 2): ctoKey=${ctoKey}, ctoNome=${cto.nome}, routeIndex=${actualRouteIndex}`);
 
@@ -4224,7 +6263,7 @@
     
     // CRÍTICO: Usar o ctoKey da rota clicada para encontrar a CTO correta
     // Isso garante que mesmo com coordenadas iguais, sempre encontramos a CTO certa
-    const clickedCtoKey = route.__ctoKey;
+    const clickedCtoKey = getMapItemCtoKey(route);
     if (!clickedCtoKey) {
       console.error(`❌ handleRouteClick: Rota no índice ${routeIndex} não tem ctoKey anexado!`);
       console.log(`🔍 Tentando encontrar por polyline...`);
@@ -4548,6 +6587,68 @@
     return totalDistance;
   }
 
+  /** Aplica visual de rota: fora do limite (tracejado laranja) ou ocupação da CTO. */
+  function applyStreetRouteVisual(polyline, cto) {
+    if (!polyline || !cto || typeof polyline.setOptions !== 'function') return;
+
+    if (cto.is_out_of_limit) {
+      polyline.setOptions({
+        strokeColor: COLOR_CTO_OUT_OF_LIMIT,
+        strokeOpacity: 0,
+        strokeWeight: 6,
+        icons: [
+          {
+            icon: {
+              path: 'M 0,-4 0,4',
+              strokeOpacity: ROUTE_ORANGE_OPACITY_OUT_OF_LIMIT,
+              strokeWeight: 6,
+              scale: 1
+            },
+            offset: '0%',
+            repeat: '22px'
+          }
+        ]
+      });
+      return;
+    }
+
+    polyline.setOptions({
+      strokeColor: getCTOMarkerColor(cto),
+      strokeOpacity: 0.7,
+      strokeWeight: 5,
+      icons: []
+    });
+  }
+
+  /** Atualiza a cor do marcador de rua conforme limite/ocupação. */
+  function applyStreetCtoMarkerColor(cto) {
+    if (!cto || cto.is_condominio) return;
+    const ctoKey = getCTOKey(cto);
+    const marker = findMarkerByCtoKey(ctoKey);
+    if (!marker || typeof marker.setIcon !== 'function') return;
+
+    const color = getCTOMarkerColor(cto);
+
+    try {
+      const icon = marker.getIcon();
+      if (icon && typeof icon === 'object' && icon.path != null) {
+        marker.setIcon({ ...icon, fillColor: color });
+      }
+    } catch (err) {
+      console.warn('[Mapa] Falha ao atualizar cor do marcador:', err?.message || err);
+    }
+  }
+
+  function sameCtoIdentity(a, b) {
+    if (!a || !b) return false;
+    const idA = a.id_cto || a.id;
+    const idB = b.id_cto || b.id;
+    if (idA != null && idB != null && String(idA) === String(idB)) return true;
+    const nomeA = String(a.nome || '').trim();
+    const nomeB = String(b.nome || '').trim();
+    return !!(nomeA && nomeB && nomeA === nomeB);
+  }
+
   // Função para salvar alterações quando uma rota for editada
   function saveRouteEdit(ctoIndex) {
     console.log(`🔵 saveRouteEdit chamada para CTO índice: ${ctoIndex}`);
@@ -4584,12 +6685,19 @@
       // Formato: 129.15m (0.129km) - 2 casas decimais para metros, 3 para km
       const distanciaMetros = Math.round(newDistance * 100) / 100;
       const distanciaKm = Math.round((newDistance / 1000) * 1000) / 1000;
+      const wasOutOfLimit = !!ctos[ctoIndex].is_out_of_limit;
+      const withinLimit = distanciaMetros <= FORA_LIMITE_METROS;
+      // Edição que entra nos 250m → passa a ser válida (cor de ocupação)
+      // Se voltar a passar de 250m e era fora do limite, restaura o status
+      const nextOutOfLimit = withinLimit ? false : wasOutOfLimit || !!routeInfo.wasOutOfLimit;
+      if (wasOutOfLimit) routeInfo.wasOutOfLimit = true;
       
       console.log(`📊 Valores calculados: ${distanciaMetros}m (${distanciaKm}km)`);
       console.log(`📋 CTO antes da atualização:`, {
         nome: ctos[ctoIndex].nome,
         distancia_metros: ctos[ctoIndex].distancia_metros,
-        distancia_km: ctos[ctoIndex].distancia_km
+        distancia_km: ctos[ctoIndex].distancia_km,
+        is_out_of_limit: ctos[ctoIndex].is_out_of_limit
       });
       
       // Criar um novo objeto CTO com os valores atualizados para garantir reatividade
@@ -4597,7 +6705,8 @@
         ...ctos[ctoIndex],
         distancia_metros: distanciaMetros,
         distancia_km: distanciaKm,
-        distancia_real: newDistance
+        distancia_real: newDistance,
+        is_out_of_limit: nextOutOfLimit
       };
       
       // Criar um novo array com o objeto atualizado para forçar reatividade do Svelte
@@ -4609,51 +6718,48 @@
         // Forçar reatividade do routeData também
         routeData = [...routeData];
       }
-      
-      // Se a CTO editada está fora do limite, atualizar nearestCTOOutsideLimit também
-      if (updatedCTO.is_out_of_limit) {
-        // Verificar se é a mesma CTO que está em nearestCTOOutsideLimit
-        // Usar ID da CTO para comparação (mais confiável que coordenadas que podem mudar)
-        if (nearestCTOOutsideLimit) {
-          const nearestId = nearestCTOOutsideLimit.id_cto || nearestCTOOutsideLimit.id;
-          const updatedId = updatedCTO.id_cto || updatedCTO.id;
-          const nearestNome = nearestCTOOutsideLimit.nome;
-          const updatedNome = updatedCTO.nome;
-          
-          console.log(`🔍 Comparando CTOs: nearestId=${nearestId}, updatedId=${updatedId}, nearestNome=${nearestNome}, updatedNome=${updatedNome}`);
-          
-          // Comparar por ID ou nome (caso ID não esteja disponível)
-          if ((nearestId && updatedId && nearestId === updatedId) || 
-              (nearestNome && updatedNome && nearestNome === updatedNome)) {
-            // Atualizar nearestCTOOutsideLimit com os novos valores
-            nearestCTOOutsideLimit = {
-              ...nearestCTOOutsideLimit,
-              distancia_metros: distanciaMetros,
-              distancia_km: distanciaKm,
-              distancia_real: newDistance
-            };
-            // Forçar reatividade do Svelte criando um novo objeto
-            nearestCTOOutsideLimit = {...nearestCTOOutsideLimit};
-            console.log(`🔄 nearestCTOOutsideLimit atualizado com nova distância: ${distanciaMetros}m (${distanciaKm}km)`);
-            console.log(`📋 nearestCTOOutsideLimit após atualização:`, {
-              nome: nearestCTOOutsideLimit.nome,
-              distancia_metros: nearestCTOOutsideLimit.distancia_metros,
-              distancia_km: nearestCTOOutsideLimit.distancia_km,
-              distancia_real: nearestCTOOutsideLimit.distancia_real
-            });
-          } else {
-            console.log(`⚠️ CTO editada não corresponde à nearestCTOOutsideLimit. IDs: ${nearestId} vs ${updatedId}, Nomes: ${nearestNome} vs ${updatedNome}`);
-          }
-        } else {
-          console.log(`⚠️ CTO editada está fora do limite mas nearestCTOOutsideLimit é null`);
-        }
+
+      // Visual da rota + marcador (laranja tracejado ↔ cor de ocupação)
+      if (wasOutOfLimit !== nextOutOfLimit || wasOutOfLimit || routeInfo.wasOutOfLimit) {
+        applyStreetRouteVisual(route, updatedCTO);
+        applyStreetCtoMarkerColor(updatedCTO);
+        console.log(
+          nextOutOfLimit
+            ? `🟠 Rota ${updatedCTO.nome} permanece/volta fora do limite (${distanciaMetros}m)`
+            : `✅ Rota ${updatedCTO.nome} validada dentro de ${FORA_LIMITE_METROS}m — cor de ocupação aplicada`
+        );
       }
       
-      console.log(`✅ Rota da CTO ${ctoIndex} (${updatedCTO.nome}) editada. Nova distância: ${distanciaMetros}m (${distanciaKm}km)`);
+      // Atualizar / limpar nearestCTOOutsideLimit conforme o novo status
+      if (nextOutOfLimit) {
+        if (nearestCTOOutsideLimit && sameCtoIdentity(nearestCTOOutsideLimit, updatedCTO)) {
+          nearestCTOOutsideLimit = {
+            ...nearestCTOOutsideLimit,
+            ...updatedCTO,
+            distancia_metros: distanciaMetros,
+            distancia_km: distanciaKm,
+            distancia_real: newDistance,
+            is_out_of_limit: true
+          };
+          nearestCTOOutsideLimit = { ...nearestCTOOutsideLimit };
+        } else if (!nearestCTOOutsideLimit && workbenchMode) {
+          nearestCTOOutsideLimit = { ...updatedCTO };
+        }
+        if (workbenchMode) emitForaLimiteChange();
+      } else {
+        if (nearestCTOOutsideLimit && sameCtoIdentity(nearestCTOOutsideLimit, updatedCTO)) {
+          nearestCTOOutsideLimit = null;
+          console.log(`🔄 nearestCTOOutsideLimit limpo — ${updatedCTO.nome} entrou nos ${FORA_LIMITE_METROS}m`);
+        }
+        if (workbenchMode) emitForaLimiteChange();
+      }
+      
+      console.log(`✅ Rota da CTO ${ctoIndex} (${updatedCTO.nome}) editada. Nova distância: ${distanciaMetros}m (${distanciaKm}km), foraLimite=${nextOutOfLimit}`);
       console.log(`📋 CTO após atualização:`, {
         nome: ctos[ctoIndex].nome,
         distancia_metros: ctos[ctoIndex].distancia_metros,
-        distancia_km: ctos[ctoIndex].distancia_km
+        distancia_km: ctos[ctoIndex].distancia_km,
+        is_out_of_limit: ctos[ctoIndex].is_out_of_limit
       });
     } else {
       console.warn(`❌ CTO não encontrada no índice ${ctoIndex}. Array ctos:`, ctos);
@@ -4669,6 +6775,10 @@
       route.setPath(routeInfo.originalPath.map(p => new google.maps.LatLng(p.lat, p.lng)));
       routeInfo.editedPath = null;
       console.log(`Rota ${routeIndex} restaurada para o path original`);
+      // Recalcula metragem + status de limite / cor
+      if (routeInfo.ctoIndex != null) {
+        saveRouteEdit(routeInfo.ctoIndex);
+      }
     }
   }
 
@@ -4696,164 +6806,134 @@
 
   // Função para atualizar visibilidade de CTOs no mapa baseado em ctoVisibility
   async function updateMapVisibility() {
-    if (!map || !ctosRua || ctosRua.length === 0) return;
-    
-    // Remover marcadores e rotas de CTOs que não estão mais visíveis
+    if (!map) return;
+
+    // Garantir numeração sincronizada com os checkboxes atuais
+    ctoNumbers = calculateCTONumbers();
+
+    const streetCtos = ctosRua || [];
+    const visibleKeys = new Set(
+      streetCtos
+        .filter((cto) => ctoVisibility.get(getCTOKey(cto)) !== false)
+        .map((cto) => getCTOKey(cto))
+    );
+
+    // 1) Remover do mapa tudo que não está visível (marcadores + rotas)
     const markersToRemove = [];
-    const routesToRemove = [];
-    
-    // Verificar cada CTO e remover marcador/rota se não estiver visível
-    for (let i = 0; i < ctosRua.length; i++) {
-      const cto = ctosRua[i];
-      const ctoKey = getCTOKey(cto);
-      const isVisible = ctoVisibility.get(ctoKey) !== false;
-      
-      if (!isVisible) {
-        // CTO não está visível, remover marcador e rota
-        // Encontrar marcador associado a esta CTO
-        const ctoMarker = markers.find((marker) => {
-          if (!marker) return false;
-          if (marker === clientMarker) return false;
-          if (marker.getMap && marker.getMap() !== map) return false;
-          return marker.__ctoKey === ctoKey;
-        });
-        
-        if (ctoMarker) {
-          markersToRemove.push(ctoMarker);
-        }
-        
-        // Encontrar rota associada a esta CTO específica usando ctoKey
-        // CRÍTICO: Usar APENAS ctoKey, nunca coordenadas (múltiplas CTOs podem ter mesma coordenada)
-        const routeInfo = routeData.find(rd => {
-          if (!rd || rd.ctoKey !== ctoKey) return false;
-          // Verificar se a polyline está realmente no mapa
-          const polyline = rd.polyline;
-          if (!polyline || !polyline.getMap) return false;
-          return polyline.getMap() === map;
-        });
-        
-        if (routeInfo && routeInfo.polyline) {
-          console.log(`🗑️ Removendo rota da CTO ${cto.nome} (${ctoKey}) - rota específica desta CTO`);
-          routesToRemove.push(routeInfo.polyline);
-          // Marcar para remoção do routeData também (será removido no loop abaixo)
-        } else {
-          console.log(`⚠️ Rota não encontrada para CTO ${cto.nome} (${ctoKey}) - pode já ter sido removida`);
-        }
+    for (const marker of markers || []) {
+      if (!marker || marker === clientMarker) continue;
+      const key = getMapItemCtoKey(marker);
+      if (!key) continue;
+      // Só gerencia CTOs de rua desta lista
+      if (streetCtos.some((c) => getCTOKey(c) === key) && !visibleKeys.has(key)) {
+        markersToRemove.push(marker);
       }
     }
-    
-    // Remover marcadores do mapa e do array (com dedupe e remoção robusta)
-    const uniqueMarkersToRemove = Array.from(new Set(markersToRemove));
-    uniqueMarkersToRemove.forEach(marker => {
+
+    for (const marker of markersToRemove) {
       try {
         marker.setMap(null);
-      } catch (_) {}
-      // Remover sempre do array, mesmo se findIndex falhar por algum motivo
-      markers = markers.filter(m => m !== marker);
-    });
-    
-    // Remover rotas do mapa e do array
-    // Ordenar por índice decrescente para evitar problemas ao remover múltiplas rotas
-    const routesToRemoveWithIndex = routesToRemove.map(route => {
-      const routeIndex = routes.findIndex(r => r === route);
-      return { route, routeIndex };
-    }).filter(item => item.routeIndex !== -1).sort((a, b) => b.routeIndex - a.routeIndex);
-    
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        if (typeof marker.setVisible === 'function') marker.setVisible(false);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    if (markersToRemove.length) {
+      markers = markers.filter((m) => !markersToRemove.includes(m));
+    }
+
+    // Rotas: remover as de CTOs ocultas
+    const routesToRemove = [];
+    for (const rd of [...(routeData || [])]) {
+      if (!rd) continue;
+      const key = rd.ctoKey || getMapItemCtoKey(rd.polyline);
+      if (!key) continue;
+      if (streetCtos.some((c) => getCTOKey(c) === key) && !visibleKeys.has(key)) {
+        if (rd.polyline) routesToRemove.push(rd.polyline);
+      }
+    }
+
+    const routesToRemoveWithIndex = routesToRemove
+      .map((route) => {
+        const routeIndex = routes.findIndex((r) => r === route);
+        return { route, routeIndex };
+      })
+      .filter((item) => item.routeIndex !== -1)
+      .sort((a, b) => b.routeIndex - a.routeIndex);
+
     routesToRemoveWithIndex.forEach(({ route, routeIndex }) => {
-      route.setMap(null);
-      // Se a rota que está sendo removida estava sendo editada, finalizar edição
-      if (editingRouteIndex === routeIndex) {
-        finishEditingRoute(routeIndex);
+      try {
+        route.setMap(null);
+      } catch (_) {
+        /* ignore */
       }
-      // Se a rota que está sendo removida tinha o popup aberto, fechar o popup
-      if (selectedRouteIndex === routeIndex) {
-        selectedRouteIndex = null;
-      }
-      
-      // Remover do routeData também (usar polyline para encontrar - mais confiável)
-      // CRÍTICO: Remover apenas a entrada específica desta rota, não outras rotas com mesma coordenada
-      const routeInfoToRemove = routeData.find(rd => rd && rd.polyline === route);
+      if (editingRouteIndex === routeIndex) finishEditingRoute(routeIndex);
+      if (selectedRouteIndex === routeIndex) selectedRouteIndex = null;
+
+      const routeInfoToRemove = routeData.find((rd) => rd && rd.polyline === route);
       if (routeInfoToRemove) {
-        const routeDataIndex = routeData.findIndex(rd => rd === routeInfoToRemove);
-        if (routeDataIndex !== -1) {
-          console.log(`🗑️ Removendo routeData[${routeDataIndex}] para CTO ${routeInfoToRemove.cto?.nome} (${routeInfoToRemove.ctoKey})`);
-          routeData.splice(routeDataIndex, 1);
+        const routeDataIndex = routeData.findIndex((rd) => rd === routeInfoToRemove);
+        if (routeDataIndex !== -1) routeData.splice(routeDataIndex, 1);
+      }
+
+      routes.splice(routeIndex, 1);
+      if (editingRouteIndex !== null && editingRouteIndex > routeIndex) editingRouteIndex--;
+      if (selectedRouteIndex !== null && selectedRouteIndex > routeIndex) selectedRouteIndex--;
+    });
+
+    // 2) Reaparecer: criar marcador/rota se estiver visível e ainda não estiver no mapa
+    for (const cto of streetCtos) {
+      const ctoKey = getCTOKey(cto);
+      if (ctoVisibility.get(ctoKey) === false) continue;
+
+      const ctoLat = parseFloat(cto.latitude);
+      const ctoLng = parseFloat(cto.longitude);
+      if (isNaN(ctoLat) || isNaN(ctoLng)) continue;
+
+      let ctoMarker = findMarkerByCtoKey(ctoKey);
+      if (ctoMarker) {
+        try {
+          if (ctoMarker.getMap?.() !== map) ctoMarker.setMap(map);
+          if (typeof ctoMarker.setVisible === 'function') ctoMarker.setVisible(true);
+        } catch (_) {
+          /* ignore */
         }
       } else {
-        console.warn(`⚠️ RouteInfo não encontrado em routeData para rota removida no índice ${routeIndex}`);
-      }
-      
-      routes.splice(routeIndex, 1);
-      // Ajustar editingRouteIndex se necessário (se removemos uma rota antes da que está sendo editada)
-      if (editingRouteIndex !== null && editingRouteIndex > routeIndex) {
-        editingRouteIndex--;
-      }
-      // Ajustar selectedRouteIndex se necessário (se removemos uma rota antes da que está selecionada)
-      if (selectedRouteIndex !== null && selectedRouteIndex > routeIndex) {
-        selectedRouteIndex--;
-      }
-    });
-    
-    // Adicionar marcadores e rotas de CTOs que agora estão visíveis mas não estão no mapa
-    for (let i = 0; i < ctosRua.length; i++) {
-      const cto = ctosRua[i];
-      const ctoKey = getCTOKey(cto);
-      const isVisible = ctoVisibility.get(ctoKey) !== false;
-      
-      if (isVisible) {
-        // Verificar se o marcador já existe no mapa
-        const ctoLat = parseFloat(cto.latitude);
-        const ctoLng = parseFloat(cto.longitude);
-        
-        if (isNaN(ctoLat) || isNaN(ctoLng)) continue;
-        
-        const markerExists = markers.some(marker => {
-          if (!marker) return false;
-          if (marker === clientMarker) return false; // Ignorar marcador do cliente
-          if (marker.getMap && marker.getMap() !== map) return false;
-          return marker.__ctoKey === ctoKey;
-        });
-        
-        // Verificar se a rota existe E está no mapa (não apenas em routeData)
-        // CRÍTICO: Usar APENAS ctoKey para identificar rotas, nunca coordenadas
-        // Múltiplas CTOs podem ter a mesma coordenada, mas cada uma DEVE ter sua própria rota única
-        const routeExists = routeData.some(rd => {
-          if (!rd || rd.ctoKey !== ctoKey) return false;
-          // Verificar se a polyline está realmente no mapa
-          const polyline = rd.polyline;
-          if (!polyline || !polyline.getMap) return false;
-          return polyline.getMap() === map;
-        });
-        
-        // Se não existe marcador, criar
-        if (!markerExists) {
-          // Encontrar o índice da CTO no array ctos completo
-          const ctoIndex = ctos.findIndex(c => getCTOKey(c) === ctoKey);
-          if (ctoIndex !== -1) {
-            // Criar marcador usando a mesma lógica de drawRoutesAndMarkers
-            await createCTOMarker(ctos[ctoIndex], ctoIndex);
-          }
+        const ctoIndex = ctos.findIndex((c) => getCTOKey(c) === ctoKey);
+        if (ctoIndex !== -1) {
+          await createCTOMarker(ctos[ctoIndex], ctoIndex);
+          ctoMarker = findMarkerByCtoKey(ctoKey);
         }
-        
-        // Se não existe rota no mapa e a CTO precisa de rota, criar
-        // IMPORTANTE: Cada CTO tem sua própria rota, mesmo que compartilhe coordenadas com outras
-        // Incluir CTOs normais dentro de 250m OU CTOs fora do limite (is_out_of_limit)
-        if (!routeExists && !cto.is_condominio && cto.distancia_metros && cto.distancia_metros > 0 && (cto.distancia_real || cto.is_out_of_limit)) {
-          const ctoIndex = ctos.findIndex(c => getCTOKey(c) === ctoKey);
-          if (ctoIndex !== -1) {
-            console.log(`📍 Criando rota ÚNICA para CTO ${cto.nome} (${ctoKey}) - mesmo que outras CTOs tenham mesma coordenada`);
-            await drawRealRoute(ctos[ctoIndex], ctoIndex);
-          }
-        } else if (routeExists) {
-          console.log(`✓ Rota já existe para CTO ${cto.nome} (${ctoKey}) - rota específica desta CTO`);
+      }
+
+      const routeInfo = findRouteInfoByCtoKey(ctoKey);
+      const routeOnMap = routeInfo?.polyline && routeInfo.polyline.getMap?.() === map;
+      if (
+        !routeOnMap &&
+        !cto.is_condominio &&
+        cto.distancia_metros &&
+        cto.distancia_metros > 0 &&
+        (cto.distancia_real || cto.is_out_of_limit)
+      ) {
+        const ctoIndex = ctos.findIndex((c) => getCTOKey(c) === ctoKey);
+        if (ctoIndex !== -1) {
+          await drawRealRoute(ctos[ctoIndex], ctoIndex);
+        }
+      } else if (routeInfo?.polyline && !routeOnMap) {
+        try {
+          routeInfo.polyline.setMap(map);
+        } catch (_) {
+          /* ignore */
         }
       }
     }
-    
-    // Atualizar numeração dos marcadores existentes no mapa
+
+    // 3) Renumerar marcadores visíveis (1..N) e limpar label dos ocultos
     await updateMarkerNumbers();
-    
-    // Atualizar numeração dos marcadores
     ctoNumbersVersion++;
     await tick();
   }
@@ -4861,46 +6941,43 @@
   // Função para atualizar os números dos marcadores no mapa baseado em ctoNumbers
   async function updateMarkerNumbers() {
     if (!map || !ctosRua || ctosRua.length === 0) return;
-    
-    // Para cada CTO visível, encontrar seu marcador e atualizar o label
+
+    // Recalcular para garantir números corretos neste momento
+    const numbers = calculateCTONumbers();
+    ctoNumbers = numbers;
+
     for (const cto of ctosRua) {
       const ctoKey = getCTOKey(cto);
       const isVisible = ctoVisibility.get(ctoKey) !== false;
-      
-      if (!isVisible) continue; // Pular CTOs não visíveis
-      
-      const ctoLat = parseFloat(cto.latitude);
-      const ctoLng = parseFloat(cto.longitude);
-      
-      if (isNaN(ctoLat) || isNaN(ctoLng)) continue;
-      
-      // Encontrar o marcador correspondente a esta CTO (por chave, sem depender de coordenadas)
-      const ctoMarker = markers.find(marker => {
-        if (!marker) return false;
-        if (marker === clientMarker) return false; // Ignorar marcador do cliente
-        if (marker.getMap && marker.getMap() !== map) return false;
-        return marker.__ctoKey === ctoKey;
-      });
-      
-      if (ctoMarker) {
-        // Obter o número correto da CTO baseado em ctoNumbers
-        const markerNumber = ctoNumbers.get(cto);
-        
-        // Verificar se é prédio (prédios não têm numeração)
-        const isPredio = cto.is_condominio === true;
-        
-        if (!isPredio && markerNumber) {
-          // Atualizar o label do marcador
-          ctoMarker.setLabel({
-            text: `${markerNumber}`,
-            color: '#FFFFFF',
-            fontSize: '14px',
-            fontWeight: 'bold'
-          });
-        } else if (isPredio) {
-          // Remover label se for prédio
-          ctoMarker.setLabel(null);
+      const ctoMarker = findMarkerByCtoKey(ctoKey);
+      if (!ctoMarker) continue;
+
+      const isPredio = cto.is_condominio === true;
+      if (!isVisible) {
+        try {
+          ctoMarker.setMap(null);
+        } catch (_) {
+          /* ignore */
         }
+        continue;
+      }
+
+      try {
+        if (ctoMarker.getMap?.() !== map) ctoMarker.setMap(map);
+      } catch (_) {
+        /* ignore */
+      }
+
+      const markerNumber = numbers.get(cto);
+      if (!isPredio && markerNumber) {
+        ctoMarker.setLabel({
+          text: `${markerNumber}`,
+          color: '#FFFFFF',
+          fontSize: '14px',
+          fontWeight: 'bold'
+        });
+      } else if (isPredio) {
+        ctoMarker.setLabel(null);
       }
     }
   }
@@ -4921,51 +6998,20 @@
     // Determinar cor e ícone (mesma lógica de drawRoutesAndMarkers)
     let ctoColor;
     if (isPredio) {
-      const statusCto = cto.status_cto_condominio || cto.condominio_data?.status_cto || '';
-      const isAtivado = statusCto && statusCto.toUpperCase().trim() === 'ATIVADO';
-      ctoColor = isAtivado ? '#28A745' : '#95A5A6';
+      ctoColor = getPredioMarkerColors(cto).fillColor;
     } else {
       // Para CTOs normais, usar cor baseada na porcentagem de ocupação
       // Se estiver fora do limite, usar cor laranja
-      if (cto.is_out_of_limit) {
-        ctoColor = '#FF9800'; // Laranja para CTO fora do limite
-      } else {
-        ctoColor = getCTOColor(cto.pct_ocup || 0);
-      }
+      ctoColor = getCTOMarkerColor(cto);
     }
     
     // Criar ícone
     let iconConfig;
     if (isPredio) {
-      const statusCto = cto.status_cto_condominio || cto.condominio_data?.status_cto || '';
-      const isAtivado = statusCto && statusCto.toUpperCase().trim() === 'ATIVADO';
-      const windowColor = isAtivado ? '#28A745' : '#95A5A6';
-      const strokeColor = isAtivado ? '#1E7E34' : '#7F8C8D';
-      
-      const svgContent = `
-        <svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
-          <rect x="2" y="4" width="20" height="26" fill="#F5F5F5" stroke="${strokeColor}" stroke-width="1.5"/>
-          <rect x="4" y="6" width="4" height="4" fill="${windowColor}"/>
-          <rect x="10" y="6" width="4" height="4" fill="${windowColor}"/>
-          <rect x="16" y="6" width="4" height="4" fill="${windowColor}"/>
-          <rect x="4" y="11" width="4" height="4" fill="${windowColor}"/>
-          <rect x="10" y="11" width="4" height="4" fill="${windowColor}"/>
-          <rect x="16" y="11" width="4" height="4" fill="${windowColor}"/>
-          <rect x="4" y="16" width="4" height="4" fill="${windowColor}"/>
-          <rect x="10" y="16" width="4" height="4" fill="${windowColor}"/>
-          <rect x="16" y="16" width="4" height="4" fill="${windowColor}"/>
-          <rect x="4" y="21" width="4" height="4" fill="${windowColor}"/>
-          <rect x="10" y="21" width="4" height="4" fill="${windowColor}"/>
-          <rect x="16" y="21" width="4" height="4" fill="${windowColor}"/>
-          <rect x="4" y="26" width="4" height="4" fill="${windowColor}"/>
-          <rect x="10" y="26" width="4" height="4" fill="${windowColor}"/>
-          <rect x="16" y="26" width="4" height="4" fill="${windowColor}"/>
-          <path d="M 8 30 Q 12 26, 16 30" stroke="${strokeColor}" stroke-width="1.5" fill="none"/>
-          <line x1="8" y1="30" x2="16" y2="30" stroke="${strokeColor}" stroke-width="1.5"/>
-        </svg>
-      `.trim();
-      
-      const svgDataUri = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svgContent);
+      const { windowColor, strokeColor } = getPredioMarkerColors(cto);
+      const svgDataUri =
+        'data:image/svg+xml;charset=UTF-8,' +
+        encodeURIComponent(buildPredioIconSvg({ windowColor, strokeColor }));
       iconConfig = {
         url: svgDataUri,
         scaledSize: new google.maps.Size(24, 32),
@@ -4989,10 +7035,10 @@
     
     const ctoMarker = new google.maps.Marker({
       position: originalPosition,
-      map: map,
+      map: isPredio && !prediosVisibleOnMap ? null : map,
       title: isPredio 
-        ? `🏢 ${cto.nome} (PRÉDIO) - ${cto.distancia_metros}m - Não cria rota`
-        : `${cto.nome} - ${cto.distancia_metros}m (${cto.vagas_total - cto.clientes_conectados} portas disponíveis)`,
+        ? `🏢 ${cto.nome} (PRÉDIO) - ${cto.distancia_metros}m - ${Math.max(0, (cto.portas_disponiveis ?? ((cto.vagas_total || 0) - (cto.clientes_conectados || 0))))} portas disponíveis`
+        : `${cto.nome} - ${cto.distancia_metros}m (${Math.max(0, (cto.vagas_total || 0) - (cto.clientes_conectados || 0))} portas disponíveis)`,
       icon: iconConfig,
       label: isPredio ? undefined : (markerNumber ? {
         text: `${markerNumber}`,
@@ -5005,7 +7051,13 @@
     });
 
     // Anexar chave estável da CTO no marcador (evita depender de comparação por coordenadas)
-    try { ctoMarker.__ctoKey = ctoKey; } catch (_) {}
+    setMapItemCtoKey(ctoMarker, ctoKey);
+    try {
+      ctoMarker.__isPredio = !!isPredio;
+      if (typeof ctoMarker.set === 'function') ctoMarker.set('isPredio', !!isPredio);
+    } catch (_) {
+      /* ignore */
+    }
     
     markers.push(ctoMarker);
   }
@@ -5018,6 +7070,19 @@
 
     console.log(`🗺️ drawRoutesAndMarkers: Iniciando desenho de ${ctos.length} CTOs`);
     console.log(`📊 ctoVisibility Map size: ${ctoVisibility.size}`);
+
+    // Evitar marcadores duplicados (ex.: prédios desenhados na etapa 1 e de novo na etapa 6)
+    clearCtoMarkersFromMap();
+    // Limpar rotas antigas também
+    routes.forEach((route) => {
+      try {
+        if (route?.setMap) route.setMap(null);
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    routes = [];
+    routeData = [];
 
     const bounds = new google.maps.LatLngBounds();
     bounds.extend(clientCoords);
@@ -5073,14 +7138,16 @@
         console.log(`🏢 Prédio detectado: ${cto.nome}, coordenadas: ${ctoLat}, ${ctoLng}`);
       }
       
-      // Usar posição original para bounds
-      bounds.extend(originalPosition);
+      // Usar posição original para bounds (só casinha + CTOs de rua visíveis — prédios não abrem o zoom)
+      const ctoKey = getCTOKey(cto);
+      const visibilityValue = ctoVisibility.get(ctoKey);
+      const isVisible = visibilityValue !== false;
+      if (!isPredio && isVisible) {
+        bounds.extend(originalPosition);
+      }
 
       // Verificar visibilidade da CTO
       // IMPORTANTE: Se não existe no Map, considerar como visível (padrão)
-      const ctoKey = getCTOKey(cto);
-      const visibilityValue = ctoVisibility.get(ctoKey);
-      const isVisible = visibilityValue !== false; // true ou undefined = visível, false = não visível
       
       // Se não estiver visível, pular esta CTO
       if (!isVisible) {
@@ -5128,23 +7195,15 @@
       
       try {
         
-        // Para prédios, usar verde baseado no STATUS_CTO
-        // STATUS_CTO = "ATIVADO" → verde mais vivo (#28A745 ou similar)
-        // STATUS_CTO ≠ "ATIVADO" → verde mais apagado (#6C757D ou #95A5A6)
+        // Para prédios MDU: cor por ocupação agregada das CTOs internas
+        // Legacy: ATIVADO = verde / senão cinza
         let ctoColor;
         if (isPredio) {
-          const statusCto = cto.status_cto_condominio || cto.condominio_data?.status_cto || '';
-          const isAtivado = statusCto && statusCto.toUpperCase().trim() === 'ATIVADO';
-          // Verde mais vivo para ATIVADO, verde mais apagado para outros
-          ctoColor = isAtivado ? '#28A745' : '#95A5A6'; // #28A745 = verde vivo, #95A5A6 = verde apagado/cinza
+          ctoColor = getPredioMarkerColors(cto).fillColor;
         } else {
           // Para CTOs normais, usar cor baseada na porcentagem de ocupação
           // Se estiver fora do limite, usar cor laranja
-          if (cto.is_out_of_limit) {
-            ctoColor = '#FF9800'; // Laranja para CTO fora do limite
-          } else {
-            ctoColor = getCTOColor(cto.pct_ocup || 0);
-          }
+          ctoColor = getCTOMarkerColor(cto);
         }
 
         // Usar ctoNumbers para numeração que corresponde à coluna N° da tabela
@@ -5156,64 +7215,18 @@
         let iconConfig;
         
         if (isPredio) {
-          // Determinar qual ícone usar baseado no status
-          const statusCto = cto.status_cto_condominio || cto.condominio_data?.status_cto || '';
-          const isAtivado = statusCto && statusCto.toUpperCase().trim() === 'ATIVADO';
+          const { windowColor, strokeColor } = getPredioMarkerColors(cto);
           
-          console.log(`🏢 Criando marcador de prédio: ${cto.nome}, status: ${statusCto}, ativado: ${isAtivado}`);
+          console.log(`🏢 Criando marcador de condomínio: ${cto.nome}, cor ocupação: ${windowColor}`);
           
-          // Criar SVG inline como data URI para garantir carregamento
-          // Cores baseadas no status
-          const windowColor = isAtivado ? '#28A745' : '#95A5A6';
-          const strokeColor = isAtivado ? '#1E7E34' : '#7F8C8D';
-          
-          // SVG do prédio com janelas em grade 3x5
-          const svgContent = `
-            <svg width="24" height="32" viewBox="0 0 24 32" xmlns="http://www.w3.org/2000/svg">
-              <!-- Corpo do prédio -->
-              <rect x="2" y="4" width="20" height="26" fill="#F5F5F5" stroke="${strokeColor}" stroke-width="1.5"/>
-              
-              <!-- Janelas em grade 3x5 (15 janelas) -->
-              <!-- Linha 1 -->
-              <rect x="4" y="6" width="4" height="4" fill="${windowColor}"/>
-              <rect x="10" y="6" width="4" height="4" fill="${windowColor}"/>
-              <rect x="16" y="6" width="4" height="4" fill="${windowColor}"/>
-              
-              <!-- Linha 2 -->
-              <rect x="4" y="11" width="4" height="4" fill="${windowColor}"/>
-              <rect x="10" y="11" width="4" height="4" fill="${windowColor}"/>
-              <rect x="16" y="11" width="4" height="4" fill="${windowColor}"/>
-              
-              <!-- Linha 3 -->
-              <rect x="4" y="16" width="4" height="4" fill="${windowColor}"/>
-              <rect x="10" y="16" width="4" height="4" fill="${windowColor}"/>
-              <rect x="16" y="16" width="4" height="4" fill="${windowColor}"/>
-              
-              <!-- Linha 4 -->
-              <rect x="4" y="21" width="4" height="4" fill="${windowColor}"/>
-              <rect x="10" y="21" width="4" height="4" fill="${windowColor}"/>
-              <rect x="16" y="21" width="4" height="4" fill="${windowColor}"/>
-              
-              <!-- Linha 5 -->
-              <rect x="4" y="26" width="4" height="4" fill="${windowColor}"/>
-              <rect x="10" y="26" width="4" height="4" fill="${windowColor}"/>
-              <rect x="16" y="26" width="4" height="4" fill="${windowColor}"/>
-              
-              <!-- Entrada arqueada na base -->
-              <path d="M 8 30 Q 12 26, 16 30" stroke="${strokeColor}" stroke-width="1.5" fill="none"/>
-              <line x1="8" y1="30" x2="16" y2="30" stroke="${strokeColor}" stroke-width="1.5"/>
-            </svg>
-          `.trim();
-          
-          // Converter SVG para data URI
-          const svgDataUri = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svgContent);
-          
-          // Usar imagem SVG inline para prédios
+          const svgDataUri =
+            'data:image/svg+xml;charset=UTF-8,' +
+            encodeURIComponent(buildPredioIconSvg({ windowColor, strokeColor }));
           iconConfig = {
             url: svgDataUri,
-            scaledSize: new google.maps.Size(24, 32), // Tamanho do ícone (24x32 pixels)
-            anchor: new google.maps.Point(12, 32), // Anchor na base do prédio (centro horizontal, base vertical)
-            origin: new google.maps.Point(0, 0) // Origem da imagem
+            scaledSize: new google.maps.Size(24, 32),
+            anchor: new google.maps.Point(12, 32),
+            origin: new google.maps.Point(0, 0)
           };
         } else {
           // Para CTOs de rua: usar círculo com anchor no centro (0,0)
@@ -5233,10 +7246,10 @@
         // IMPORTANTE: As coordenadas devem ser exatamente as mesmas usadas na rota
         ctoMarker = new google.maps.Marker({
           position: originalPosition,
-          map: map,
+          map: isPredio && !prediosVisibleOnMap ? null : map,
           title: isPredio 
-            ? `🏢 ${cto.nome} (PRÉDIO) - ${cto.distancia_metros}m - Não cria rota`
-            : `${cto.nome} - ${cto.distancia_metros}m (${cto.vagas_total - cto.clientes_conectados} portas disponíveis)`,
+            ? `🏢 ${cto.nome} (PRÉDIO) - ${cto.distancia_metros}m - ${Math.max(0, (cto.portas_disponiveis ?? ((cto.vagas_total || 0) - (cto.clientes_conectados || 0))))} portas disponíveis`
+            : `${cto.nome} - ${cto.distancia_metros}m (${Math.max(0, (cto.vagas_total || 0) - (cto.clientes_conectados || 0))} portas disponíveis)`,
           icon: iconConfig,
           label: isPredio ? undefined : (currentMarkerNumber ? { // Sem label para prédios, label numérico para CTOs normais
             text: `${currentMarkerNumber}`,
@@ -5250,13 +7263,19 @@
 
         // Anexar chave estável da CTO no marcador (evita depender de comparação por coordenadas)
         const ctoKey = getCTOKey(cto);
-        try { ctoMarker.__ctoKey = ctoKey; } catch (_) {}
+        setMapItemCtoKey(ctoMarker, ctoKey);
+        try {
+          ctoMarker.__isPredio = !!isPredio;
+          if (typeof ctoMarker.set === 'function') ctoMarker.set('isPredio', !!isPredio);
+        } catch (_) {
+          /* ignore */
+        }
 
         // Verificar se o marcador foi criado com sucesso
         // IMPORTANTE: Adicionar ao array sempre que o marcador foi criado, mesmo que getMap() ainda não esteja disponível
         if (ctoMarker) {
-          // Garantir que o marcador está no mapa (pode ter sido criado sem map por engano)
-          if (!ctoMarker.getMap()) {
+          // Garantir que o marcador está no mapa (exceto prédios ocultos pelo toggle)
+          if (!ctoMarker.getMap() && !(isPredio && !prediosVisibleOnMap)) {
             ctoMarker.setMap(map);
           }
           markers.push(ctoMarker);
@@ -5269,73 +7288,75 @@
           let infoWindowContent = '';
           
           if (isPredio) {
-            // InfoWindow para PRÉDIO com CTOs internas
-            const nomePredio = cto.nome || 'Prédio';
-            const statusCto = cto.status_cto_condominio || 'N/A';
+            const nomePredio = cto.nome || 'Condomínio';
+            const tipoMdu = cto.tipo_mdu || cto.status_cto_condominio || cto.condominio_data?.tipo || 'N/A';
+            const enderecoMdu =
+              cto.endereco_completo ||
+              cto.condominio_data?.endereco_completo ||
+              '';
+            const idMdu = cto.id_mdu ?? cto.condominio_data?.id_mdu ?? cto.id ?? 'N/A';
             const ctosInternas = cto.ctos_internas || [];
+            const predioOcc = getPredioMarkerColors(cto);
             
-            let ctosListHTML = '';
-            if (ctosInternas.length > 0) {
-              ctosListHTML = '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd;">';
-              ctosListHTML += `<strong style="color: #6C757D; font-size: 13px;">CTOs Internas (${ctosInternas.length}):</strong><br>`;
-              
+            let detalheHTML = '';
+            if (ctosInternas.length === 0) {
+              detalheHTML = `
+                <div style="margin-top: 12px; padding: 8px; background-color: ${getOccupancySoftBg(predioOcc.windowColor)}; border-left: 3px solid ${predioOcc.windowColor}; border-radius: 4px;">
+                  <strong style="color: #333;">Condomínio cadastrado (base MDU)</strong><br>
+                  <span style="color: #4b5563; font-size: 12px;">Sem equipamentos internos — marcador cinza.</span>
+                </div>
+              `;
+            } else {
+              detalheHTML = '<div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd;">';
+              detalheHTML += `<strong style="color: #6C757D; font-size: 13px;">CTOs Internas (${ctosInternas.length}):</strong><br>`;
               ctosInternas.forEach((ctoInterna, idx) => {
-                // Verificar se a CTO interna está ativa
                 const statusCtoInterna = ctoInterna.status_cto || '';
-                const isAtiva = statusCtoInterna && statusCtoInterna.toUpperCase().trim() === 'ATIVADO';
-                const borderColor = isAtiva ? '#28A745' : '#DC3545';
-                const bgColor = isAtiva ? '#f8f9fa' : '#fff5f5';
-                
-                ctosListHTML += `
+                const isAtiva =
+                  statusCtoInterna &&
+                  (statusCtoInterna.toUpperCase().trim() === 'ATIVADO' ||
+                    statusCtoInterna.toUpperCase().trim() === 'ATIVO');
+                const portsInterna = normalizeCtoPortCounts(ctoInterna);
+                const borderColor = getCTOMarkerColor(portsInterna);
+                const bgColor = getOccupancySoftBg(borderColor);
+                detalheHTML += `
                   <div style="margin-top: 8px; padding: 8px; background-color: ${bgColor}; border-left: 3px solid ${borderColor}; border-radius: 4px;">
                     <strong style="color: #333; font-size: 12px;">CTO ${idx + 1}:</strong><br>
                     <strong>Nome:</strong> ${String(ctoInterna.nome || 'N/A')}<br>
-                    <strong>ID:</strong> ${String(ctoInterna.id || 'N/A')}<br>
-                    <strong>Portas Disponíveis:</strong> ${Number(ctoInterna.portas_disponiveis || 0)}<br>
-                    <strong>Portas Totais:</strong> ${Number(ctoInterna.vagas_total || 0)}<br>
-                    <strong>Portas Conectadas:</strong> ${Number(ctoInterna.clientes_conectados || 0)}<br>
+                    ${ctoInterna.id ? `<strong>ID:</strong> ${String(ctoInterna.id)}<br>` : ''}
+                    <strong>Portas Disponíveis:</strong> ${Number(portsInterna.portas_disponiveis || 0)}<br>
+                    <strong>Portas Totais:</strong> ${Number(portsInterna.vagas_total || 0)}<br>
+                    <strong>Portas Conectadas:</strong> ${Number(portsInterna.clientes_conectados || 0)}<br>
                     <strong>Status:</strong> <span style="color: ${isAtiva ? '#28A745' : '#DC3545'}; font-weight: bold;">${String(ctoInterna.status_cto || 'N/A')}</span><br>
-                    ${!isAtiva ? '<div style="color: #DC3545; font-size: 11px; margin-top: 4px; font-weight: bold;">⚠️ CTO NÃO ATIVA</div>' : ''}
                   </div>
                 `;
               });
-              
-              // Resumo total
-              const totalPortasDisponiveis = ctosInternas.reduce((sum, c) => sum + (c.portas_disponiveis || 0), 0);
-              const totalPortasTotais = ctosInternas.reduce((sum, c) => sum + (c.vagas_total || 0), 0);
-              const totalPortasConectadas = ctosInternas.reduce((sum, c) => sum + (c.clientes_conectados || 0), 0);
-              
-              ctosListHTML += `
-                <div style="margin-top: 8px; padding: 8px; background-color: #e8f5e9; border-left: 3px solid #28A745; border-radius: 4px;">
-                  <strong style="color: #1B5E20;">Resumo Total:</strong><br>
-                  <strong>Total de Portas Disponíveis:</strong> ${totalPortasDisponiveis}<br>
-                  <strong>Total de Portas:</strong> ${totalPortasTotais}<br>
-                  <strong>Total de Portas Conectadas:</strong> ${totalPortasConectadas}<br>
+              const totalsPorts = aggregateMduPortsFromInternas(ctosInternas);
+              const totalsColor = getCTOMarkerColor(totalsPorts);
+              detalheHTML += `
+                <div style="margin-top: 8px; padding: 8px; background-color: ${getOccupancySoftBg(totalsColor)}; border-left: 3px solid ${totalsColor}; border-radius: 4px;">
+                  <strong style="color: #333; font-size: 12px;">Totais do condomínio</strong><br>
+                  <strong>Disponíveis:</strong> ${totalsPorts.portas_disponiveis} ·
+                  <strong>Totais:</strong> ${totalsPorts.vagas_total} ·
+                  <strong>Conectadas:</strong> ${totalsPorts.clientes_conectados}
                 </div>
-              `;
-              
-              ctosListHTML += '</div>';
-            } else {
-              ctosListHTML = `
-                <div style="margin-top: 12px; padding: 8px; background-color: #fff3cd; border-left: 3px solid #ffc107; border-radius: 4px;">
-                  <strong style="color: #856404;">(Sem CTOs implantadas)</strong>
-                </div>
-              `;
+              </div>`;
             }
             
-            // Conteúdo inicial do InfoWindow (será atualizado com endereço)
             infoWindowContent = `
               <div style="padding: 12px; font-family: 'Inter', sans-serif; line-height: 1.6; max-width: 350px;">
-                <div style="background-color: #FFE5E5; padding: 8px; margin-bottom: 12px; border-left: 4px solid #DC3545; border-radius: 4px;">
-                  <strong style="color: #DC3545; font-size: 14px;">🏢 PRÉDIO/CONDOMÍNIO</strong>
+                <div style="background-color: ${getOccupancySoftBg(predioOcc.windowColor)}; padding: 8px; margin-bottom: 12px; border-left: 4px solid ${predioOcc.windowColor}; border-radius: 4px;">
+                  <strong style="color: #333; font-size: 14px;">🏢 CONDOMÍNIO CADASTRADO</strong>
                 </div>
                 <strong>Nome:</strong> ${String(nomePredio)}<br>
-                <strong>Status:</strong> ${String(statusCto)}<br>
+                <strong>Tipo:</strong> ${String(tipoMdu)}<br>
+                <strong>ID MDU:</strong> ${String(idMdu)}<br>
                 <strong>Distância:</strong> ${Number(cto.distancia_metros || 0)}m (${Number(cto.distancia_km || 0)}km)<br>
                 <div id="predio-endereco-${index}" style="margin-top: 8px;">
-                  <strong>Endereço:</strong> <span style="color: #6C757D;">Carregando...</span>
+                  <strong>Endereço:</strong> ${enderecoMdu
+                    ? `<span style="color: #333;">${String(enderecoMdu)}</span>`
+                    : `<span style="color: #6C757D;">Carregando...</span>`}
                 </div>
-                ${ctosListHTML}
+                ${detalheHTML}
               </div>
             `;
           } else {
@@ -5364,7 +7385,7 @@
                 <strong>Status:</strong> <span style="color: ${isAtiva ? '#28A745' : '#DC3545'}; font-weight: bold;">${String(statusCto || 'N/A')}</span><br>
                 <strong>Total de Portas:</strong> ${Number(cto.vagas_total || 0)}<br>
                 <strong>Portas Conectadas:</strong> ${Number(cto.clientes_conectados || 0)}<br>
-                <strong>Portas Disponíveis:</strong> ${Number((cto.vagas_total || 0) - (cto.clientes_conectados || 0))}<br>
+                <strong>Portas Disponíveis:</strong> ${Number(Math.max(0, (cto.vagas_total || 0) - (cto.clientes_conectados || 0)))}<br>
                 <strong>Distância:</strong> ${Number(cto.distancia_metros || 0)}m (${Number(cto.distancia_km || 0)}km)
               </div>
             `;
@@ -5373,9 +7394,27 @@
           const ctoInfoWindow = new google.maps.InfoWindow({
             content: infoWindowContent
           });
+          mapInfoWindows.push(ctoInfoWindow);
 
           // Adicionar listener de clique (async para buscar endereço do prédio)
           ctoMarker.addListener('click', async () => {
+            // Um InfoWindow por vez: fecha casinha e outros CTOs
+            if (clientInfoWindow) {
+              try {
+                clientInfoWindow.close();
+              } catch (_) {
+                /* ignore */
+              }
+            }
+            for (const iw of mapInfoWindows || []) {
+              if (iw !== ctoInfoWindow) {
+                try {
+                  iw?.close?.();
+                } catch (_) {
+                  /* ignore */
+                }
+              }
+            }
             ctoInfoWindow.open(map, ctoMarker);
             
             // Se for prédio, buscar endereço completo via reverse geocoding
@@ -5501,34 +7540,37 @@
                         
                         ctosInternas.forEach((ctoInterna, idx) => {
                           const statusCtoInterna = ctoInterna.status_cto || '';
-                          const isAtiva = statusCtoInterna && statusCtoInterna.toUpperCase().trim() === 'ATIVADO';
-                          const borderColor = isAtiva ? '#28A745' : '#DC3545';
-                          const bgColor = isAtiva ? '#f8f9fa' : '#fff5f5';
+                          const isAtiva =
+                            statusCtoInterna &&
+                            (statusCtoInterna.toUpperCase().trim() === 'ATIVADO' ||
+                              statusCtoInterna.toUpperCase().trim() === 'ATIVO');
+                          const borderColor = getCTOMarkerColor(ctoInterna);
+                          const bgColor = getOccupancySoftBg(borderColor);
+                          const portsInterna = normalizeCtoPortCounts(ctoInterna);
                           
                           ctosListHTML += `
                             <div style="margin-top: 8px; padding: 8px; background-color: ${bgColor}; border-left: 3px solid ${borderColor}; border-radius: 4px;">
                               <strong style="color: #333; font-size: 12px;">CTO ${idx + 1}:</strong><br>
                               <strong>Nome:</strong> ${String(ctoInterna.nome || 'N/A')}<br>
-                              <strong>ID:</strong> ${String(ctoInterna.id || 'N/A')}<br>
-                              <strong>Portas Disponíveis:</strong> ${Number(ctoInterna.portas_disponiveis || 0)}<br>
-                              <strong>Portas Totais:</strong> ${Number(ctoInterna.vagas_total || 0)}<br>
-                              <strong>Portas Conectadas:</strong> ${Number(ctoInterna.clientes_conectados || 0)}<br>
+                              ${ctoInterna.id ? `<strong>ID:</strong> ${String(ctoInterna.id)}<br>` : ''}
+                              <strong>Portas Disponíveis:</strong> ${Number(portsInterna.portas_disponiveis || 0)}<br>
+                              <strong>Portas Totais:</strong> ${Number(portsInterna.vagas_total || 0)}<br>
+                              <strong>Portas Conectadas:</strong> ${Number(portsInterna.clientes_conectados || 0)}<br>
                               <strong>Status:</strong> <span style="color: ${isAtiva ? '#28A745' : '#DC3545'}; font-weight: bold;">${String(ctoInterna.status_cto || 'N/A')}</span><br>
                               ${!isAtiva ? '<div style="color: #DC3545; font-size: 11px; margin-top: 4px; font-weight: bold;">⚠️ CTO NÃO ATIVA</div>' : ''}
                             </div>
                           `;
                         });
                         
-                        const totalPortasDisponiveis = ctosInternas.reduce((sum, c) => sum + (c.portas_disponiveis || 0), 0);
-                        const totalPortasTotais = ctosInternas.reduce((sum, c) => sum + (c.vagas_total || 0), 0);
-                        const totalPortasConectadas = ctosInternas.reduce((sum, c) => sum + (c.clientes_conectados || 0), 0);
+                        const totalsPorts = aggregateMduPortsFromInternas(ctosInternas);
+                        const totalsColor = getCTOMarkerColor(totalsPorts);
                         
                         ctosListHTML += `
-                          <div style="margin-top: 8px; padding: 8px; background-color: #e8f5e9; border-left: 3px solid #28A745; border-radius: 4px;">
-                            <strong style="color: #1B5E20;">Resumo Total:</strong><br>
-                            <strong>Total de Portas Disponíveis:</strong> ${totalPortasDisponiveis}<br>
-                            <strong>Total de Portas:</strong> ${totalPortasTotais}<br>
-                            <strong>Total de Portas Conectadas:</strong> ${totalPortasConectadas}<br>
+                          <div style="margin-top: 8px; padding: 8px; background-color: ${getOccupancySoftBg(totalsColor)}; border-left: 3px solid ${totalsColor}; border-radius: 4px;">
+                            <strong style="color: #333;">Resumo Total:</strong><br>
+                            <strong>Total de Portas Disponíveis:</strong> ${totalsPorts.portas_disponiveis}<br>
+                            <strong>Total de Portas:</strong> ${totalsPorts.vagas_total}<br>
+                            <strong>Total de Portas Conectadas:</strong> ${totalsPorts.clientes_conectados}<br>
                           </div>
                         `;
                         
@@ -5541,10 +7583,11 @@
                         `;
                       }
                       
+                      const predioOccFallback = getPredioMarkerColors(cto);
                       const updatedContent = `
                         <div style="padding: 12px; font-family: 'Inter', sans-serif; line-height: 1.6; max-width: 350px;">
-                          <div style="background-color: #FFE5E5; padding: 8px; margin-bottom: 12px; border-left: 4px solid #DC3545; border-radius: 4px;">
-                            <strong style="color: #DC3545; font-size: 14px;">🏢 PRÉDIO/CONDOMÍNIO</strong>
+                          <div style="background-color: ${getOccupancySoftBg(predioOccFallback.windowColor)}; padding: 8px; margin-bottom: 12px; border-left: 4px solid ${predioOccFallback.windowColor}; border-radius: 4px;">
+                            <strong style="color: #333; font-size: 14px;">🏢 PRÉDIO/CONDOMÍNIO</strong>
                           </div>
                           <strong>Nome:</strong> ${String(nomePredio)}<br>
                           <strong>Status:</strong> ${String(statusCto)}<br>
@@ -5593,16 +7636,17 @@
 
     const ctoMarkersCount = markers.filter(m => m !== clientMarker).length;
     console.log(`✅ drawRoutesAndMarkers concluído: ${ctoMarkersCount} marcadores criados de ${ctos.length} CTOs`);
+    applyPrediosVisibilityToMap();
 
     if (ctoMarkersCount !== ctos.length) {
       console.warn(`⚠️ ATENÇÃO: Esperado ${ctos.length} marcadores, mas apenas ${ctoMarkersCount} foram criados!`);
       console.log(`📋 CTOs esperadas:`, ctos.map(c => `${c.nome} (${getCTOKey(c)})`));
-      console.log(`📍 Marcadores criados:`, markers.filter(m => m !== clientMarker).map(m => `${m.__ctoKey || 'SEM_CHAVE'}`));
+      console.log(`📍 Marcadores criados:`, markers.filter(m => m !== clientMarker).map(m => `${getMapItemCtoKey(m) || 'SEM_CHAVE'}`));
     }
 
-    // Ajustar zoom para mostrar todos os pontos com padding mínimo para maximizar visibilidade
+    // Ajustar zoom para casinha + CTOs (prédios MDU não entram no enquadramento)
     if (bounds.getNorthEast() && bounds.getSouthWest()) {
-      // Adicionar padding mínimo para garantir que todos os marcadores fiquem visíveis
+      const fitWaitMs = workbenchMode ? 220 : 500;
       map.fitBounds(bounds, {
         top: 40,
         right: 40,
@@ -5610,7 +7654,6 @@
         left: 40
       });
       
-      // Aguardar ajuste do mapa
       await new Promise((resolve) => {
         const boundsListener = google.maps.event.addListener(map, 'bounds_changed', () => {
           google.maps.event.removeListener(boundsListener);
@@ -5619,22 +7662,22 @@
         setTimeout(() => {
           google.maps.event.removeListener(boundsListener);
           resolve();
-        }, 1000);
+        }, fitWaitMs);
       });
       
-      // Verificar se todos os marcadores estão visíveis
       const finalBounds = map.getBounds();
       if (finalBounds) {
         let allMarkersVisible = true;
         
-        // Verificar cliente
         if (!finalBounds.contains(clientCoords)) {
           allMarkersVisible = false;
         }
         
-        // Verificar todas as CTOs
         if (allMarkersVisible) {
           for (const cto of ctos) {
+            if (cto.is_condominio === true) continue;
+            const key = getCTOKey(cto);
+            if (ctoVisibility.get(key) === false) continue;
             if (!finalBounds.contains({ lat: cto.latitude, lng: cto.longitude })) {
               allMarkersVisible = false;
               console.warn(`⚠️ CTO ${cto.nome} não está visível nos bounds finais`);
@@ -5643,7 +7686,6 @@
           }
         }
         
-        // Se algum marcador não está visível, ajustar novamente com mais padding
         if (!allMarkersVisible) {
           map.fitBounds(bounds, {
             top: 60,
@@ -5657,10 +7699,10 @@
               google.maps.event.removeListener(boundsListener);
               resolve();
             });
-    setTimeout(() => {
+            setTimeout(() => {
               google.maps.event.removeListener(boundsListener);
               resolve();
-            }, 1000);
+            }, fitWaitMs);
           });
         }
       }
@@ -5768,225 +7810,588 @@
       throw new Error('Mapa não está pronto para captura');
     }
 
-    try {
-      // Salvar estado atual do mapa
-      const currentCenter = map.getCenter();
-      const currentZoom = map.getZoom();
-
-      // Criar bounds incluindo cliente
-      const bounds = new google.maps.LatLngBounds();
-      bounds.extend(clientCoords);
-
-      // Adicionar todas as CTOs aos bounds (se houver)
-      if (ctos.length > 0) {
-        ctos.forEach(cto => {
-          bounds.extend({ lat: cto.latitude, lng: cto.longitude });
-        });
-      }
-
-      // Usar fitBounds com padding mínimo para maximizar o zoom
-      map.fitBounds(bounds, {
-        top: 15,
-        right: 15,
-        bottom: 15,
-        left: 15
-      });
-
-      // Aguardar o mapa ajustar completamente usando evento idle
-      await new Promise((resolve) => {
+    const waitIdle = (timeoutMs = 350) =>
+      new Promise((resolve) => {
+        if (!google?.maps) {
+          setTimeout(resolve, Math.min(120, timeoutMs));
+          return;
+        }
         const idleListener = google.maps.event.addListener(map, 'idle', () => {
           google.maps.event.removeListener(idleListener);
           resolve();
         });
         setTimeout(() => {
-          google.maps.event.removeListener(idleListener);
-          resolve();
-        }, 2000);
-      });
-
-      // Aguardar um pouco mais para garantir estabilidade
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Agora aumentar o zoom gradualmente até encontrar o máximo que ainda mostra tudo
-      let currentZoomLevel = map.getZoom();
-      let bestZoom = currentZoomLevel;
-
-      // Tentar aumentar o zoom gradualmente (máximo até zoom 20 para mais detalhes)
-      for (let testZoom = currentZoomLevel + 1; testZoom <= 20; testZoom++) {
-        map.setZoom(testZoom);
-        
-        // Aguardar evento idle após cada mudança de zoom
-        await new Promise((resolve) => {
-          const idleListener = google.maps.event.addListener(map, 'idle', () => {
+          try {
             google.maps.event.removeListener(idleListener);
-            resolve();
-          });
-          setTimeout(() => {
-            google.maps.event.removeListener(idleListener);
-            resolve();
-          }, 800);
-        });
-
-        // Verificar se todas as CTOs e o cliente ainda estão visíveis
-        const testBounds = map.getBounds();
-        if (!testBounds) {
-          break;
-        }
-
-        let allVisible = testBounds.contains(clientCoords);
-        
-        // Verificar todas as CTOs (se houver)
-        if (allVisible && ctos.length > 0) {
-          for (const cto of ctos) {
-            if (!testBounds.contains({ lat: cto.latitude, lng: cto.longitude })) {
-              allVisible = false;
-              break;
-            }
+          } catch (_) {
+            /* ignore */
           }
-        }
-
-        if (allVisible) {
-          bestZoom = testZoom;
-        } else {
-          // Se não está mais visível, usar o último zoom válido
-          break;
-        }
-      }
-
-      // Aplicar o melhor zoom encontrado
-      map.setZoom(bestZoom);
-      
-      // Aguardar estabilização final
-      await new Promise((resolve) => {
-        const idleListener = google.maps.event.addListener(map, 'idle', () => {
-          google.maps.event.removeListener(idleListener);
           resolve();
-        });
-        setTimeout(() => {
-          google.maps.event.removeListener(idleListener);
-          resolve();
-        }, 1500);
+        }, timeoutMs);
       });
 
-      // Verificação final: garantir que tudo está visível
-      const finalBounds = map.getBounds();
-      if (finalBounds) {
-        let finalAllVisible = finalBounds.contains(clientCoords);
-        if (finalAllVisible) {
-          for (const cto of ctos) {
-            if (!finalBounds.contains({ lat: cto.latitude, lng: cto.longitude })) {
-              finalAllVisible = false;
-        break;
+    const pointsVisible = (viewBounds, points) => {
+      if (!viewBounds) return false;
+      for (const p of points) {
+        if (!viewBounds.contains(p)) return false;
       }
-    }
-  }
+      return true;
+    };
 
-        // Se algo não está visível, reduzir zoom um nível (mas manter zoom alto se possível)
-        if (!finalAllVisible && bestZoom > 16) {
-          map.setZoom(bestZoom - 1);
-          await new Promise((resolve) => {
-            const idleListener = google.maps.event.addListener(map, 'idle', () => {
-              google.maps.event.removeListener(idleListener);
-              resolve();
-            });
-            setTimeout(() => {
-              google.maps.event.removeListener(idleListener);
-              resolve();
-            }, 1000);
-          });
+    let hiddenIwDom = [];
+    try {
+      // Garante que o box do endereço/CTOs não aparece no print
+      hiddenIwDom = closeMapInfoWindowsForCapture({ hideDom: true });
+
+      // Zoom do print: só casinha + CTOs de rua (prédios NÃO entram no enquadramento).
+      // Se "visualizar condomínios" estiver ativo, os prédios continuam no mapa e saem no print
+      // (podem ficar cortados — isso é intencional).
+      const capturePoints = [clientCoords];
+      const pushCto = (cto) => {
+        if (!cto || cto.is_condominio === true) return;
+        const key = getCTOKey(cto);
+        if (key && ctoVisibility.get(key) === false) return;
+        const lat = Number(cto.latitude);
+        const lng = Number(cto.longitude);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        capturePoints.push({ lat, lng });
+      };
+      (ctos || []).forEach(pushCto);
+      if (nearestCTOOutsideLimit) pushCto(nearestCTOOutsideLimit);
+
+      // Garante estado atual dos prédios no mapa (visível ou oculto conforme o toggle)
+      applyPrediosVisibilityToMap();
+
+      const bounds = new google.maps.LatLngBounds();
+      capturePoints.forEach((p) => bounds.extend(p));
+
+      const fitPad = workbenchMode
+        ? { top: 40, right: 40, bottom: 40, left: 40 }
+        : { top: 24, right: 24, bottom: 24, left: 24 };
+
+      map.fitBounds(bounds, fitPad);
+      await waitIdle(450);
+
+      let zoom = map.getZoom();
+      if (!Number.isFinite(zoom)) zoom = 17;
+      if (zoom > 19) {
+        map.setZoom(19);
+        await waitIdle(220);
+        zoom = map.getZoom();
+      }
+
+      // Tenta aproximar 1 nível se casinha+CTOs ainda couberem (sem loop longo)
+      const tryZoom = (map.getZoom() || zoom) + 1;
+      if (tryZoom <= 19) {
+        map.setZoom(tryZoom);
+        await waitIdle(200);
+        if (!pointsVisible(map.getBounds(), capturePoints)) {
+          map.setZoom(tryZoom - 1);
+          await waitIdle(160);
         }
       }
 
-      // Aguardar estabilidade final antes de capturar (reduzido)
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Aguardar evento idle do mapa para garantir renderização
-      await new Promise((resolve) => {
-        const idleListener = google.maps.event.addListener(map, 'idle', () => {
-          google.maps.event.removeListener(idleListener);
-          resolve();
-        });
-        setTimeout(() => {
-          google.maps.event.removeListener(idleListener);
-          resolve();
-        }, 1000);
-      });
+      // Fecha InfoWindows e NÃO restaura o DOM até depois do html2canvas
+      // (restaurar no meio reexibia o box da CTO no print)
+      hiddenIwDom = closeMapInfoWindowsForCapture({ hideDom: true });
+      await new Promise((r) => requestAnimationFrame(r));
+      // Segunda passada: Google pode recriar o nó no idle do fitBounds
+      hiddenIwDom = [...hiddenIwDom, ...closeMapInfoWindowsForCapture({ hideDom: true })];
+      await new Promise((r) => setTimeout(r, 50));
 
       const mapElement = getMapElement();
       if (!mapElement) {
         throw new Error('Elemento do mapa não encontrado');
       }
-      
-      // Garantir que o elemento está visível
+
+      mapElement.classList.add('capturing-map-print');
       mapElement.style.visibility = 'visible';
       mapElement.style.opacity = '1';
       mapElement.style.display = 'block';
-      
-      // Aguardar alguns frames após ajustar estilos
-      for (let i = 0; i < 3; i++) {
-        await new Promise(resolve => requestAnimationFrame(resolve));
-        void mapElement.offsetHeight;
-      }
-      
-      // Capturar usando html2canvas com configurações otimizadas
-      
+
       const canvas = await html2canvas(mapElement, {
         useCORS: true,
         allowTaint: false,
-        backgroundColor: '#ffffff', // Branco para evitar fundo cinza
-        scale: 2,
+        backgroundColor: '#ffffff',
+        scale: workbenchMode ? 1.35 : 1.5,
         logging: false,
-        timeout: 20000,
-        imageTimeout: 10000,
+        timeout: 8000,
+        imageTimeout: 4000,
         removeContainer: true,
         foreignObjectRendering: false,
-        onclone: (clonedDoc, clonedWindow) => {
-          // Garantir que o body e html tenham fundo branco
+        ignoreElements: (el) => isGoogleInfoWindowNode(el),
+        onclone: (clonedDoc) => {
           if (clonedDoc.body) {
             clonedDoc.body.style.background = '#ffffff';
             clonedDoc.body.style.backgroundColor = '#ffffff';
           }
-          if (clonedDoc.documentElement) {
-            clonedDoc.documentElement.style.background = '#ffffff';
-            clonedDoc.documentElement.style.backgroundColor = '#ffffff';
-          }
-          
           const clonedMap = clonedDoc.getElementById(mapDomId);
           if (clonedMap) {
             clonedMap.style.visibility = 'visible';
             clonedMap.style.opacity = '1';
             clonedMap.style.display = 'block';
-            clonedMap.style.transform = 'none';
-            clonedMap.style.position = 'relative';
-            clonedMap.style.overflow = 'visible';
             clonedMap.style.background = '#ffffff';
-            clonedMap.style.backgroundColor = '#ffffff';
-            
-            // Remover qualquer overlay ou elemento que possa causar problemas
-            const allElements = clonedMap.querySelectorAll('*');
-            allElements.forEach((el) => {
-              if (el.style) {
-                // Remover backgrounds cinzas ou semi-transparentes
-                const bg = el.style.background || el.style.backgroundColor;
-                if (bg && (bg.includes('rgba') || bg.includes('rgb') || bg.includes('#f5f5f5') || bg.includes('#f0f0f0') || bg.includes('#e5e5e5'))) {
-                  el.style.background = 'transparent';
-                  el.style.backgroundColor = 'transparent';
-                }
-                // Garantir que elementos estão visíveis
-                el.style.visibility = 'visible';
-                el.style.opacity = '1';
+          }
+          // Remove InfoWindows do clone (casinha + CTO) — não basta display:none
+          clonedDoc
+            .querySelectorAll?.(
+              '.gm-style-iw-a, .gm-style-iw-t, .gm-style-iw-tc, .gm-style-iw, .gm-style-iw-c, .gm-style-iw-d, .gm-style-iw-chr'
+            )
+            ?.forEach((el) => {
+              try {
+                el.remove();
+              } catch (_) {
+                el.style.display = 'none';
+                el.style.visibility = 'hidden';
+                el.style.opacity = '0';
               }
             });
-          }
         }
       });
 
-      // Converter para base64 com qualidade máxima
-      const imageData = canvas.toDataURL('image/png', 1.0);
-      return imageData;
+      return canvas.toDataURL('image/jpeg', 0.88);
     } catch (err) {
       console.error('Erro ao capturar mapa:', err);
       throw err;
+    } finally {
+      try {
+        getMapElement()?.classList?.remove('capturing-map-print');
+      } catch (_) {
+        /* ignore */
+      }
+      restoreHiddenInfoWindowDom(hiddenIwDom);
+      // prediosVisibleOnMap não é alterado na captura — só reaplica por segurança
+      applyPrediosVisibilityToMap();
+    }
+  }
+
+  /** Aguarda idle do Google Maps (uso interno workbench). */
+  async function waitMapIdleWorkbench(timeoutMs = 2000) {
+    if (!map || !google?.maps) {
+      await new Promise((r) => setTimeout(r, 300));
+      return;
+    }
+    await new Promise((resolve) => {
+      const idleListener = google.maps.event.addListener(map, 'idle', () => {
+        google.maps.event.removeListener(idleListener);
+        resolve();
+      });
+      setTimeout(() => {
+        try {
+          google.maps.event.removeListener(idleListener);
+        } catch {
+          // ignore
+        }
+        resolve();
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * WORKBENCH ONLY — igual Viabilidade oficial:
+   * o box "Preencher Relatório" permanece aberto; o mapa ajusta/captura por trás.
+   * Captura em landscape (sem esticar); o estágio preenche a tela para não sobrar faixa vazia.
+   */
+  async function captureMapForWorkbench() {
+    if (!map || !clientCoords) {
+      throw new Error('Mapa não está pronto para captura');
+    }
+
+    const mapEl = getMapElement();
+    if (!mapEl) {
+      throw new Error('Elemento do mapa não encontrado');
+    }
+
+    const mapContainer = mapEl.closest('.map-container') || mapEl.parentElement;
+    const mainArea = mapEl.closest('.main-area');
+    const prevCenter = map.getCenter()
+      ? { lat: map.getCenter().lat(), lng: map.getCenter().lng() }
+      : null;
+    const prevZoom = map.getZoom();
+
+    // Só esconde o box Localizar — o modal do relatório fica aberto (por cima)
+    const searchBoxes = Array.from(document.querySelectorAll('.wb-map-search-box'));
+    const searchPrev = searchBoxes.map((el) => ({
+      el,
+      visibility: el.style.visibility,
+      pointerEvents: el.style.pointerEvents
+    }));
+    searchBoxes.forEach((el) => {
+      el.style.visibility = 'hidden';
+      el.style.pointerEvents = 'none';
+    });
+
+    // Garante modal acima do mapa durante o ajuste/captura
+    const overlays = Array.from(document.querySelectorAll('.wb-modal-overlay'));
+    const overlayPrev = overlays.map((el) => ({
+      el,
+      zIndex: el.style.zIndex,
+      visibility: el.style.visibility,
+      opacity: el.style.opacity
+    }));
+    overlays.forEach((el) => {
+      el.style.visibility = 'visible';
+      el.style.opacity = '1';
+      el.style.zIndex = '2147483646';
+    });
+
+    // Estágio = tela cheia (sem faixa em branco). Mapa = landscape ~16:9 (print sem esticar).
+    const viewW = Math.max(640, Math.floor(window.innerWidth || 900));
+    const viewH = Math.max(400, Math.floor(window.innerHeight || 560));
+    const captureW = viewW;
+    const captureH = Math.max(360, Math.min(viewH, Math.round(captureW * 0.56)));
+
+    const styled = [];
+    const saveStyle = (el) => {
+      if (!el) return;
+      styled.push({ el, cssText: el.getAttribute('style') || '' });
+    };
+    const setBox = (el, w, h, extra = {}) => {
+      if (!el) return;
+      saveStyle(el);
+      Object.entries(extra).forEach(([k, v]) => el.style.setProperty(k, v, 'important'));
+      el.style.setProperty('width', `${w}px`, 'important');
+      el.style.setProperty('height', `${h}px`, 'important');
+      el.style.setProperty('min-width', `${w}px`, 'important');
+      el.style.setProperty('min-height', `${h}px`, 'important');
+      el.style.setProperty('max-width', 'none', 'important');
+      el.style.setProperty('max-height', 'none', 'important');
+      el.style.setProperty('flex', 'none', 'important');
+      el.style.setProperty('overflow', 'hidden', 'important');
+      el.style.setProperty('visibility', 'visible', 'important');
+      el.style.setProperty('opacity', '1', 'important');
+      el.style.setProperty('display', 'block', 'important');
+      el.style.setProperty('background', '#ffffff', 'important');
+      el.style.setProperty('transform', 'none', 'important');
+    };
+
+    const mapHost =
+      mapEl.closest('.wb-map-host') ||
+      mapEl.closest('.wb-map-pane') ||
+      mapEl.closest('.viabilidade-content');
+
+    // Fundo cobre a tela toda (atrás do box)
+    setBox(mapHost, viewW, viewH, {
+      position: 'fixed',
+      left: '0',
+      top: '0',
+      right: '0',
+      bottom: '0',
+      'z-index': '5000'
+    });
+    setBox(mainArea, viewW, viewH, {
+      position: 'relative',
+      left: '0',
+      top: '0',
+      'z-index': '1'
+    });
+
+    // Mapa landscape centralizado — mesma proporção da captura oficial
+    const mapLeft = Math.max(0, Math.round((viewW - captureW) / 2));
+    const mapTop = Math.max(0, Math.round((viewH - captureH) / 2));
+    setBox(mapContainer, captureW, captureH, {
+      position: 'absolute',
+      left: `${mapLeft}px`,
+      top: `${mapTop}px`,
+      right: 'auto',
+      bottom: 'auto',
+      margin: '0'
+    });
+    setBox(mapEl, captureW, captureH, {
+      position: 'relative',
+      left: '0',
+      top: '0',
+      margin: '0'
+    });
+
+    try {
+      google.maps.event.trigger(map, 'resize');
+      await waitMapIdleWorkbench(280);
+      await new Promise((r) => setTimeout(r, 40));
+
+      if (mapEl.clientWidth > 0 && mapEl.clientHeight > 0) {
+        google.maps.event.trigger(map, 'resize');
+        await waitMapIdleWorkbench(220);
+      }
+
+      const imageData = await captureMapAutomatically();
+      if (!imageData || imageData.length < 1000) {
+        throw new Error('Captura do mapa retornou imagem vazia');
+      }
+      return imageData;
+    } finally {
+      for (const { el, cssText } of styled.reverse()) {
+        if (cssText) el.setAttribute('style', cssText);
+        else el.removeAttribute('style');
+      }
+
+      searchPrev.forEach(({ el, visibility, pointerEvents }) => {
+        el.style.visibility = visibility;
+        el.style.pointerEvents = pointerEvents;
+      });
+      overlayPrev.forEach(({ el, zIndex, visibility, opacity }) => {
+        el.style.zIndex = zIndex;
+        el.style.visibility = visibility;
+        el.style.opacity = opacity;
+      });
+
+      await tick();
+      google.maps.event.trigger(map, 'resize');
+      if (prevCenter) map.setCenter(prevCenter);
+      if (prevZoom != null) map.setZoom(prevZoom);
+      await waitMapIdleWorkbench(200);
+    }
+  }
+
+  function notifyMapPreviewChange(capturing, image = '') {
+    if (!workbenchMode || typeof onMapPreviewChange !== 'function') return;
+    try {
+      onMapPreviewChange({ capturing: !!capturing, image: image || '' });
+    } catch (err) {
+      console.warn('[Workbench] onMapPreviewChange:', err);
+    }
+  }
+
+  /** Workbench: captura sob demanda (botão Gerar Relatório). Não agenda mais sozinha. */
+  function scheduleWorkbenchMapPreview() {
+    // Mantida por compatibilidade — captura automática desligada no workbench.
+    // O print/prévia inicia só em generateWorkbenchReport / refreshWorkbenchMapPreview.
+    if (!workbenchMode) return;
+  }
+
+  /**
+   * WORKBENCH ONLY — limpa mapa/pesquisa ao voltar da Agenda (Fechar no detalhe).
+   */
+  export function clearWorkbenchMap() {
+    if (!workbenchMode) return;
+    try {
+      clearMap();
+    } catch {
+      /* ignore */
+    }
+    addressInput = '';
+    clientAddressData = {
+      cidade: '',
+      enderecoCompleto: '',
+      numero: '',
+      cep: ''
+    };
+    mapPreviewImage = '';
+    capturingMap = false;
+    notifyMapPreviewChange(false, '');
+    if (typeof onEquipamentosChange === 'function') {
+      try {
+        onEquipamentosChange({ items: [] });
+      } catch {
+        /* ignore */
+      }
+    }
+    requestAnimationFrame(() => {
+      try {
+        if (map && typeof google !== 'undefined') {
+          google.maps.event.trigger(map, 'resize');
+        }
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
+  /**
+   * WORKBENCH ONLY — captura prévia do mapa (mesmo método do PDF).
+   * Não altera openReportModal / captureMapAutomatically do standalone.
+   */
+  export async function refreshWorkbenchMapPreview() {
+    if (!workbenchMode) return null;
+    if (!map || !clientCoords) {
+      notifyMapPreviewChange(false, '');
+      throw new Error('Localize um endereço no mapa antes de gerar o relatório.');
+    }
+
+    const token = ++workbenchPreviewToken;
+    capturingMap = true;
+    mapPreviewImage = '';
+    notifyMapPreviewChange(true, '');
+
+    if (clientInfoWindow) {
+      try {
+        clientInfoWindow.close();
+      } catch {
+        // ignore
+      }
+    }
+
+    try {
+      const image = await captureMapForWorkbench();
+      if (token !== workbenchPreviewToken) return null;
+      if (!image) {
+        throw new Error('Captura do mapa retornou vazia.');
+      }
+      mapPreviewImage = image;
+      notifyMapPreviewChange(false, image);
+      return image;
+    } catch (err) {
+      console.warn('[Workbench] Prévia do mapa:', err);
+      if (token === workbenchPreviewToken) {
+        mapPreviewImage = '';
+        notifyMapPreviewChange(false, '');
+      }
+      throw err instanceof Error ? err : new Error(String(err?.message || err));
+    } finally {
+      if (token === workbenchPreviewToken) {
+        capturingMap = false;
+      }
+    }
+  }
+
+  /**
+   * WORKBENCH ONLY — botão Localizar do overlay no mapa.
+   * Geocodifica o endereço e busca CTOs (mesmo fluxo da busca por endereço).
+   */
+  export async function searchWorkbenchAddress(address = '') {
+    if (!workbenchMode) {
+      throw new Error('searchWorkbenchAddress só está disponível no Workbench');
+    }
+    const text = String(address || '').trim();
+    if (!text) {
+      throw new Error('Informe um endereço para localizar.');
+    }
+    // Aguarda o mapa (duplo clique / sync manual pode chegar cedo)
+    const start = Date.now();
+    while ((!map || !googleMapsLoaded) && Date.now() - start < 8000) {
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    if (!map || !googleMapsLoaded) {
+      throw new Error('Aguarde o mapa carregar e tente de novo.');
+    }
+
+    searchMode = 'address';
+    addressInput = text;
+    lastWorkbenchLocKey = `a:${text.toLowerCase()}`;
+
+    await tick();
+    await searchClientLocation();
+    if (workbenchMode) {
+      emitForaLimiteChange();
+    }
+    if (map && google?.maps) {
+      try {
+        google.maps.event.trigger(map, 'resize');
+      } catch {
+        // ignore
+      }
+    }
+    // Garante retorno do endereço encontrado no pin (já feito em searchClientLocation no workbench)
+    return clientAddressData?.enderecoCompleto ? { ...clientAddressData } : null;
+  }
+
+  /**
+   * WORKBENCH ONLY — reverse geocode do pin atual para preencher o relatório.
+   */
+  export async function syncWorkbenchAddressFromMap() {
+    if (!workbenchMode) return null;
+    if (!clientCoords) return null;
+    return resolveClientAddressFromPin(clientCoords.lat, clientCoords.lng);
+  }
+
+  /**
+   * WORKBENCH ONLY — chamado pelo CensupWorkbench (botão Informações).
+   * Prefill com dados do formulário, usa prévia já capturada (ou captura) e gera o PDF.
+   * Não altera openReportModal() / exportToPDF() usados na ferramenta standalone.
+   */
+  export async function generateWorkbenchReport(formData = {}) {
+    if (!workbenchMode) {
+      throw new Error('generateWorkbenchReport só está disponível no Workbench');
+    }
+    if (generatingPDF) {
+      throw new Error('Já existe um relatório sendo gerado. Aguarde.');
+    }
+    if (!map || !clientCoords) {
+      throw new Error('Aguarde o mapa localizar o endereço do chamado.');
+    }
+
+    const alaDigits = String(formData.numeroALA || '').replace(/\D/g, '');
+    reportForm.numeroALA = alaDigits ? `ALA-${alaDigits}` : '';
+
+    // Relatório = endereço do PIN (mapa), não o texto antigo da Agenda
+    let pinAddress = null;
+    try {
+      pinAddress = await resolveClientAddressFromPin(
+        clientCoords?.lat,
+        clientCoords?.lng
+      );
+    } catch (_) {
+      pinAddress = clientAddressData?.enderecoCompleto ? { ...clientAddressData } : null;
+    }
+    reportForm.cidade = String(pinAddress?.cidade || formData.cidade || '').trim();
+    reportForm.enderecoCompleto = String(
+      pinAddress?.enderecoCompleto || formData.enderecoCompleto || ''
+    ).trim();
+    reportForm.numeroEndereco = String(
+      pinAddress?.numero || formData.numeroEndereco || ''
+    ).trim();
+    reportForm.cep = String(pinAddress?.cep || formData.cep || '').trim();
+    reportForm.tabulacaoFinal = String(formData.tabulacaoFinal || '').trim();
+    reportForm.projetista = String(formData.projetista || currentUser || '').trim();
+    reportFormErrors = {};
+    error = null;
+
+    if (clientInfoWindow) {
+      try {
+        clientInfoWindow.close();
+      } catch {
+        // ignore
+      }
+    }
+
+    try {
+      // Usa prévia já capturada (abrir modal / formData); só captura se ainda não houver
+      const passedPreview = String(formData.previewImage || formData.mapPreviewImage || '').trim();
+      if (passedPreview) {
+        mapPreviewImage = passedPreview;
+      }
+      if (!mapPreviewImage) {
+        capturingMap = true;
+        notifyMapPreviewChange(true, '');
+        try {
+          mapPreviewImage = await captureMapForWorkbench();
+          notifyMapPreviewChange(false, mapPreviewImage);
+        } finally {
+          capturingMap = false;
+        }
+      }
+
+      if (!mapPreviewImage) {
+        throw new Error('Não foi possível capturar a prévia do mapa. Aguarde o mapa carregar e tente de novo.');
+      }
+
+      if (!validateReportForm()) {
+        const missing = getMissingRequiredFields();
+        throw new Error(
+          missing.length
+            ? `Preencha os campos obrigatórios: ${missing.join(', ')}`
+            : 'Preencha os campos obrigatórios antes de gerar o PDF.'
+        );
+      }
+
+      const exportResult = await exportToPDF({
+        skipPrint: formData?.skipPrint === true
+      });
+
+      if (!formData?.skipPrint && showPopupInstructions) {
+        throw new Error('Pop-up bloqueado. Permita pop-ups para este site e tente de novo.');
+      }
+
+      return {
+        success: true,
+        preview: mapPreviewImage,
+        viAla: currentVIALA || exportResult?.viAla || null,
+        htmlContent: exportResult?.htmlContent || null,
+        pdfFileName: exportResult?.pdfFileName || null,
+        geradoEm: exportResult?.geradoEm || null
+      };
+    } finally {
+      capturingMap = false;
     }
   }
 
@@ -6141,7 +8546,11 @@
     showPopupInstructions = false; // Limpar instruções ao fechar modal
   }
 
-  async function exportToPDF() {
+  async function exportToPDF(options = {}) {
+    const skipPrint = options?.skipPrint === true;
+    if (generatingPDF) {
+      return;
+    }
     if (!validateReportForm()) {
         return;
       }
@@ -6159,6 +8568,7 @@
       const now = new Date();
       const dateStr = now.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
       const timeStr = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const geradoEm = now.toISOString();
       const horaFormatada = `${timeStr}h`;
       const dataHoraLegivel = `${dateStr} ${timeStr}`;
 
@@ -6218,30 +8628,69 @@
         viAla: currentVIALA
       });
 
-      // Buscar data de atualização da base (opcional, não bloqueia)
+      // Buscar data de atualização da base (fresca do Supabase primary — igual oficial)
       let baseLastModifiedText = '';
       try {
-        const savedLastModified = localStorage.getItem('baseLastModified');
-        if (savedLastModified) {
-          const lastModified = new Date(savedLastModified);
-          baseLastModifiedText = lastModified.toLocaleDateString('pt-BR', { 
-            day: '2-digit', month: '2-digit', year: 'numeric'
-          }) + ' - ' + lastModified.toLocaleTimeString('pt-BR', {
-            hour: '2-digit', minute: '2-digit'
-          });
-        }
-      } catch (err) {}
-      
-      fetch(getApiUrl('/api/base-last-modified'))
-        .then(res => res.json())
-        .then(data => {
-          if (data.success && data.lastModified) {
-            localStorage.setItem('baseLastModified', data.lastModified);
+        const baseRes = await fetch(getApiUrl('/api/base-last-modified'), { cache: 'no-store' });
+        const baseData = await baseRes.json();
+        if (baseData?.success && baseData.lastModified) {
+          try {
+            localStorage.setItem('baseLastModified', baseData.lastModified);
+          } catch {
+            // ignore
           }
-        })
-        .catch(() => {});
+          const lastModified = new Date(baseData.lastModified);
+          if (!Number.isNaN(lastModified.getTime())) {
+            baseLastModifiedText =
+              lastModified.toLocaleDateString('pt-BR', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric'
+              }) +
+              ' - ' +
+              lastModified.toLocaleTimeString('pt-BR', {
+                hour: '2-digit',
+                minute: '2-digit'
+              });
+          }
+        }
+      } catch (err) {
+        console.warn('[PDF] Falha ao buscar lastModified da API:', err);
+      }
+      // Só usa localStorage se a API falhar de verdade (não sobrescreve data fresca)
+      if (!baseLastModifiedText) {
+        try {
+          const savedLastModified = localStorage.getItem('baseLastModified');
+          if (savedLastModified) {
+            const lastModified = new Date(savedLastModified);
+            if (!Number.isNaN(lastModified.getTime())) {
+              baseLastModifiedText =
+                lastModified.toLocaleDateString('pt-BR', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric'
+                }) +
+                ' - ' +
+                lastModified.toLocaleTimeString('pt-BR', {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                });
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
       
       console.log('Dados preparados, criando HTML do PDF...');
+
+      const formatCepPdf = (cep) => {
+        let digits = String(cep || '').replace(/\D/g, '');
+        if (digits.length > 8) digits = digits.slice(0, 8);
+        if (digits.length === 8) return `${digits.slice(0, 5)}-${digits.slice(5)}`;
+        return String(cep || '').trim();
+      };
+      const cepPdf = formatCepPdf(reportForm.cep);
 
       // Criar nome do arquivo PDF com VI ALA no formato: "VI ALA - XXXXXXX - ALA-15002 - Engenharia.pdf"
       let pdfFileName = '';
@@ -6384,7 +8833,7 @@
                 flex-direction: column; 
                 background: transparent !important;
                 min-height: 0;
-                align-items: center;
+                align-items: stretch;
                 position: relative;
                 z-index: 1;
               }
@@ -6401,15 +8850,17 @@
                 line-height: 1.3;
               }
               .map-wrapper {
-                display: inline-flex;
+                display: flex;
                 flex-direction: column;
-                align-items: center;
-                width: auto;
+                align-items: stretch;
+                justify-content: center;
+                width: 100%;
                 max-width: 100%;
+                flex: 1;
               }
               .map-image-container { 
-                display: inline-block;
-                width: auto;
+                display: block;
+                width: 100%;
                 max-width: 100%;
                 position: relative; 
                 background: transparent !important; 
@@ -6426,11 +8877,11 @@
               }
               .map-image { 
                 display: block; 
-                width: auto;
+                width: 100%;
                 height: auto;
                 max-width: 100%;
-                max-height: 320px;
                 object-fit: contain;
+                object-position: center;
                 box-shadow: none; 
                 background: transparent !important; 
                 opacity: 1 !important; 
@@ -6560,8 +9011,8 @@
                   line-height: 1.3 !important;
                 }
                 .map-image-container {
-                  display: inline-block !important;
-                  width: auto !important;
+                  display: block !important;
+                  width: 100% !important;
                   max-width: 100% !important;
                   height: auto !important;
                   background: transparent !important;
@@ -6570,11 +9021,12 @@
                 }
                 .map-image { 
                   display: block !important;
-                  width: auto !important;
+                  width: 100% !important;
                   height: auto !important;
                   max-width: 100% !important;
-                  max-height: 320px !important;
+                  max-height: none !important;
                   object-fit: contain !important;
+                  object-position: center !important;
                   margin: 0 !important;
                   padding: 0 !important;
                   page-break-inside: avoid; 
@@ -6847,7 +9299,7 @@
                   </div>
                   <div class="report-info-item">
                     <span class="report-info-label">CEP do Endereço</span>
-                    <span class="report-info-value">${reportForm.cep}</span>
+                    <span class="report-info-value">${cepPdf}</span>
                   </div>
                   ${clientCoords ? `
                   <div class="report-info-item">
@@ -6866,7 +9318,7 @@
                 </div>
                 <div class="summary-stats">
                   ${totalEquipamentosTexto}
-                  <p><strong>Total de Portas Disponíveis:</strong> <span style="font-weight: bold; color: #000000;">${ctosRuaReport.reduce((sum, cto) => sum + (cto.vagas_total - cto.clientes_conectados), 0)}</span> <strong style="font-weight: bold; color: #000000;">portas</strong></p>
+                  <p><strong>Total de Portas Disponíveis:</strong> <span style="font-weight: bold; color: #000000;">${ctosRuaReport.reduce((sum, cto) => sum + ctoPortasDisponiveis(cto), 0)}</span> <strong style="font-weight: bold; color: #000000;">portas</strong></p>
                 </div>
               </div>
               ${mapImageData ? `
@@ -6902,7 +9354,8 @@
 
       // ctosRuaReport já foi definido acima (antes do htmlContent)
       ctosRuaReport.forEach((cto, index) => {
-        const portasDisponiveis = cto.vagas_total - cto.clientes_conectados;
+        const ports = normalizeCtoPortCounts(cto);
+        const portasDisponiveis = ports.vagas_total - ports.clientes_conectados;
         const semPortas = portasDisponiveis === 0;
         const styleColor = semPortas ? ' style="color: #F44336;"' : '';
         htmlContent += `
@@ -6912,9 +9365,9 @@
             <td${styleColor}>${cto.pop}</td>
             <td${styleColor}>${cto.nome}</td>
             <td${styleColor}>${cto.id}</td>
-            <td${styleColor}>${cto.vagas_total}</td>
-            <td${styleColor}>${cto.clientes_conectados}</td>
-            <td${styleColor}>${cto.vagas_total - cto.clientes_conectados}</td>
+            <td${styleColor}>${ports.vagas_total}</td>
+            <td${styleColor}>${ports.clientes_conectados}</td>
+            <td${styleColor}>${portasDisponiveis}</td>
             <td${styleColor}>${cto.distancia_metros}m (${cto.distancia_km}km)</td>
           </tr>
         `;
@@ -6931,6 +9384,19 @@
 
       console.log('HTML do PDF criado com sucesso, tamanho:', htmlContent.length, 'caracteres');
 
+      // Só monta HTML (Salvar PDF / backup SharePoint) — sem abrir impressão
+      if (skipPrint) {
+        generatingPDF = false;
+        return {
+          htmlContent,
+          viAla: currentVIALA,
+          printed: false,
+          geradoEm,
+          pdfFileName,
+          skipPrint: true
+        };
+      }
+
       // Criar nova janela para abrir PDF em nova aba
       console.log('Abrindo janela de impressão em nova aba...');
       const printWindow = window.open('', '_blank');
@@ -6941,7 +9407,7 @@
         generatingPDF = false;
         showPopupInstructions = true; // Mostrar instruções sobreposta ao modal
         error = null; // Limpar erro anterior para mostrar instruções
-        return;
+        return { htmlContent, viAla: currentVIALA, printed: false, geradoEm, pdfFileName };
       }
       
       console.log('Janela de impressão aberta com sucesso');
@@ -7117,6 +9583,8 @@
         }
       }, 8000);
 
+      return { htmlContent, viAla: currentVIALA, printed: true, geradoEm, pdfFileName };
+
     } catch (err) {
       console.error('Erro na geração de PDF:', err);
       generatingPDF = false;
@@ -7129,6 +9597,7 @@
       } else {
         error = 'Erro ao registrar VI ALA / exportar PDF: ' + err.message;
       }
+      return null;
     }
   }
 
@@ -7136,12 +9605,12 @@
 
 <!-- Tela de Loading -->
 {#if isLoading}
-  <div class="loading-fullscreen" class:embedded class:theme-dark={isDarkTheme}>
+  <div class="loading-fullscreen" class:embedded class:workbench-mode={workbenchMode} class:theme-dark={isDarkTheme}>
     <Loading currentMessage={loadingMessage} />
   </div>
 {:else}
 <!-- Conteúdo da Ferramenta de Viabilidade -->
-<div class="viabilidade-content" class:embedded class:theme-dark={isDarkTheme}>
+<div class="viabilidade-content" class:embedded class:workbench-mode={workbenchMode} class:theme-dark={isDarkTheme} class:wb-streetview-open={workbenchMode && wbStreetViewOpen}>
   <div class="main-layout">
     <!-- Painel de Busca -->
     <aside class="search-panel" class:minimized={isSearchPanelMinimized} style="width: {isSearchPanelMinimized ? '60px' : sidebarWidthStyle} !important; flex: 0 0 auto;">
@@ -7434,7 +9903,7 @@
               {/if}
             </div>
 
-            {@const totalPortasDisponiveis = ctosRua.reduce((sum, cto) => sum + ((cto.vagas_total || 0) - (cto.clientes_conectados || 0)), 0)}
+            {@const totalPortasDisponiveis = ctosRua.reduce((sum, cto) => sum + ctoPortasDisponiveis(cto), 0)}
             <div class="results-info">
               <p>
                 <strong>{totalPortasDisponiveis}</strong> 
@@ -7509,7 +9978,12 @@
     <!-- Área Principal (Mapa e Lista) -->
     <main class="main-area">
       <!-- Mapa -->
-      <div class="map-container" class:minimized={isMapMinimized} style={mapContainerStyle}>
+      <div
+        class="map-container"
+        class:minimized={isMapMinimized}
+        class:wb-pegman-drag-active={workbenchMode && wbPegmanDragging}
+        style={mapContainerStyle}
+      >
         <div class="map-header">
           <h3>Mapa</h3>
           <button 
@@ -7574,6 +10048,126 @@
           </button>
         </div>
         <div id={mapDomId} class="map" class:hidden={isMapMinimized}></div>
+
+        {#if workbenchMode && !isMapMinimized}
+          <div class="wb-map-controls" aria-label="Controles do mapa">
+            <div
+              class="wb-map-type"
+              class:wb-map-type-hidden={wbStreetViewOpen}
+              role="group"
+              aria-label="Tipo de mapa"
+              aria-hidden={wbStreetViewOpen}
+            >
+              <button
+                type="button"
+                class="wb-map-type-btn"
+                class:active={wbMapType === 'roadmap'}
+                on:click={() => setWorkbenchMapType('roadmap')}
+              >Mapa</button>
+              <button
+                type="button"
+                class="wb-map-type-btn"
+                class:active={wbMapType === 'satellite'}
+                on:click={() => setWorkbenchMapType('satellite')}
+              >Satélite</button>
+            </div>
+
+            <div
+              class="wb-map-tools"
+              class:wb-map-tools-hidden={wbStreetViewOpen}
+              aria-hidden={wbStreetViewOpen}
+            >
+              {#if !wbStreetViewOpen}
+              {#if typeof onEquipListToggle === 'function'}
+                <button
+                  type="button"
+                  class="wb-map-tool-btn wb-equip-list-btn"
+                  class:active={equipListOpen}
+                  on:click={() => onEquipListToggle()}
+                  title={equipListOpen ? 'Fechar lista de equipamentos' : 'Lista de equipamentos'}
+                  aria-label="Lista de equipamentos"
+                  aria-pressed={equipListOpen}
+                >
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                    <path fill="currentColor" d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h10v2H4v-2z"/>
+                    <circle cx="19" cy="17" r="2.2" fill="currentColor"/>
+                  </svg>
+                </button>
+              {/if}
+              <button
+                type="button"
+                class="wb-map-tool-btn wb-predios-btn"
+                class:active={prediosVisibleOnMap}
+                class:dimmed={!prediosVisibleOnMap}
+                disabled={!hasPrediosOnMap}
+                on:click={togglePrediosVisibilityOnMap}
+                title={
+                  !hasPrediosOnMap
+                    ? 'Nenhum prédio encontrado nesta busca'
+                    : prediosVisibleOnMap
+                      ? 'Ocultar prédios no mapa'
+                      : 'Mostrar prédios no mapa'
+                }
+                aria-label={prediosVisibleOnMap ? 'Ocultar prédios' : 'Mostrar prédios'}
+                aria-pressed={prediosVisibleOnMap}
+              >
+                {@html buildPredioIconSvg({
+                  windowColor: prediosVisibleOnMap ? '#6C63FF' : '#9CA3AF',
+                  strokeColor: prediosVisibleOnMap ? '#4F46E5' : '#6B7280'
+                })}
+              </button>
+              <button
+                type="button"
+                class="wb-map-tool-btn wb-pegman-btn"
+                class:dragging={wbPegmanDragging}
+                on:pointerdown={startPegmanDrag}
+                on:click={handlePegmanClick}
+                title="Arraste o boneco para uma rua azul"
+                aria-label="Arrastar Street View"
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="5.5" r="2.4" fill="#fbbc04"/>
+                  <path fill="#4285f4" d="M9.2 9.2c.7-.5 1.6-.8 2.8-.8s2.1.3 2.8.8c.7.5 1.1 1.2 1.1 2v5.2h-1.7v5.6h-4.4V16.4H8.1V11.2c0-.8.4-1.5 1.1-2z"/>
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="wb-map-tool-btn"
+                class:active={wbFullscreen}
+                on:click={toggleWorkbenchFullscreen}
+                title={wbFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
+                aria-label={wbFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
+                aria-pressed={wbFullscreen}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                  {#if wbFullscreen}
+                    <path fill="currentColor" d="M9 3H7v4H3v2h6V3zm8 0h-2v6h6V7h-4V3zM3 15v2h4v4h2v-6H3zm12 0v6h2v-4h4v-2h-6z"/>
+                  {:else}
+                    <path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                  {/if}
+                </svg>
+              </button>
+              {/if}
+            </div>
+
+            {#if wbPegmanDragging}
+              <div
+                class="wb-pegman-ghost"
+                style="left: {wbPegmanGhostX}px; top: {wbPegmanGhostY}px;"
+                aria-hidden="true"
+              >
+                <svg viewBox="0 0 24 40" width="28" height="40" focusable="false">
+                  <circle cx="12" cy="7" r="5" fill="#fbbc04" stroke="#f9ab00" stroke-width="1"/>
+                  <path fill="#4285f4" d="M6.5 14c1.2-.9 2.8-1.4 5.5-1.4s4.3.5 5.5 1.4c1.2.9 1.8 2.1 1.8 3.4V27h-3.2v9.5h-8.2V27H4.7V17.4c0-1.3.6-2.5 1.8-3.4z"/>
+                </svg>
+              </div>
+            {/if}
+
+            {#if wbStreetViewMsg}
+              <div class="wb-map-toast" role="status">{wbStreetViewMsg}</div>
+            {/if}
+          </div>
+        {/if}
         
         <!-- Popup de informações da rota -->
         {#if selectedRouteIndex !== null && selectedRouteIndex < routes.length}
@@ -7641,9 +10235,19 @@
 
       <!-- Tabela de Resultados -->
       {#if ctosRua.length > 0}
-        <div class="results-table-container" class:minimized={isListMinimized} style="flex: {isListMinimized ? '0 0 auto' : '1 1 auto'}; min-height: {isListMinimized ? '60px' : '200px'};">
+        <div
+          class="results-table-container"
+          class:minimized={isListMinimized}
+          style={workbenchMode
+            ? undefined
+            : `flex: ${isListMinimized ? '0 0 auto' : '1 1 auto'}; min-height: ${isListMinimized ? '60px' : '200px'};`}
+        >
           <div class="table-header">
-            <h3>Tabela de Equipamentos Encontrados - {ctosRua.length} Equipamentos Encontrados</h3>
+            {#if !workbenchMode}
+              <h3>Tabela de Equipamentos Encontrados - {ctosRua.length} Equipamentos Encontrados</h3>
+            {:else}
+              <span class="workbench-table-label">Equipamentos</span>
+            {/if}
             <div class="table-header-buttons">
               <button 
                 class="minimize-button" 
@@ -7651,17 +10255,17 @@
                 on:click={async () => {
                   isListMinimized = !isListMinimized;
                   
-                  // Limpar estilos inline para respeitar o estado reativo
-                  const listElement = document.querySelector('.results-table-container, .empty-state');
-                  if (listElement) {
-                    if (isListMinimized) {
-                      // Quando minimizar, garantir que os estilos inline sejam removidos
-                      listElement.style.flex = '';
-                      listElement.style.minHeight = '';
-                    } else {
-                      // Quando expandir, aplicar estilos padrão
-                      listElement.style.flex = '1 1 auto';
-                      listElement.style.minHeight = '200px';
+                  if (!workbenchMode) {
+                    // Limpar estilos inline para respeitar o estado reativo
+                    const listElement = document.querySelector('.results-table-container, .empty-state');
+                    if (listElement) {
+                      if (isListMinimized) {
+                        listElement.style.flex = '';
+                        listElement.style.minHeight = '';
+                      } else {
+                        listElement.style.flex = '1 1 auto';
+                        listElement.style.minHeight = '200px';
+                      }
                     }
                   }
                   
@@ -7677,7 +10281,11 @@
                 aria-label={isListMinimized ? 'Expandir tabela' : 'Minimizar tabela'}
                 title={isListMinimized ? 'Expandir' : 'Minimizar'}
               >
-                {isListMinimized ? '⬆️' : '⬇️'}
+                {#if workbenchMode}
+                  {isListMinimized ? '▾' : '▴'}
+                {:else}
+                  {isListMinimized ? '⬆️' : '⬇️'}
+                {/if}
               </button>
             </div>
           </div>
@@ -7728,8 +10336,9 @@
                   {#each ctosRua as cto, rowIndex}
                     {@const ctoKey = getCTOKey(cto)}
                     {@const isVisible = ctoVisibility.get(ctoKey) !== false}
-                    {@const pctOcup = isNaN(parseFloat(cto.pct_ocup)) ? 0 : parseFloat(cto.pct_ocup || 0)}
-                    {@const occupationClass = pctOcup < 50 ? 'low' : pctOcup >= 50 && pctOcup < 80 ? 'medium' : 'high'}
+                    {@const ports = normalizeCtoPortCounts(cto)}
+                    {@const pctOcup = isNaN(parseFloat(ports.pct_ocup)) ? 0 : parseFloat(ports.pct_ocup || 0)}
+                    {@const occupationClass = (ports.vagas_total || 0) <= 0 || (ports.portas_disponiveis || 0) <= 0 ? 'high' : pctOcup < 50 ? 'low' : pctOcup >= 50 && pctOcup < 80 ? 'medium' : 'high'}
                     {@const statusCto = getStatusCTO(cto)}
                     {@const statusCtoUpper = statusCto.toUpperCase().trim()}
                     {@const statusClass = statusCtoUpper === 'ATIVADO' ? 'low' : statusCtoUpper === 'NAO ATIVADO' || statusCtoUpper === 'NÃO ATIVADO' ? 'high' : ''}
@@ -7785,9 +10394,9 @@
                       <td class:cell-selected={selectedCells.includes(cellKey8) || selectedRows.includes(rowIndex) || selectedColumns.includes(8)} on:click={(e) => handleCellClick(e, rowIndex, 8)}>{cto.pon || 'N/A'}</td>
                       <td class="numeric" class:cell-selected={selectedCells.includes(cellKey9) || selectedRows.includes(rowIndex) || selectedColumns.includes(9)} on:click={(e) => handleCellClick(e, rowIndex, 9)}>{cto.id_cto || cto.id || 'N/A'}</td>
                       <td class="numeric" class:cell-selected={selectedCells.includes(cellKey10) || selectedRows.includes(rowIndex) || selectedColumns.includes(10)} on:click={(e) => handleCellClick(e, rowIndex, 10)}>{formatDataCriacao(cto)}</td>
-                      <td class="numeric" class:cell-selected={selectedCells.includes(cellKey11) || selectedRows.includes(rowIndex) || selectedColumns.includes(11)} on:click={(e) => handleCellClick(e, rowIndex, 11)}>{cto.vagas_total || 0}</td>
-                      <td class="numeric" class:cell-selected={selectedCells.includes(cellKey12) || selectedRows.includes(rowIndex) || selectedColumns.includes(12)} on:click={(e) => handleCellClick(e, rowIndex, 12)}>{cto.clientes_conectados || 0}</td>
-                      <td class="numeric" class:cell-selected={selectedCells.includes(cellKey13) || selectedRows.includes(rowIndex) || selectedColumns.includes(13)} on:click={(e) => handleCellClick(e, rowIndex, 13)}>{(cto.vagas_total || 0) - (cto.clientes_conectados || 0)}</td>
+                      <td class="numeric" class:cell-selected={selectedCells.includes(cellKey11) || selectedRows.includes(rowIndex) || selectedColumns.includes(11)} on:click={(e) => handleCellClick(e, rowIndex, 11)}>{ports.vagas_total || 0}</td>
+                      <td class="numeric" class:cell-selected={selectedCells.includes(cellKey12) || selectedRows.includes(rowIndex) || selectedColumns.includes(12)} on:click={(e) => handleCellClick(e, rowIndex, 12)}>{ports.clientes_conectados || 0}</td>
+                      <td class="numeric" class:cell-selected={selectedCells.includes(cellKey13) || selectedRows.includes(rowIndex) || selectedColumns.includes(13)} on:click={(e) => handleCellClick(e, rowIndex, 13)}>{ports.portas_disponiveis || 0}</td>
                       <td class:cell-selected={selectedCells.includes(cellKey14) || selectedRows.includes(rowIndex) || selectedColumns.includes(14)} on:click={(e) => handleCellClick(e, rowIndex, 14)}>
                         <span class="occupation-badge {occupationClass}">{(pctOcup || 0).toFixed(1)}%</span>
                       </td>
@@ -7801,9 +10410,19 @@
           {/if}
         </div>
       {:else if !isLoading && !error}
-        <div class="empty-state" class:minimized={isListMinimized} style="flex: {isListMinimized ? '0 0 auto' : '1 1 auto'}; min-height: {isListMinimized ? '60px' : '200px'};">
+        <div
+          class="empty-state"
+          class:minimized={isListMinimized}
+          style={workbenchMode
+            ? undefined
+            : `flex: ${isListMinimized ? '0 0 auto' : '1 1 auto'}; min-height: ${isListMinimized ? '60px' : '200px'};`}
+        >
           <div class="table-header">
-            <h3>Tabela de Equipamentos Encontrados - Nenhum Equipamento Pesquisado</h3>
+            {#if !workbenchMode}
+              <h3>Tabela de Equipamentos Encontrados - Nenhum Equipamento Pesquisado</h3>
+            {:else}
+              <span class="workbench-table-label">Equipamentos</span>
+            {/if}
             <div class="table-header-buttons">
               <button 
                 class="minimize-button" 
@@ -7811,17 +10430,16 @@
                 on:click={async () => {
                   isListMinimized = !isListMinimized;
                   
-                  // Limpar estilos inline para respeitar o estado reativo
-                  const listElement = document.querySelector('.results-table-container, .empty-state');
-                  if (listElement) {
-                    if (isListMinimized) {
-                      // Quando minimizar, garantir que os estilos inline sejam removidos
-                      listElement.style.flex = '';
-                      listElement.style.minHeight = '';
-                    } else {
-                      // Quando expandir, aplicar estilos padrão
-                      listElement.style.flex = '1 1 auto';
-                      listElement.style.minHeight = '200px';
+                  if (!workbenchMode) {
+                    const listElement = document.querySelector('.results-table-container, .empty-state');
+                    if (listElement) {
+                      if (isListMinimized) {
+                        listElement.style.flex = '';
+                        listElement.style.minHeight = '';
+                      } else {
+                        listElement.style.flex = '1 1 auto';
+                        listElement.style.minHeight = '200px';
+                      }
                     }
                   }
                   
@@ -7837,7 +10455,11 @@
                 aria-label={isListMinimized ? 'Expandir tabela' : 'Minimizar tabela'}
                 title={isListMinimized ? 'Expandir' : 'Minimizar'}
               >
-                {isListMinimized ? '⬆️' : '⬇️'}
+                {#if workbenchMode}
+                  {isListMinimized ? '▾' : '▴'}
+                {:else}
+                  {isListMinimized ? '⬆️' : '⬇️'}
+                {/if}
               </button>
             </div>
           </div>
@@ -8073,7 +10695,7 @@
                   <img src={mapPreviewImage} alt="Prévia do Mapa" class="preview-image" />
                 </div>
                 <p style="font-size: 0.85rem; color: #666; margin-top: 0.5rem; font-style: italic; text-align: center;">
-                  O mapa foi capturado automaticamente com todas as CTOs encontradas e suas rotas visíveis.
+                  O mapa foi capturado automaticamente com as CTOs, rotas e condomínios visíveis (quando a opção estiver ativa).
                 </p>
               {:else}
                 <div class="preview-error">
@@ -8406,6 +11028,27 @@
     />
 {/if}
 
+{#if showBaseReadyReloadModal}
+  <div
+    class="base-ready-reload-overlay"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="base-ready-reload-title"
+    tabindex="-1"
+  >
+    <div class="base-ready-reload-box" role="document">
+      <h3 id="base-ready-reload-title">Base atualizada com sucesso</h3>
+      <p>
+        A base de CTOs e a mancha de cobertura foram publicadas. Atualize a página para
+        trabalhar com a nova base de dados.
+      </p>
+      <button type="button" class="base-ready-reload-btn" on:click={forceReloadForNewBase}>
+        Atualizar página
+      </button>
+    </div>
+  </div>
+{/if}
+
 <style>
   :global(body) {
     margin: 0;
@@ -8436,10 +11079,15 @@
   .viabilidade-content.embedded {
     height: 100%;
     min-height: 0;
+    width: 100%;
+    max-width: 100%;
   }
 
   .viabilidade-content.embedded .main-layout {
     height: 100%;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
     padding-bottom: 1rem;
   }
 
@@ -8455,6 +11103,417 @@
     height: 100%;
   }
 
+  /*
+   * ============================================================
+   * WORKBENCH ONLY — extensão Agenda (workbenchMode=true)
+   * Só mapa no embed; tabela de equipamentos fica no CensupWorkbench.
+   * Painel de busca escondido — coords/endereço vêm do Workbench.
+   * Standalone e Portal (sem workbenchMode) não usam estas regras.
+   * ============================================================
+   */
+  .viabilidade-content.workbench-mode {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    background: transparent;
+  }
+
+  .viabilidade-content.workbench-mode .main-layout {
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    overflow: hidden !important;
+    background: transparent !important;
+  }
+
+  .viabilidade-content.workbench-mode .search-panel,
+  .viabilidade-content.workbench-mode .resize-handle-vertical {
+    display: none !important;
+  }
+
+  .viabilidade-content.workbench-mode .main-area {
+    display: flex !important;
+    flex-direction: column !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: 100% !important;
+    overflow: hidden !important;
+    gap: 0.55rem !important;
+    padding: 0 !important;
+    background: transparent !important;
+  }
+
+  /* Box só do mapa — tabela fica no CensupWorkbench abaixo de Informações */
+  .viabilidade-content.workbench-mode .map-container {
+    order: 1;
+    flex: 1 1 auto !important;
+    min-height: 180px !important;
+    max-height: none !important;
+    height: 100% !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 10px !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    box-sizing: border-box !important;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .map-container {
+    background: #121826 !important;
+    border-color: #3f4b63 !important;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark,
+  .viabilidade-content.workbench-mode.theme-dark .main-layout,
+  .viabilidade-content.workbench-mode.theme-dark .main-area {
+    background: #0b1220 !important;
+  }
+
+  .viabilidade-content.workbench-mode .map-header {
+    display: none !important;
+  }
+
+  .viabilidade-content.workbench-mode .map-container.minimized {
+    flex: 0 0 auto !important;
+    min-height: 44px !important;
+  }
+
+  .viabilidade-content.workbench-mode .map-container .map {
+    flex: 1 1 auto !important;
+    min-height: 160px !important;
+    height: 100% !important;
+    border-radius: 10px !important;
+  }
+
+  /* Controles custom (Mapa / Satélite / Street View / tela cheia) */
+  .viabilidade-content.workbench-mode .wb-map-controls {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    pointer-events: none;
+  }
+
+  .viabilidade-content.workbench-mode.wb-streetview-open .wb-map-controls {
+    z-index: 1;
+    pointer-events: none;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-type {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    display: inline-flex;
+    align-items: stretch;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.14);
+    pointer-events: auto;
+    transition: transform 0.22s ease, opacity 0.22s ease;
+    transform: translateY(0);
+    opacity: 1;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-type.wb-map-type-hidden {
+    transform: translateY(calc(-100% - 16px));
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-type-btn {
+    border: none;
+    background: transparent;
+    color: #374151;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+    padding: 0.45rem 0.7rem;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-type-btn + .wb-map-type-btn {
+    border-left: 1px solid #e5e7eb;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-type-btn.active {
+    background: #7b68ee;
+    color: #ffffff;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-type-btn:hover:not(.active) {
+    background: #f5f3ff;
+    color: #5b4bd6;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-tools {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    pointer-events: auto;
+    z-index: 5;
+  }
+
+  /* No Street View: esconde nossos 3 botões — ficam só os controles nativos do Maps */
+  .viabilidade-content.workbench-mode .wb-map-tools.wb-map-tools-hidden {
+    display: none !important;
+  }
+
+  /* Pegman/círculo nativo só some no mapa/satélite — no Street View os controles voltam */
+  .viabilidade-content.workbench-mode:not(.wb-streetview-open) :global(.gm-svpc),
+  .viabilidade-content.workbench-mode:not(.wb-streetview-open) :global(.gm-svpc *),
+  .viabilidade-content.workbench-mode:not(.wb-streetview-open) :global(.gmnoprint:has(.gm-svpc)),
+  .viabilidade-content.workbench-mode:not(.wb-streetview-open) :global(.gm-bundled-control:has(.gm-svpc)),
+  .viabilidade-content.workbench-mode:not(.wb-streetview-open) :global(.gm-bundled-control-on-bottom:has(.gm-svpc)) {
+    display: none !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+    opacity: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-tool-btn {
+    width: 36px;
+    height: 36px;
+    border: 1px solid #d1d5db;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.96);
+    color: #374151;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.14);
+    padding: 0;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-tool-btn:hover {
+    border-color: #a78bfa;
+    color: #7b68ee;
+    background: #f5f3ff;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-tool-btn.active {
+    background: #7b68ee;
+    border-color: #7b68ee;
+    color: #ffffff;
+  }
+
+  .viabilidade-content.workbench-mode .wb-predios-btn {
+    padding: 4px;
+  }
+
+  .viabilidade-content.workbench-mode .wb-predios-btn :global(svg) {
+    width: 20px;
+    height: 26px;
+    display: block;
+  }
+
+  .viabilidade-content.workbench-mode .wb-predios-btn.active {
+    background: rgba(255, 255, 255, 0.96);
+    border-color: #a78bfa;
+    color: #7b68ee;
+  }
+
+  .viabilidade-content.workbench-mode .wb-predios-btn.dimmed {
+    opacity: 0.55;
+    background: #f3f4f6;
+  }
+
+  .viabilidade-content.workbench-mode .wb-predios-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+
+  .viabilidade-content.workbench-mode .wb-pegman-btn {
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .viabilidade-content.workbench-mode .wb-pegman-btn:active,
+  .viabilidade-content.workbench-mode .wb-pegman-btn.dragging {
+    cursor: grabbing;
+    opacity: 0.45;
+  }
+
+  .viabilidade-content.workbench-mode .wb-pegman-ghost {
+    position: fixed;
+    z-index: 2147483646;
+    pointer-events: none;
+    transform: translate(-50%, -88%);
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
+  }
+
+  .viabilidade-content.workbench-mode .map-container.wb-pegman-drag-active,
+  .viabilidade-content.workbench-mode .map-container.wb-pegman-drag-active .map {
+    cursor: grabbing !important;
+  }
+
+  .viabilidade-content.workbench-mode .wb-map-toast {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    max-width: calc(100% - 24px);
+    padding: 0.4rem 0.7rem;
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.9);
+    color: #f8fafc;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.3;
+    pointer-events: none;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-type {
+    background: rgba(30, 41, 59, 0.96);
+    border-color: #475569;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-type-btn {
+    color: #e2e8f0;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-type-btn + .wb-map-type-btn {
+    border-left-color: #475569;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-type-btn.active {
+    background: #7b68ee;
+    color: #ffffff;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-type-btn:hover:not(.active) {
+    background: #334155;
+    color: #c4b5fd;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-tool-btn {
+    background: rgba(30, 41, 59, 0.96);
+    border-color: #475569;
+    color: #e2e8f0;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-tool-btn:hover {
+    background: #334155;
+    border-color: #a78bfa;
+    color: #c4b5fd;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .wb-map-tool-btn.active {
+    background: #7b68ee;
+    border-color: #7b68ee;
+    color: #ffffff;
+  }
+
+  .viabilidade-content.workbench-mode .map-container .minimize-button,
+  .viabilidade-content.workbench-mode .resize-handle-horizontal {
+    display: none !important;
+  }
+
+  .viabilidade-content.workbench-mode .results-table-container .minimize-button,
+  .viabilidade-content.workbench-mode .empty-state .minimize-button {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 28px !important;
+    height: 28px !important;
+    min-width: 28px !important;
+    padding: 0 !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 8px !important;
+    background: #ffffff !important;
+    color: #4b5563 !important;
+    font-size: 0.85rem !important;
+    font-weight: 400 !important;
+    line-height: 1 !important;
+    box-shadow: none !important;
+    opacity: 1 !important;
+  }
+
+  .viabilidade-content.workbench-mode .results-table-container .minimize-button:hover,
+  .viabilidade-content.workbench-mode .empty-state .minimize-button:hover {
+    border-color: #a78bfa !important;
+    color: #7b68ee !important;
+    background: #f5f3ff !important;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .results-table-container .minimize-button,
+  .viabilidade-content.workbench-mode.theme-dark .empty-state .minimize-button {
+    border-color: #475569 !important;
+    background: #1e293b !important;
+    color: #cbd5e1 !important;
+  }
+
+  .viabilidade-content.workbench-mode.theme-dark .results-table-container .minimize-button:hover,
+  .viabilidade-content.workbench-mode.theme-dark .empty-state .minimize-button:hover {
+    border-color: #a78bfa !important;
+    background: #334155 !important;
+    color: #c4b5fd !important;
+  }
+
+  .viabilidade-content.workbench-mode .table-header {
+    justify-content: space-between !important;
+    align-items: center !important;
+    min-height: 28px !important;
+    margin: 0 !important;
+    padding: 0.3rem 0.45rem !important;
+  }
+
+  .viabilidade-content.workbench-mode .table-header h3 {
+    display: none !important;
+  }
+
+  .viabilidade-content.workbench-mode .workbench-table-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #7b68ee;
+    line-height: 1.2;
+  }
+
+  .viabilidade-content.workbench-mode .workbench-table-spacer {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* Tabela fica no box fixo do Workbench (CensupWorkbench) — esconde a cópia interna */
+  .viabilidade-content.workbench-mode .results-table-container,
+  .viabilidade-content.workbench-mode .empty-state {
+    display: none !important;
+  }
+
+  .viabilidade-content.workbench-mode .tabulacao-container {
+    display: none !important;
+  }
+
+  .viabilidade-content.workbench-mode .map-header h3,
+  .viabilidade-content.workbench-mode .table-header h3 {
+    font-size: 0.85rem !important;
+  }
+
   .tabulacao-container {
     flex: 0 0 auto !important;
     min-height: auto;
@@ -8468,6 +11527,75 @@
   .viabilidade-content.theme-dark {
     background: #0f1220;
     color: #e5e7eb;
+  }
+
+  /* InfoWindow do Google (fundo claro) — não herdar texto claro do tema escuro */
+  .viabilidade-content.theme-dark :global(.gm-style-iw),
+  .viabilidade-content.theme-dark :global(.gm-style-iw-c),
+  .viabilidade-content.theme-dark :global(.gm-style-iw-d) {
+    color: #1f2937 !important;
+  }
+
+  /* Título "Localização do Cliente" alinhado verticalmente com o botão X */
+  :global(.gm-style-iw-ch),
+  .viabilidade-content :global(.gm-style-iw-ch) {
+    display: flex !important;
+    align-items: center !important;
+    min-height: 36px !important;
+    padding: 8px 12px 0 12px !important;
+    box-sizing: border-box !important;
+  }
+
+  :global(.gm-style-iw-chr),
+  .viabilidade-content :global(.gm-style-iw-chr) {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    min-height: 36px !important;
+    padding-top: 6px !important;
+  }
+
+  :global(.wb-client-iw-header),
+  .viabilidade-content :global(.wb-client-iw-header) {
+    color: #111827 !important;
+    font-size: 14px !important;
+    font-weight: 700 !important;
+    font-family: Inter, system-ui, sans-serif !important;
+    line-height: 1.3 !important;
+    margin: 0 !important;
+  }
+
+  .viabilidade-content.theme-dark :global(.wb-client-iw-header) {
+    color: #111827 !important;
+  }
+
+  /* Durante o print: esconde qualquer InfoWindow (casinha ou CTO) */
+  :global(.map.capturing-map-print .gm-style-iw-a),
+  :global(.map.capturing-map-print .gm-style-iw-t),
+  :global(.map.capturing-map-print .gm-style-iw-tc),
+  :global(.map.capturing-map-print .gm-style-iw),
+  :global(.map.capturing-map-print .gm-style-iw-c),
+  :global(.map.capturing-map-print .gm-style-iw-d),
+  :global(.map.capturing-map-print .gm-style-iw-chr) {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+
+  .viabilidade-content.theme-dark :global(.gm-style-iw-d),
+  .viabilidade-content.theme-dark :global(.gm-style-iw-c) {
+    background-color: #ffffff !important;
+  }
+
+  .viabilidade-content.theme-dark :global(.gm-style-iw-d *),
+  .viabilidade-content.theme-dark :global(.wb-client-iw),
+  .viabilidade-content.theme-dark :global(.wb-client-iw *) {
+    color: #1f2937 !important;
+  }
+
+  .viabilidade-content.theme-dark :global(.wb-client-iw small) {
+    color: #6b7280 !important;
   }
 
   .loading-fullscreen.theme-dark {
@@ -10259,5 +13387,74 @@
 
   .btn-add-confirm:active {
     transform: translateY(0);
+  }
+
+  .base-ready-reload-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1.25rem;
+    background: rgba(15, 23, 42, 0.72);
+    box-sizing: border-box;
+  }
+
+  .base-ready-reload-box {
+    width: min(420px, 100%);
+    background: #fff;
+    border-radius: 12px;
+    padding: 1.5rem 1.35rem 1.25rem;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+    text-align: center;
+  }
+
+  .base-ready-reload-box h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #0f172a;
+  }
+
+  .base-ready-reload-box p {
+    margin: 0 0 1.25rem;
+    font-size: 0.95rem;
+    line-height: 1.45;
+    color: #334155;
+  }
+
+  .base-ready-reload-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 180px;
+    padding: 0.75rem 1.25rem;
+    border: none;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #7b68ee 0%, #6495ed 100%);
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  .base-ready-reload-btn:hover {
+    filter: brightness(1.05);
+  }
+
+  .viabilidade-content.theme-dark ~ .base-ready-reload-overlay .base-ready-reload-box,
+  :global(.theme-dark) .base-ready-reload-box {
+    background: #1e293b;
+  }
+
+  .viabilidade-content.theme-dark ~ .base-ready-reload-overlay .base-ready-reload-box h3,
+  :global(.theme-dark) .base-ready-reload-box h3 {
+    color: #f1f5f9;
+  }
+
+  .viabilidade-content.theme-dark ~ .base-ready-reload-overlay .base-ready-reload-box p,
+  :global(.theme-dark) .base-ready-reload-box p {
+    color: #cbd5e1;
   }
 </style>

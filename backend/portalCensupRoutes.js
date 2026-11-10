@@ -23,6 +23,27 @@ import {
   getPortalCensupSupabaseConfig,
   testPortalCensupSupabaseConnection
 } from './lib/portalCensup/supabaseCensup.js';
+import {
+  clearCensupSyncKick,
+  clearCensupSyncPresence,
+  getCensupSyncKick,
+  getCensupSyncPresenceTtlMs,
+  kickCensupSyncPresence,
+  listCensupSyncOnline,
+  touchCensupSyncPresence
+} from './lib/portalCensup/presenceStore.js';
+import {
+  getAtribuicoesPorPedidos,
+  registrarPedidosNaEsteira,
+  atribuirPedidoNaEsteira
+} from './lib/portalCensup/filaEsteira.js';
+import { getFilaEspelho, setFilaEspelho } from './lib/portalCensup/filaEspelho.js';
+import { getMotivosConfigUsuario, setMotivoUsuario } from './lib/portalCensup/motivosUsuario.js';
+import {
+  getSharePointLinks,
+  publishSharePointLinks
+} from './lib/portalCensup/sharePointLinksStore.js';
+import { getRemoteRelayStatus } from './lib/portalCensup/remoteRelay.js';
 
 function getUsuarioFromRequest(req) {
   const headerKeys = Object.keys(req.headers || {});
@@ -135,6 +156,274 @@ export function registerPortalCensupRoutes(app) {
     }
   });
 
+  /**
+   * Presença da extensão: online = Sincronização ligada (heartbeat).
+   * Body: { enabled: true|false }
+   */
+  app.post('/api/portal-censup/presence', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const enabled = req.body?.enabled !== false;
+      // resume = o próprio usuário religou a sync → descarta o deslogue do colega
+      if (enabled && req.body?.resume === true) clearCensupSyncKick(usuario);
+      const kicked = enabled ? getCensupSyncKick(usuario) : null;
+      if (enabled && !kicked) {
+        touchCensupSyncPresence(usuario, {
+          source: req.body?.source || 'extension-sync',
+          badgeColor: req.body?.badgeColor
+        });
+      } else {
+        clearCensupSyncPresence(usuario);
+      }
+
+      const online = listCensupSyncOnline();
+      res.json({
+        success: true,
+        enabled: enabled && !kicked,
+        kicked,
+        onlineCount: online.length,
+        online,
+        motivos: getMotivosConfigUsuario(usuario),
+        ttlMs: getCensupSyncPresenceTtlMs()
+      });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST presence:', err);
+      sendError(res, err);
+    }
+  });
+
+  /**
+   * Deslogar colega (esqueceu a extensão ligada): só desliga a Sincronização dele.
+   * Body: { usuario }
+   */
+  app.post('/api/portal-censup/presence/kick', async (req, res) => {
+    try {
+      const by = getUsuarioFromRequest(req);
+      if (!by) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      const alvo = String(req.body?.alvo || '').trim();
+      if (!alvo) {
+        return res.status(400).json({ success: false, error: 'Informe o usuário a deslogar.' });
+      }
+      const kick = kickCensupSyncPresence(alvo, by);
+      console.log(`[PortalCENSUP] ${by} deslogou a sincronização de ${alvo}`);
+      const online = listCensupSyncOnline();
+      res.json({ success: true, kick, onlineCount: online.length, online });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST presence/kick:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.get('/api/portal-censup/presence', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const online = listCensupSyncOnline();
+      res.json({
+        success: true,
+        onlineCount: online.length,
+        online,
+        motivos: getMotivosConfigUsuario(usuario),
+        ttlMs: getCensupSyncPresenceTtlMs()
+      });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET presence:', err);
+      sendError(res, err);
+    }
+  });
+
+  /**
+   * Links de SharePoint da equipe. A extensão só usa estes quando a caixa local está vazia.
+   */
+  app.get('/api/portal-censup/sharepoint-links', (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      res.json({ success: true, links: getSharePointLinks() });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET sharepoint-links:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.post('/api/portal-censup/sharepoint-links', (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      const links = publishSharePointLinks(req.body || {}, usuario);
+      res.json({ success: true, links });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST sharepoint-links:', err);
+      sendError(res, err);
+    }
+  });
+
+  /** Tipos de chamado liberados para análise do próprio usuário. */
+  app.get('/api/portal-censup/motivos', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      res.json({ success: true, motivos: getMotivosConfigUsuario(usuario) });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET motivos:', err);
+      sendError(res, err);
+    }
+  });
+
+  /**
+   * Liga/desliga um tipo para o próprio usuário (nunca para outro).
+   * Body: { motivo, liberado }
+   */
+  app.post('/api/portal-censup/motivos', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      const motivos = setMotivoUsuario(usuario, req.body?.motivo, req.body?.liberado === true);
+      console.log(
+        `[PortalCENSUP] ${usuario} ${req.body?.liberado === true ? 'liberou' : 'bloqueou'} o tipo "${req.body?.motivo}"`
+      );
+      res.json({ success: true, motivos });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST motivos:', err);
+      sendError(res, err);
+    }
+  });
+
+  /**
+   * Esteira: registra pedidos vistos na Agenda e atribui a quem está online (sync).
+   * Body: { pedidos: [...], syncEnabled?: boolean }
+   */
+  app.post('/api/portal-censup/fila/registrar', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      // Mesma requisição: se a sync estiver ligada, marca o usuário online antes de atribuir
+      // (evita falha por presença só em memória / outra réplica).
+      if (req.body?.syncEnabled === true && !getCensupSyncKick(usuario)) {
+        touchCensupSyncPresence(usuario, {
+          source: req.body?.source || 'extension-sync',
+          badgeColor: req.body?.badgeColor
+        });
+      }
+
+      const raw = Array.isArray(req.body?.pedidos) ? req.body.pedidos : [];
+      const result = registrarPedidosNaEsteira(raw);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST fila/registrar:', err);
+      sendError(res, err);
+    }
+  });
+
+  /** Claim manual (duplo clique na lista): atribui o pedido ao usuário da extensão. */
+  app.post('/api/portal-censup/fila/atribuir', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const pedido = String(req.body?.pedido || '').trim();
+      const assignment = atribuirPedidoNaEsteira(pedido, usuario);
+      res.json({ success: true, pedido, assignment });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST fila/atribuir:', err);
+      sendError(res, err);
+    }
+  });
+
+  /** Consulta atribuições por pedidos (lista da extensão). */
+  app.get('/api/portal-censup/fila/atribuicoes', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const raw = String(req.query?.pedidos || '')
+        .split(',')
+        .map((p) => p.trim())
+        .filter(Boolean);
+      const bodyPedidos = Array.isArray(req.body?.pedidos) ? req.body.pedidos : [];
+      const pedidos = raw.length ? raw : bodyPedidos.map((p) => String(p || '').trim()).filter(Boolean);
+      const assignments = getAtribuicoesPorPedidos(pedidos);
+      res.json({ success: true, assignments });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET fila/atribuicoes:', err);
+      sendError(res, err);
+    }
+  });
+
+  /**
+   * Espelho da fila da Agenda para o app mobile.
+   * A extensão publica o scrape; o app lê o último snapshot.
+   */
+  app.post('/api/portal-censup/fila/espelho', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const result = setFilaEspelho({
+        rows: Array.isArray(req.body?.rows) ? req.body.rows : undefined,
+        publishedBy: usuario,
+        source: req.body?.source || 'extension',
+        syncNextAt: req.body?.syncNextAt,
+        pollSeconds: req.body?.pollSeconds,
+        syncEnabled: req.body?.syncEnabled,
+        confirmedEmpty: req.body?.confirmedEmpty === true
+      });
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST fila/espelho:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.get('/api/portal-censup/fila/espelho', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+
+      const snapshot = getFilaEspelho();
+      res.json({ success: true, ...snapshot });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET fila/espelho:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.get('/api/portal-censup/remote/status', (req, res) => {
+    const usuario = getUsuarioFromRequest(req);
+    if (!usuario) {
+      return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+    }
+    res.json({ success: true, ...getRemoteRelayStatus(usuario) });
+  });
+
   app.get('/api/portal-censup/chamados/:id', async (req, res) => {
     try {
       const usuario = getUsuarioFromRequest(req);
@@ -220,7 +509,16 @@ export function registerPortalCensupRoutes(app) {
       }
 
       const force = req.body?.force === true || req.query?.force === '1';
-      const result = await analisarChamadoById(req.params.id, { force });
+      const lat = req.body?.lat != null ? Number(req.body.lat) : null;
+      const lng = req.body?.lng != null ? Number(req.body.lng) : null;
+      const endereco =
+        req.body?.endereco && typeof req.body.endereco === 'object' ? req.body.endereco : null;
+      const result = await analisarChamadoById(req.params.id, {
+        force,
+        lat: Number.isFinite(lat) ? lat : null,
+        lng: Number.isFinite(lng) ? lng : null,
+        enderecoPatch: endereco
+      });
       res.json({ success: true, ...result });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST analisar:', err);
@@ -239,7 +537,8 @@ export function registerPortalCensupRoutes(app) {
       const result = await salvarRelatorioWorkbench(req.params.id, {
         usuario,
         report: req.body || {},
-        persist
+        persist,
+        seed: req.body?.seed || null
       });
       res.json({ success: true, ...result });
     } catch (err) {
