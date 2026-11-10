@@ -1,16 +1,25 @@
 /**
  * Arquivo de ruas no disco do backend (DATA_DIR/ruas).
- * Depois da base + mancha, checa se alguma rua mudou ou se entrou CTO fora da área.
- * Só então monta o arquivo novo e troca pelo antigo.
+ * O mapa da região é baixado uma vez e cortado aqui, em volta das CTOs.
+ * Depois da base + mancha, só refaz se o mapa mudou ou se entrou CTO fora da área.
  */
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
+import { pipeline } from 'stream/promises';
+import { Transform } from 'stream';
 import supabase, { isSupabaseAvailable } from '../../supabase.js';
 import { getActiveDatasetId } from '../ctoCoverageDatasets.js';
 import { RADIUS_METERS, graphFromWays, haversineMeters, prepareGraph } from './streetGraph.js';
 
+const require = createRequire(import.meta.url);
+const createOsmParser = require('osm-pbf-parser');
+
 const HIGHWAY =
-  '^(footway|path|pedestrian|steps|residential|living_street|service|unclassified|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link|trunk|trunk_link|cycleway|road)$';
+  /^(footway|path|pedestrian|steps|residential|living_street|service|unclassified|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link|trunk|trunk_link|cycleway|road)$/;
+
+const DEFAULT_PBF_URL =
+  'https://download.geofabrik.de/south-america/brazil/nordeste-latest.osm.pbf';
 
 let dataDir = '';
 let prepared = null;
@@ -24,22 +33,12 @@ function ruasFile() {
   return path.join(ruasDir(), 'ruas.json');
 }
 
-function overpassMirrors() {
-  const list = [
-    process.env.OVERPASS_URL,
-    'https://overpass.kumi.systems/api/interpreter',
-    'https://overpass-api.de/api/interpreter'
-  ];
-  const out = [];
-  for (const item of list) {
-    const url = String(item || '').trim();
-    if (url && !out.includes(url)) out.push(url);
-  }
-  return out;
+function pbfFile() {
+  return path.join(ruasDir(), 'mapa-regiao.osm.pbf');
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function pbfUrl() {
+  return (process.env.OSM_PBF_URL || DEFAULT_PBF_URL).trim();
 }
 
 export function streetGraphStatus() {
@@ -76,77 +75,6 @@ export function initStreetGraph(dir) {
   }
 }
 
-function cellSizeDeg(lat) {
-  const latSize = RADIUS_METERS / 111320;
-  const lngSize = latSize / Math.max(0.2, Math.cos((lat * Math.PI) / 180));
-  return { latSize, lngSize };
-}
-
-function cellKey(lat, lng) {
-  const { latSize, lngSize } = cellSizeDeg(lat);
-  return `${Math.floor(lat / latSize)}:${Math.floor(lng / lngSize)}`;
-}
-
-function bboxesFromCtos(ctos) {
-  const groups = new Map();
-  for (const cto of ctos) {
-    const key = cellKey(cto.lat, cto.lng);
-    let list = groups.get(key);
-    if (!list) {
-      list = [];
-      groups.set(key, list);
-    }
-    list.push(cto);
-  }
-  const boxes = [];
-  for (const pts of groups.values()) {
-    let south = 90;
-    let north = -90;
-    let west = 180;
-    let east = -180;
-    for (const p of pts) {
-      const dLat = RADIUS_METERS / 111320;
-      const dLng = dLat / Math.max(0.2, Math.cos((p.lat * Math.PI) / 180));
-      south = Math.min(south, p.lat - dLat);
-      north = Math.max(north, p.lat + dLat);
-      west = Math.min(west, p.lng - dLng);
-      east = Math.max(east, p.lng + dLng);
-    }
-    boxes.push({ south, west, north, east });
-  }
-  return mergeBoxes(boxes);
-}
-
-function overlaps(a, b) {
-  return a.south <= b.north && a.north >= b.south && a.west <= b.east && a.east >= b.west;
-}
-
-function mergeBoxes(list) {
-  const boxes = list.map((b) => ({ ...b }));
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let i = 0; i < boxes.length; i++) {
-      for (let j = i + 1; j < boxes.length; j++) {
-        if (!overlaps(boxes[i], boxes[j])) continue;
-        const a = boxes[i];
-        const b = boxes[j];
-        boxes[i] = {
-          south: Math.min(a.south, b.south),
-          west: Math.min(a.west, b.west),
-          north: Math.max(a.north, b.north),
-          east: Math.max(a.east, b.east)
-        };
-        boxes.splice(j, 1);
-        changed = true;
-        break;
-      }
-      if (changed) break;
-    }
-  }
-  return boxes;
-}
-
 function gridOf(points) {
   const size = 0.01;
   const map = new Map();
@@ -165,7 +93,7 @@ function gridOf(points) {
 function hasCtoOutside(ctos, previous) {
   if (!previous?.length) return true;
   const { map, size } = gridOf(previous);
-  const reach = Math.ceil((RADIUS_METERS / 111320) / size) + 1;
+  const reach = Math.ceil(RADIUS_METERS / 111320 / size) + 1;
   for (const c of ctos) {
     const i = Math.floor(c.lat / size);
     const j = Math.floor(c.lng / size);
@@ -184,6 +112,68 @@ function hasCtoOutside(ctos, previous) {
     if (best > RADIUS_METERS) return true;
   }
   return false;
+}
+
+function buildNearIndex(ctos) {
+  const size = RADIUS_METERS / 111320;
+  const map = new Map();
+  for (const c of ctos) {
+    const key = `${Math.floor(c.lat / size)}:${Math.floor(c.lng / size)}`;
+    let bucket = map.get(key);
+    if (!bucket) {
+      bucket = [];
+      map.set(key, bucket);
+    }
+    bucket.push(c);
+  }
+  return { map, size };
+}
+
+function isNearCto(index, lat, lng) {
+  const { map, size } = index;
+  const i = Math.floor(lat / size);
+  const j = Math.floor(lng / size);
+  for (let di = -2; di <= 2; di++) {
+    for (let dj = -2; dj <= 2; dj++) {
+      const bucket = map.get(`${i + di}:${j + dj}`);
+      if (!bucket) continue;
+      for (const c of bucket) {
+        if (haversineMeters(lat, lng, c.lat, c.lng) <= RADIUS_METERS) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function sortNodes(ids, lats, lngs) {
+  const n = ids.length;
+  const order = new Array(n);
+  for (let i = 0; i < n; i++) order[i] = i;
+  order.sort((a, b) => ids[a] - ids[b]);
+  const sIds = new Float64Array(n);
+  const sLats = new Float64Array(n);
+  const sLngs = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const j = order[i];
+    sIds[i] = ids[j];
+    sLats[i] = lats[j];
+    sLngs[i] = lngs[j];
+  }
+  return { sIds, sLats, sLngs };
+}
+
+function lookupNode(table, id) {
+  const ids = table.sIds;
+  let lo = 0;
+  let hi = ids.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const value = ids[mid];
+    if (value === id) return { lat: table.sLats[mid], lng: table.sLngs[mid] };
+    if (value < id) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return null;
 }
 
 async function fetchCtos() {
@@ -217,148 +207,151 @@ async function fetchCtos() {
   return points;
 }
 
-async function overpassOnce(url, query) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 40000);
+async function remoteStamp(url) {
+  const res = await fetch(url, { method: 'HEAD' });
+  if (!res.ok) throw new Error(`Mapa da região respondeu ${res.status}`);
+  return {
+    etag: res.headers.get('etag') || '',
+    lastModified: res.headers.get('last-modified') || '',
+    bytes: Number(res.headers.get('content-length') || 0)
+  };
+}
+
+function sameStamp(a, b) {
+  if (!a || !b) return false;
+  if (a.etag && b.etag) return a.etag === b.etag;
+  return Boolean(a.lastModified) && a.lastModified === b.lastModified && a.bytes > 0 && a.bytes === b.bytes;
+}
+
+async function downloadPbf(url, dest) {
+  const part = `${dest}.part`;
+  const res = await fetch(url);
+  if (!res.ok || !res.body) throw new Error(`Mapa da região respondeu ${res.status}`);
+  const total = Number(res.headers.get('content-length') || 0);
+  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+  const file = fs.createWriteStream(part);
+  const reader = res.body.getReader();
+  let got = 0;
+  let lastLog = 0;
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'ViabilidadeAlares/ruas',
-        Accept: 'application/json'
-      },
-      body: `data=${encodeURIComponent(query)}`,
-      signal: ctrl.signal
-    });
-    if (!res.ok) {
-      throw new Error(`Overpass respondeu ${res.status}`);
-    }
-    return await res.json();
-  } catch (err) {
-    if (err?.name === 'AbortError') throw new Error('Overpass demorou demais');
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function overpass(query) {
-  const mirrors = overpassMirrors();
-  let lastErr = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const url = mirrors[attempt % mirrors.length];
-    const host = url.replace(/^https?:\/\//, '').split('/')[0];
-    try {
-      console.log(`🛣️ [Ruas] Pedido ao ${host} (tentativa ${attempt + 1}/4)`);
-      return await overpassOnce(url, query);
-    } catch (err) {
-      lastErr = err;
-      const wait = [4000, 8000, 12000, 15000][attempt];
-      console.warn(`⚠️ [Ruas] ${err.message}. Nova tentativa em ${wait / 1000}s.`);
-      await sleep(wait);
-    }
-  }
-  throw lastErr || new Error('Overpass indisponível');
-}
-
-function packBoxes(boxes, size = 12) {
-  const packs = [];
-  for (let i = 0; i < boxes.length; i += size) packs.push(boxes.slice(i, i + size));
-  return packs;
-}
-
-function waysQuery(boxes, newerIso) {
-  const parts = boxes.map((box) => {
-    const newer = newerIso ? `(newer:"${newerIso}")` : '';
-    return `way["highway"~"${HIGHWAY}"](${bboxClause(box)})${newer};`;
-  });
-  const out = newerIso ? 'out ids qt;' : 'out geom qt;';
-  return `[out:json][timeout:35];(${parts.join('')});${out}`;
-}
-
-/** Recorta área grande demais para um único pedido. */
-function splitLargeBoxes(boxes) {
-  const maxSpan = 0.06;
-  const out = [];
-  for (const box of boxes) {
-    const latSpan = box.north - box.south;
-    const lngSpan = box.east - box.west;
-    if (latSpan <= maxSpan && lngSpan <= maxSpan) {
-      out.push(box);
-      continue;
-    }
-    const latSteps = Math.ceil(latSpan / maxSpan);
-    const lngSteps = Math.ceil(lngSpan / maxSpan);
-    const dLat = latSpan / latSteps;
-    const dLng = lngSpan / lngSteps;
-    for (let i = 0; i < latSteps; i++) {
-      for (let j = 0; j < lngSteps; j++) {
-        out.push({
-          south: box.south + i * dLat,
-          north: box.south + (i + 1) * dLat,
-          west: box.west + j * dLng,
-          east: box.west + (j + 1) * dLng
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      got += value.byteLength;
+      if (!file.write(Buffer.from(value))) {
+        await new Promise((resolve, reject) => {
+          file.once('drain', resolve);
+          file.once('error', reject);
         });
       }
+      if (got - lastLog >= 20 * 1024 * 1024) {
+        lastLog = got;
+        const mb = Math.round(got / (1024 * 1024));
+        const tot = total ? Math.round(total / (1024 * 1024)) : 0;
+        console.log(`🛣️ [Ruas] Baixando mapa ${mb}${tot ? `/${tot}` : ''} MB`);
+      }
     }
-  }
-  return out;
-}
-
-function bboxClause(box) {
-  return `${box.south.toFixed(6)},${box.west.toFixed(6)},${box.north.toFixed(6)},${box.east.toFixed(6)}`;
-}
-
-async function streetsChanged(boxes, sinceIso) {
-  const packs = packBoxes(boxes, 20);
-  for (const pack of packs) {
-    const payload = await overpass(waysQuery(pack, sinceIso));
-    if (Array.isArray(payload?.elements) && payload.elements.length > 0) return true;
-    await sleep(2500);
-  }
-  return false;
-}
-
-function waysFromPayload(payload) {
-  const ways = [];
-  for (const el of payload?.elements || []) {
-    if (el.type === 'way' && Array.isArray(el.geometry)) ways.push(el);
-  }
-  return ways;
-}
-
-async function downloadOne(box) {
-  try {
-    const payload = await overpass(waysQuery([box]));
-    return waysFromPayload(payload);
   } catch (err) {
-    const latSpan = box.north - box.south;
-    const lngSpan = box.east - box.west;
-    if (latSpan < 0.05 && lngSpan < 0.05) throw err;
-    const parts = splitLargeBoxes([box]);
-    if (parts.length <= 1) throw err;
-    console.warn(`⚠️ [Ruas] Área grande falhou. Dividindo em ${parts.length}.`);
-    const ways = [];
-    for (const part of parts) {
-      ways.push(...(await downloadOne(part)));
-      await sleep(1500);
-    }
-    return ways;
+    file.destroy();
+    await fs.promises.rm(part, { force: true }).catch(() => {});
+    throw err;
   }
+  await new Promise((resolve, reject) => {
+    file.once('error', reject);
+    file.end(() => resolve());
+  });
+  await fs.promises.rename(part, dest);
+  console.log(`🛣️ [Ruas] Mapa da região salvo (${Math.round(got / (1024 * 1024))} MB).`);
 }
 
-async function downloadWays(boxes) {
-  const ways = [];
-  console.log(`🛣️ [Ruas] ${boxes.length} áreas, um pedido por área.`);
-  for (let i = 0; i < boxes.length; i++) {
-    console.log(`🛣️ [Ruas] Baixando ruas ${i + 1}/${boxes.length}`);
-    const batch = await downloadOne(boxes[i]);
-    ways.push(...batch);
-    console.log(`🛣️ [Ruas] Área ${i + 1}/${boxes.length} pronta, ${batch.length} ruas (total ${ways.length}).`);
-    if (i < boxes.length - 1) await sleep(1500);
+function boundsOf(ctos) {
+  let minLat = 90;
+  let maxLat = -90;
+  let minLng = 180;
+  let maxLng = -180;
+  for (const c of ctos) {
+    if (c.lat < minLat) minLat = c.lat;
+    if (c.lat > maxLat) maxLat = c.lat;
+    if (c.lng < minLng) minLng = c.lng;
+    if (c.lng > maxLng) maxLng = c.lng;
   }
-  return ways;
+  const pad = (RADIUS_METERS + 200) / 111320;
+  return { minLat: minLat - pad, maxLat: maxLat + pad, minLng: minLng - pad, maxLng: maxLng + pad };
+}
+
+function waysNearCtos(file, ctos) {
+  const near = buildNearIndex(ctos);
+  const box = boundsOf(ctos);
+  const ids = [];
+  const lats = [];
+  const lngs = [];
+  const ways = [];
+  let table = null;
+  let seenNodes = 0;
+  let keptNodes = 0;
+  let seenWays = 0;
+
+  const parser = createOsmParser();
+  const transform = new Transform({
+    objectMode: true,
+    transform(batch, _enc, callback) {
+      try {
+        const items = Array.isArray(batch) ? batch : [batch];
+        for (const item of items) {
+          if (!item || item.type === 'node') {
+            if (!item) continue;
+            seenNodes += 1;
+            if (seenNodes % 5000000 === 0) {
+              console.log(`🛣️ [Ruas] Lendo mapa: ${seenNodes / 1000000} milhões de pontos`);
+            }
+            if (table) continue;
+            if (item.lat < box.minLat || item.lat > box.maxLat || item.lon < box.minLng || item.lon > box.maxLng) {
+              continue;
+            }
+            if (!isNearCto(near, item.lat, item.lon)) continue;
+            ids.push(item.id);
+            lats.push(item.lat);
+            lngs.push(item.lon);
+            keptNodes += 1;
+            continue;
+          }
+          if (item.type !== 'way') continue;
+          if (!table) {
+            console.log(`🛣️ [Ruas] ${keptNodes} pontos perto das CTOs. Ordenando para o corte.`);
+            table = sortNodes(ids, lats, lngs);
+            ids.length = 0;
+            lats.length = 0;
+            lngs.length = 0;
+          }
+          seenWays += 1;
+          if (seenWays % 250000 === 0) {
+            console.log(`🛣️ [Ruas] Ruas lidas: ${seenWays}. Trechos úteis: ${ways.length}.`);
+          }
+          if (!HIGHWAY.test(item.tags?.highway || '')) continue;
+          const refs = item.refs || [];
+          let geom = [];
+          for (const ref of refs) {
+            const coord = lookupNode(table, ref);
+            if (!coord) {
+              if (geom.length >= 2) ways.push({ geometry: geom });
+              geom = [];
+              continue;
+            }
+            geom.push({ lat: coord.lat, lon: coord.lng });
+          }
+          if (geom.length >= 2) ways.push({ geometry: geom });
+        }
+        callback();
+      } catch (err) {
+        callback(err);
+      }
+    }
+  });
+
+  return pipeline(fs.createReadStream(file), parser, transform).then(() => {
+    console.log(`🛣️ [Ruas] Corte local pronto: ${ways.length} trechos de rua.`);
+    return ways;
+  });
 }
 
 async function writeGraph(payload) {
@@ -392,24 +385,37 @@ async function refreshStreetGraph(reason) {
     console.warn('⚠️ [Ruas] Nenhuma CTO com coordenada. Arquivo mantido.');
     return;
   }
-  const boxes = bboxesFromCtos(ctos);
+
   const previous = prepared?.ctos || [];
   const uncovered = hasCtoOutside(ctos, previous);
-  let changed = false;
-  if (!uncovered && prepared?.builtAt) {
-    changed = await streetsChanged(boxes, prepared.builtAt);
+  let stamp = null;
+  try {
+    stamp = await remoteStamp(pbfUrl());
+  } catch (err) {
+    console.warn(`⚠️ [Ruas] Não deu para consultar a data do mapa: ${err.message}`);
   }
-  if (!uncovered && prepared?.edges?.length && !changed && prepared.builtAt) {
-    console.log('🛣️ [Ruas] Sem rua nova e sem CTO fora da área. Arquivo mantido.');
+  const localReady = fs.existsSync(pbfFile());
+  const mapSame = localReady && sameStamp(prepared?.source, stamp);
+  const canSkip =
+    !uncovered &&
+    prepared?.edges?.length &&
+    (mapSame || (!stamp && prepared?.source && localReady));
+
+  if (canSkip) {
+    console.log('🛣️ [Ruas] Mapa da região sem mudança e sem CTO fora da área. Arquivo mantido.');
     return;
   }
-  const why = !prepared?.edges?.length
-    ? 'arquivo ausente'
-    : uncovered
-      ? 'CTO fora da área'
-      : 'rua alterada';
-  console.log(`🛣️ [Ruas] Montando arquivo novo (${why}), ${boxes.length} área(s).`);
-  const ways = await downloadWays(boxes);
+
+  console.log(`🛣️ [Ruas] Montando arquivo novo (${reason}).`);
+  await fs.promises.mkdir(ruasDir(), { recursive: true });
+  if (!mapSame || !localReady) {
+    console.log('🛣️ [Ruas] Baixando o mapa da região em um arquivo único.');
+    await downloadPbf(pbfUrl(), pbfFile());
+  } else {
+    console.log('🛣️ [Ruas] Mapa da região já está no disco. Cortando em volta das CTOs.');
+  }
+
+  const ways = await waysNearCtos(pbfFile(), ctos);
   const built = graphFromWays(ways);
   if (!built.edges.length) {
     throw new Error('Nenhuma rua encontrada. Arquivo anterior permanece.');
@@ -418,6 +424,7 @@ async function refreshStreetGraph(reason) {
     version: 1,
     radiusMeters: RADIUS_METERS,
     builtAt: new Date().toISOString(),
+    source: stamp,
     ctos: ctos.map((c) => ({ lat: Number(c.lat.toFixed(5)), lng: Number(c.lng.toFixed(5)) })),
     nodes: built.nodes,
     edges: built.edges
