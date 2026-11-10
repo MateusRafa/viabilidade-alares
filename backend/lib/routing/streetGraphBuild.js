@@ -26,6 +26,11 @@ const HIGHWAY =
 const DEFAULT_PBF_URL =
   'https://download.geofabrik.de/south-america/brazil-latest.osm.pbf';
 
+const BRAZIL_MIRRORS = [
+  DEFAULT_PBF_URL,
+  'https://download.openstreetmap.fr/extracts/south-america/brazil-latest.osm.pbf'
+];
+
 const MAP_HEADERS = {
   'User-Agent': 'viabilidade-alares/1.0 (montagem do mapa de ruas)',
   Accept: '*/*'
@@ -66,6 +71,25 @@ function pbfFile() {
 
 function pbfUrl() {
   return (process.env.OSM_PBF_URL || DEFAULT_PBF_URL).trim();
+}
+
+function mapUrls() {
+  const chosen = pbfUrl();
+  const list = [chosen];
+  if (chosen === DEFAULT_PBF_URL) {
+    for (const url of BRAZIL_MIRRORS) {
+      if (!list.includes(url)) list.push(url);
+    }
+  }
+  return list;
+}
+
+function mapHost(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 export function streetGraphStatus() {
@@ -277,7 +301,8 @@ async function withMapRetry(label, fn) {
     } catch (err) {
       last = err;
       console.warn(`⚠️ [Ruas] ${label} tentativa ${attempt}/4: ${causeText(err)}`);
-      if (!isNetworkFailure(err) || attempt === 4) break;
+      const refused = /ECONNREFUSED/.test(causeText(err));
+      if (!isNetworkFailure(err) || refused || attempt === 4) break;
       await sleep(5000 * attempt);
     }
   }
@@ -496,10 +521,15 @@ async function refreshStreetGraph(reason) {
   const uncovered = hasCtoOutside(ctos, previous);
   const url = pbfUrl();
   let stamp = null;
-  try {
-    stamp = { ...(await remoteStamp(url)), url };
-  } catch (err) {
-    console.warn(`⚠️ [Ruas] Não deu para consultar a data do mapa: ${err.message}`);
+  let sourceUrl = null;
+  for (const candidate of mapUrls()) {
+    try {
+      stamp = { ...(await remoteStamp(candidate)), url, fetchedFrom: candidate };
+      sourceUrl = candidate;
+      break;
+    } catch (err) {
+      console.warn(`⚠️ [Ruas] ${mapHost(candidate)} indisponível: ${err.message}`);
+    }
   }
   const localReady = fs.existsSync(pbfFile());
   const urlSame = (prepared?.source?.url || '') === url;
@@ -518,8 +548,25 @@ async function refreshStreetGraph(reason) {
   console.log(`🛣️ [Ruas] Montando arquivo novo (${reason}).`);
   await fs.promises.mkdir(ruasDir(), { recursive: true });
   if (!mapSame || !localReady) {
-    console.log('🛣️ [Ruas] Baixando o mapa da região em um arquivo único.');
-    await downloadPbf(pbfUrl(), pbfFile());
+    const hosts = sourceUrl ? [sourceUrl, ...mapUrls().filter((item) => item !== sourceUrl)] : mapUrls();
+    let saved = false;
+    let lastErr = null;
+    for (const candidate of hosts) {
+      try {
+        if (hosts.length > 1 && candidate !== hosts[0]) {
+          await fs.promises.rm(`${pbfFile()}.part`, { force: true }).catch(() => {});
+        }
+        console.log(`🛣️ [Ruas] Baixando o mapa em ${mapHost(candidate)}.`);
+        await downloadPbf(candidate, pbfFile());
+        stamp = { ...(stamp || {}), url, fetchedFrom: candidate };
+        saved = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        console.warn(`⚠️ [Ruas] ${mapHost(candidate)} falhou: ${causeText(err)}`);
+      }
+    }
+    if (!saved) throw lastErr || new Error('Nenhum servidor do mapa aceitou a conexão');
   } else {
     console.log('🛣️ [Ruas] Mapa da região já está no disco. Cortando em volta das CTOs.');
   }
