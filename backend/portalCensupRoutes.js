@@ -38,6 +38,7 @@ import {
   atribuirPedidoNaEsteira
 } from './lib/portalCensup/filaEsteira.js';
 import { getFilaEspelho, setFilaEspelho } from './lib/portalCensup/filaEspelho.js';
+import { getZnunyFila, publishZnunyTickets } from './lib/portalCensup/znunyFila.js';
 import { getMotivosConfigUsuario, setMotivoUsuario } from './lib/portalCensup/motivosUsuario.js';
 import {
   getSharePointLinks,
@@ -331,6 +332,44 @@ export function registerPortalCensupRoutes(app) {
       res.json({ success: true, ...result });
     } catch (err) {
       console.error('❌ [PortalCENSUP] POST fila/registrar:', err);
+      sendError(res, err);
+    }
+  });
+
+  /**
+   * Znuny — Pedidos Disponíveis. Quem tem a página aberta publica a lista.
+   * A esteira atribui na mesma sequência da Agenda. Os outros Chromes só leem.
+   */
+  app.post('/api/portal-censup/fila/znuny', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      if (req.body?.syncEnabled === true && !getCensupSyncKick(usuario)) {
+        touchCensupSyncPresence(usuario, {
+          source: 'znuny',
+          badgeColor: req.body?.badgeColor
+        });
+      }
+      const tickets = Array.isArray(req.body?.tickets) ? req.body.tickets : [];
+      const result = publishZnunyTickets(tickets, usuario);
+      res.json({ success: true, ...result });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] POST fila/znuny:', err);
+      sendError(res, err);
+    }
+  });
+
+  app.get('/api/portal-censup/fila/znuny', async (req, res) => {
+    try {
+      const usuario = getUsuarioFromRequest(req);
+      if (!usuario) {
+        return res.status(401).json({ success: false, error: 'Usuário não autenticado' });
+      }
+      res.json({ success: true, ...getZnunyFila() });
+    } catch (err) {
+      console.error('❌ [PortalCENSUP] GET fila/znuny:', err);
       sendError(res, err);
     }
   });
