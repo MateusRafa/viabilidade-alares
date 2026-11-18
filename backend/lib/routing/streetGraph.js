@@ -35,9 +35,9 @@ function toLocal(lat, lng, lat0, lng0) {
   return [x, y];
 }
 
-function projectSegment(lat, lng, a, b) {
-  const [ax, ay] = toLocal(a[0], a[1], lat, lng);
-  const [bx, by] = toLocal(b[0], b[1], lat, lng);
+function projectSegment(lat, lng, aLat, aLng, bLat, bLng) {
+  const [ax, ay] = toLocal(aLat, aLng, lat, lng);
+  const [bx, by] = toLocal(bLat, bLng, lat, lng);
   const abx = bx - ax;
   const aby = by - ay;
   const len2 = abx * abx + aby * aby;
@@ -100,6 +100,137 @@ class MinHeap {
   }
 }
 
+const GRID_CELL = 0.0015;
+const GRID_I0 = 100000;
+const GRID_JSPAN = 400001;
+const GRID_J0 = 200000;
+
+function gridKey(i, j) {
+  return (i + GRID_I0) * GRID_JSPAN + (j + GRID_J0);
+}
+
+function fillCellKeys(lat1, lng1, lat2, lng2, cell, out) {
+  const steps = Math.max(1, Math.ceil(haversineMeters(lat1, lng1, lat2, lng2) / 120));
+  let n = 0;
+  for (let s = 0; s <= steps; s++) {
+    const t = s / steps;
+    const lat = lat1 + (lat2 - lat1) * t;
+    const lng = lng1 + (lng2 - lng1) * t;
+    const key = gridKey(Math.floor(lat / cell), Math.floor(lng / cell));
+    let dup = false;
+    for (let k = 0; k < n; k++) {
+      if (out[k] === key) {
+        dup = true;
+        break;
+      }
+    }
+    if (!dup) out[n++] = key;
+  }
+  return n;
+}
+
+function lowerBound(keys, key) {
+  let lo = 0;
+  let hi = keys.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (keys[mid] < key) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function upperBound(keys, key, lo) {
+  let hi = keys.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (keys[mid] <= key) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Troca milhões de listinhas por blocos contínuos.
+ * O arquivo no disco continua o mesmo. A rota lê estes blocos.
+ */
+function packGraph(coords, adj, edges) {
+  const n = coords.length;
+  const e = edges.length;
+  const lat = new Float64Array(n);
+  const lng = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    lat[i] = coords[i][0];
+    lng[i] = coords[i][1];
+  }
+
+  const edgeU = new Uint32Array(e);
+  const edgeV = new Uint32Array(e);
+  for (let i = 0; i < e; i++) {
+    edgeU[i] = edges[i][0];
+    edgeV[i] = edges[i][1];
+  }
+
+  const adjOff = new Uint32Array(n + 1);
+  for (let i = 0; i < n; i++) adjOff[i + 1] = adjOff[i] + adj[i].length;
+  const arcCount = adjOff[n];
+  const adjTo = new Uint32Array(arcCount);
+  const adjDist = new Float32Array(arcCount);
+  for (let i = 0; i < n; i++) {
+    const list = adj[i];
+    let c = adjOff[i];
+    for (let k = 0; k < list.length; k++) {
+      adjTo[c] = list[k][0];
+      adjDist[c] = list[k][1];
+      c += 1;
+    }
+  }
+
+  const cell = GRID_CELL;
+  const scratch = new Float64Array(32);
+  let gridCount = 0;
+  for (let i = 0; i < e; i++) {
+    gridCount += fillCellKeys(lat[edgeU[i]], lng[edgeU[i]], lat[edgeV[i]], lng[edgeV[i]], cell, scratch);
+  }
+  const rawKeys = new Float64Array(gridCount);
+  const rawEdges = new Uint32Array(gridCount);
+  let cursor = 0;
+  for (let i = 0; i < e; i++) {
+    const hit = fillCellKeys(lat[edgeU[i]], lng[edgeU[i]], lat[edgeV[i]], lng[edgeV[i]], cell, scratch);
+    for (let k = 0; k < hit; k++) {
+      rawKeys[cursor] = scratch[k];
+      rawEdges[cursor] = i;
+      cursor += 1;
+    }
+  }
+  const order = Array.from({ length: gridCount }, (_, i) => i);
+  order.sort((a, b) => (rawKeys[a] < rawKeys[b] ? -1 : rawKeys[a] > rawKeys[b] ? 1 : 0));
+  const gridKeys = new Float64Array(gridCount);
+  const gridEdges = new Uint32Array(gridCount);
+  for (let i = 0; i < gridCount; i++) {
+    const src = order[i];
+    gridKeys[i] = rawKeys[src];
+    gridEdges[i] = rawEdges[src];
+  }
+
+  return {
+    nodeCount: n,
+    edgeCount: e,
+    coords: { length: n },
+    edges: { length: e },
+    lat,
+    lng,
+    edgeU,
+    edgeV,
+    adjOff,
+    adjTo,
+    adjDist,
+    gridKeys,
+    gridEdges,
+    cell
+  };
+}
+
 /** Monta índices a partir do JSON salvo em disco. */
 export function prepareGraph(data) {
   const coords = data?.nodes || [];
@@ -119,46 +250,14 @@ export function prepareGraph(data) {
   if (stitched) {
     console.log(`🛣️ [Ruas] ${stitched} emendas entre trechos que estavam separados.`);
   }
-  const cell = 0.0015;
-  const grid = new Map();
-  for (let i = 0; i < edges.length; i++) {
-    const [a, b] = edges[i];
-    for (const key of cellsAlong(coords[a], coords[b], cell)) {
-      let bucket = grid.get(key);
-      if (!bucket) {
-        bucket = [];
-        grid.set(key, bucket);
-      }
-      bucket.push(i);
-    }
-  }
+  const packed = packGraph(coords, adj, edges);
   return {
-    coords,
-    adj,
-    edges,
-    grid,
-    cell,
+    ...packed,
     radiusMeters: data?.radiusMeters || RADIUS_METERS,
     builtAt: data?.builtAt || null,
     ctos: data?.ctos || [],
     source: data?.source || null
   };
-}
-
-function cellsAlong(a, b, cell) {
-  const keys = [];
-  const seen = new Set();
-  const steps = Math.max(1, Math.ceil(haversineMeters(a[0], a[1], b[0], b[1]) / 120));
-  for (let s = 0; s <= steps; s++) {
-    const t = s / steps;
-    const lat = a[0] + (b[0] - a[0]) * t;
-    const lng = a[1] + (b[1] - a[1]) * t;
-    const key = `${Math.floor(lat / cell)}:${Math.floor(lng / cell)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    keys.push(key);
-  }
-  return keys;
 }
 
 function stitchGaps(coords, adj, edges) {
@@ -201,17 +300,20 @@ function stitchGaps(coords, adj, edges) {
 }
 
 function snap(prep, lat, lng) {
-  const { cell, grid, edges, coords } = prep;
+  const { cell, gridKeys, gridEdges, edgeU, edgeV, lat: lats, lng: lngs } = prep;
   const i = Math.floor(lat / cell);
   const j = Math.floor(lng / cell);
   let best = null;
   for (let di = -2; di <= 2; di++) {
     for (let dj = -2; dj <= 2; dj++) {
-      const list = grid.get(`${i + di}:${j + dj}`);
-      if (!list) continue;
-      for (const ei of list) {
-        const [u, v] = edges[ei];
-        const hit = projectSegment(lat, lng, coords[u], coords[v]);
+      const key = gridKey(i + di, j + dj);
+      const start = lowerBound(gridKeys, key);
+      const end = upperBound(gridKeys, key, start);
+      for (let p = start; p < end; p++) {
+        const ei = gridEdges[p];
+        const u = edgeU[ei];
+        const v = edgeV[ei];
+        const hit = projectSegment(lat, lng, lats[u], lngs[u], lats[v], lngs[v]);
         if (!hit) continue;
         if (!best || hit.dist < best.dist) best = { ...hit, edge: ei, u, v };
       }
@@ -227,8 +329,7 @@ function trace(prep, parent, node) {
   const guard = new Set();
   while (cur !== undefined && !guard.has(cur)) {
     guard.add(cur);
-    const c = prep.coords[cur];
-    out.push({ lat: c[0], lng: c[1] });
+    out.push({ lat: prep.lat[cur], lng: prep.lng[cur] });
     cur = parent.get(cur);
   }
   out.reverse();
@@ -240,7 +341,7 @@ function trace(prep, parent, node) {
  * @returns {{ distanceMeters: number, path: {lat:number,lng:number}[] }}
  */
 export function routeOnGraph(prep, origin, destination) {
-  if (!prep || !prep.coords?.length || !prep.edges?.length) {
+  if (!prep || !prep.nodeCount || !prep.edgeCount) {
     throw new StreetRouteError('Arquivo de ruas ainda não está pronto', 'ROUTER_UNAVAILABLE', 503);
   }
   const oLat = Number(origin?.lat);
@@ -314,7 +415,11 @@ export function routeOnGraph(prep, origin, destination) {
     }
     expansions += 1;
     if (expansions > MAX_EXPANSIONS) break;
-    for (const [to, w] of prep.adj[node]) {
+    const from = prep.adjOff[node];
+    const toArc = prep.adjOff[node + 1];
+    for (let arc = from; arc < toArc; arc++) {
+      const to = prep.adjTo[arc];
+      const w = prep.adjDist[arc];
       const ng = g + w;
       if (ng > MAX_ROUTE_METERS || ng >= best) continue;
       if (ng >= (gScore.get(to) ?? Infinity)) continue;
