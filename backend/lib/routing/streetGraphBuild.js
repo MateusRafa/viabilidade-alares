@@ -8,14 +8,16 @@ import path from 'path';
 import http from 'http';
 import https from 'https';
 import dns from 'dns';
+import { spawnSync } from 'child_process';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
 
 dns.setDefaultResultOrder('ipv4first');
 import supabase, { isSupabaseAvailable } from '../../supabase.js';
 import { getActiveDatasetId } from '../ctoCoverageDatasets.js';
-import { RADIUS_METERS, graphFromWays, haversineMeters, prepareGraph } from './streetGraph.js';
+import { RADIUS_METERS, graphFromWays, haversineMeters, readPackedGraphFile } from './streetGraph.js';
 
 const require = createRequire(import.meta.url);
 const createOsmParser = require('osm-pbf-parser');
@@ -65,6 +67,10 @@ function ruasFile() {
   return path.join(ruasDir(), 'ruas.json');
 }
 
+function packFile() {
+  return path.join(ruasDir(), 'ruas.pack');
+}
+
 function pbfFile() {
   return path.join(ruasDir(), 'mapa-regiao.osm.pbf');
 }
@@ -111,25 +117,61 @@ export function streetGraphCoversCurrentMap() {
   return Boolean(prepared?.edges?.length) && (prepared?.source?.url || '') === pbfUrl();
 }
 
+function packScript() {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts', 'pack-ruas-compact.js');
+}
+
+/** Lê o JSON grande numa execução que termina, e deixa ruas.pack no disco. */
+function buildPackChild() {
+  const result = spawnSync(
+    process.execPath,
+    ['--max-old-space-size=4096', packScript()],
+    {
+      env: { ...process.env, DATA_DIR: dataDir || process.env.DATA_DIR || path.join(process.cwd(), 'data') },
+      stdio: 'inherit'
+    }
+  );
+  if (result.status !== 0) {
+    throw new Error(`Cópia compacta falhou (${result.status ?? 'sem saída'})`);
+  }
+}
+
+function loadServingGraph() {
+  const pack = packFile();
+  const json = ruasFile();
+  const packOk = fs.existsSync(pack);
+  const jsonOk = fs.existsSync(json);
+  const stale = packOk && jsonOk && fs.statSync(json).mtimeMs > fs.statSync(pack).mtimeMs + 1000;
+  if (!packOk || stale) {
+    if (!jsonOk) return null;
+    console.log('🛣️ [Ruas] Gravando a cópia compacta numa execução separada.');
+    buildPackChild();
+  }
+  if (!fs.existsSync(packFile())) return null;
+  try {
+    return readPackedGraphFile(packFile());
+  } catch (err) {
+    if (!jsonOk) throw err;
+    console.warn(`⚠️ [Ruas] Cópia compacta ilegível. Gravando de novo. ${err.message}`);
+    buildPackChild();
+    return readPackedGraphFile(packFile());
+  }
+}
+
 export function initStreetGraph(dir) {
   dataDir = dir || dataDir;
   try {
-    const file = ruasFile();
-    if (!fs.existsSync(file)) {
-      console.log('🛣️ [Ruas] Arquivo ainda não existe. As rotas de até 1 km usam o Google até a primeira montagem.');
+    prepared = loadServingGraph();
+    if (!prepared) {
+      console.log('🛣️ [Ruas] Cópia compacta ainda não existe. As rotas de até 1 km usam o Google.');
       return;
     }
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    prepared = prepareGraph(raw);
     console.log(
-      `🛣️ [Ruas] Arquivo no ar: ${prepared.coords.length} pontos, ${prepared.edges.length} trechos, raio ${RADIUS_METERS} m.`
+      `🛣️ [Ruas] Cópia compacta no ar: ${prepared.coords.length} pontos, ${prepared.edges.length} trechos, raio ${RADIUS_METERS} m.`
     );
-    if ((raw.source?.url || '') !== pbfUrl()) {
-      console.log('🛣️ [Ruas] Esse arquivo não cobre o mapa do Brasil. A montagem nova começa em seguida.');
-    }
   } catch (err) {
     prepared = null;
-    console.warn('⚠️ [Ruas] Não foi possível ler o arquivo:', err.message);
+    console.warn('⚠️ [Ruas] Não foi possível abrir a cópia compacta:', err.message);
   }
 }
 
@@ -586,7 +628,8 @@ async function refreshStreetGraph(reason) {
     edges: built.edges
   };
   await writeGraph(payload);
-  prepared = prepareGraph(payload);
+  buildPackChild();
+  prepared = readPackedGraphFile(packFile());
   networkTries = 0;
   console.log(
     `🛣️ [Ruas] Arquivo novo no ar. Anterior apagado. ${prepared.coords.length} pontos, ${prepared.edges.length} trechos.`
