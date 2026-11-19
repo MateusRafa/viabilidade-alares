@@ -1,7 +1,10 @@
 /**
  * Grafo de ruas em memória. A pesquisa calcula a rota aqui.
  * Até RADIUS_METERS o traçado é nosso. Acima disso a tela usa o Google.
+ * A cópia que fica no ar é a compacta (ruas.pack). O JSON grande só entra
+ * na execução que grava essa cópia e depois termina.
  */
+import fs from 'fs';
 
 export const RADIUS_METERS = 1000;
 const SNAP_METERS = 160;
@@ -257,6 +260,137 @@ export function prepareGraph(data) {
     builtAt: data?.builtAt || null,
     ctos: data?.ctos || [],
     source: data?.source || null
+  };
+}
+
+const PACK_MAGIC = 'RUAP';
+
+function readBlock(buf, pos) {
+  const len = buf.readUInt32LE(pos);
+  const end = pos + 4 + len;
+  if (end > buf.length) throw new Error('Cópia compacta incompleta');
+  return { text: buf.toString('utf8', pos + 4, end), next: end };
+}
+
+function align8(pos) {
+  return pos + ((8 - (pos % 8)) % 8);
+}
+
+function takeArray(buf, pos, count, bytesEach, Ctor) {
+  const start = align8(pos);
+  const bytes = count * bytesEach;
+  const end = start + bytes;
+  if (end > buf.length) throw new Error('Cópia compacta incompleta');
+  const arr = new Ctor(count);
+  if (bytes) Buffer.from(arr.buffer).set(buf.subarray(start, end));
+  return { arr, next: end };
+}
+
+/** Grava o grafo já com emendas. Quem chama é a execução que termina em seguida. */
+export function writePackedGraphFile(file, prep) {
+  const builtAt = Buffer.from(String(prep.builtAt || ''), 'utf8');
+  const source = Buffer.from(JSON.stringify(prep.source ?? null), 'utf8');
+  const ctos = Buffer.from(JSON.stringify(prep.ctos ?? []), 'utf8');
+  const header = Buffer.alloc(32);
+  header.write(PACK_MAGIC, 0, 'utf8');
+  header.writeUInt32LE(1, 4);
+  header.writeUInt32LE(prep.nodeCount, 8);
+  header.writeUInt32LE(prep.edgeCount, 12);
+  header.writeUInt32LE(prep.adjTo.length, 16);
+  header.writeUInt32LE(prep.gridKeys.length, 20);
+  header.writeDoubleLE(Number(prep.radiusMeters) || RADIUS_METERS, 24);
+  const fd = fs.openSync(file, 'w');
+  try {
+    fs.writeSync(fd, header);
+    let pos = header.length;
+    for (const part of [builtAt, source, ctos]) {
+      const len = Buffer.alloc(4);
+      len.writeUInt32LE(part.length);
+      fs.writeSync(fd, len);
+      fs.writeSync(fd, part);
+      pos += 4 + part.length;
+    }
+    const arrays = [
+      prep.lat,
+      prep.lng,
+      prep.edgeU,
+      prep.edgeV,
+      prep.adjOff,
+      prep.adjTo,
+      prep.adjDist,
+      prep.gridKeys,
+      prep.gridEdges
+    ];
+    for (const arr of arrays) {
+      const pad = (8 - (pos % 8)) % 8;
+      if (pad) {
+        fs.writeSync(fd, Buffer.alloc(pad));
+        pos += pad;
+      }
+      const bytes = Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength);
+      if (bytes.length) fs.writeSync(fd, bytes);
+      pos += bytes.length;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Lê a cópia compacta para a memória do processo que atende a pesquisa. */
+export function readPackedGraphFile(file) {
+  const buf = fs.readFileSync(file);
+  if (buf.length < 32 || buf.toString('utf8', 0, 4) !== PACK_MAGIC) {
+    throw new Error('Cópia compacta inválida');
+  }
+  if (buf.readUInt32LE(4) !== 1) throw new Error('Cópia compacta de outra versão');
+  const nodeCount = buf.readUInt32LE(8);
+  const edgeCount = buf.readUInt32LE(12);
+  const arcCount = buf.readUInt32LE(16);
+  const gridCount = buf.readUInt32LE(20);
+  const radiusMeters = buf.readDoubleLE(24);
+  let pos = 32;
+  const builtAt = readBlock(buf, pos);
+  pos = builtAt.next;
+  const source = readBlock(buf, pos);
+  pos = source.next;
+  const ctos = readBlock(buf, pos);
+  pos = ctos.next;
+  const lat = takeArray(buf, pos, nodeCount, 8, Float64Array);
+  pos = lat.next;
+  const lng = takeArray(buf, pos, nodeCount, 8, Float64Array);
+  pos = lng.next;
+  const edgeU = takeArray(buf, pos, edgeCount, 4, Uint32Array);
+  pos = edgeU.next;
+  const edgeV = takeArray(buf, pos, edgeCount, 4, Uint32Array);
+  pos = edgeV.next;
+  const adjOff = takeArray(buf, pos, nodeCount + 1, 4, Uint32Array);
+  pos = adjOff.next;
+  const adjTo = takeArray(buf, pos, arcCount, 4, Uint32Array);
+  pos = adjTo.next;
+  const adjDist = takeArray(buf, pos, arcCount, 4, Float32Array);
+  pos = adjDist.next;
+  const gridKeys = takeArray(buf, pos, gridCount, 8, Float64Array);
+  pos = gridKeys.next;
+  const gridEdges = takeArray(buf, pos, gridCount, 4, Uint32Array);
+  return {
+    nodeCount,
+    edgeCount,
+    coords: { length: nodeCount },
+    edges: { length: edgeCount },
+    lat: lat.arr,
+    lng: lng.arr,
+    edgeU: edgeU.arr,
+    edgeV: edgeV.arr,
+    adjOff: adjOff.arr,
+    adjTo: adjTo.arr,
+    adjDist: adjDist.arr,
+    gridKeys: gridKeys.arr,
+    gridEdges: gridEdges.arr,
+    cell: GRID_CELL,
+    radiusMeters,
+    builtAt: builtAt.text || null,
+    ctos: JSON.parse(ctos.text || '[]'),
+    source: JSON.parse(source.text || 'null')
   };
 }
 
